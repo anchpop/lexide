@@ -1,0 +1,21 @@
+[project]
+name = "lexide"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "accelerate>=1.10.1",
+    "bitsandbytes>=0.48.1",
+    "datasets>=4.2.0",
+    "jsonlines>=4.0.0",
+    "peft>=0.17.1",
+    "protobuf>=6.32.1",
+    "scikit-learn>=1.7.2",
+    "sentencepiece>=0.2.1",
+    "torch>=2.8.0",
+    "tqdm>=4.67.1",
+    "transformers>=4.57.0",
+    "trl>=0.23.1",
+    "wandb>=0.22.2",
+]

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/andrepopovitch/coding/ai-experiments/mistral.rs/mistralrs/src/**)",
+      "Read(//Users/andrepopovitch/coding/ai-experiments/mistral.rs/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

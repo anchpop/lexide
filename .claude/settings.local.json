@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(for:*)",
+      "Bash(done)",
+      "Bash(rm:*)",
+      "Bash(uv add:*)",
+      "Bash(chmod:*)",
+      "Bash(cargo check:*)",
+      "WebFetch(domain:ericlbuehler.github.io)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(cargo test:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": [],
+    "ask": [],
+    "additionalDirectories": [
+      "/Users/andrepopovitch/coding/ai-experiments/mistral.rs"
+    ]
+  }
+}

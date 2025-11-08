@@ -1,0 +1,72 @@
+resources:
+  any_of:
+    - cloud: lambda
+      accelerators: A100:1
+    - cloud: aws
+      accelerators: A100:1
+
+  # Alternative cheaper options:
+  # accelerators: L4:1      # Cheaper, still good for 270M model
+  # accelerators: A10G:1    # Mid-range option
+
+  # Disk size for model and data
+  disk_size: 100
+
+  # Auto-stop cluster after job finishes (saves money!)
+  autostop:
+    idle_minutes: 10
+    down: true  # Use autodown.
+
+# Sync local code and data to cluster
+workdir: .
+
+# Setup commands (run once when cluster is created)
+setup: |
+  # Install uv
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="$HOME/.cargo/bin:$PATH"
+
+  # Install dependencies
+  cd ~/sky_workdir
+  uv sync
+
+  # Login to HuggingFace (you'll need to set this token)
+  # Option 1: Set as environment variable in your shell before running sky launch
+  # Option 2: Uncomment and add your token here (NOT RECOMMENDED - use secrets)
+  # huggingface-cli login --token YOUR_TOKEN_HERE
+
+# Training command
+run: |
+  cd ~/sky_workdir
+  export CUDA_VISIBLE_DEVICES=0
+  export MODEL_NAME=${MODEL_NAME}
+  export WANDB_PROJECT="lexide"
+  export TOKENIZERS_PARALLELISM=false
+  export HF_TOKEN=${HF_TOKEN}
+  export WANDB_API_KEY=${WANDB_API_KEY}
+  export HF_USERNAME=${HF_USERNAME}
+
+
+  # Run training with uv
+  uv run accelerate launch \
+    --mixed_precision bf16 \
+    --num_processes 1 \
+    --num_machines 1 \
+    --dynamo_backend no \
+    src/train.py
+
+  # After training completes, you can add evaluation or other post-processing
+  # uv run python src/evaluate.py
+
+envs:
+  # models: gemma-3-270m-it, gemma-3-1b-it, gemma-3-4b-it, gemma-3-12b-it, gemma-3-27b-it
+  MODEL_NAME: gemma-3-270m-it
+  HF_USERNAME: anchpop  # Optional: auto-creates repo anchpop/lexide-MODEL_NAME on HuggingFace
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null
+
+file_mounts:
+  ~/.netrc: ~/.netrc # wandb
+

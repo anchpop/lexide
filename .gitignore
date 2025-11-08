@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# uv
+.venv/
+uv.lock
+
+# Model checkpoints and outputs
+checkpoints/
+final_model/
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.h5
+
+# Wandb
+wandb/
+*.wandb
+
+# Logs
+*.log
+logs/
+runs/
+
+# Data (if you want to exclude it)
+# data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Results
+evaluation_results.json
+outputs/
+results/
+
+# Cache
+.cache/
+*.cache
+__pycache__/
+.pytest_cache/
+
+# Environment variables
+.env
+.env.local
+
+# Temporary files
+*.tmp
+tmp/
+temp/
+target/
