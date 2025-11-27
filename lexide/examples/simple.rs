@@ -1,5 +1,5 @@
 use anyhow::Result;
-use lexide::{Language, Lexide, LexideConfig};
+use lexide::{Language, Lexide, LocalConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
         Lexide::from_server("https://anchpop--lexide-gemma-3-27b-vllm-serve.modal.run")?;
 
     #[cfg(feature = "local")]
-    let lexide = Lexide::from_pretrained(lexide::LexideConfig::default()).await?;
+    let lexide = Lexide::from_pretrained(LocalConfig::default()).await?;
 
     #[cfg(not(any(feature = "remote", feature = "local")))]
     panic!("Either `remote` or `local` feature must be enabled!");

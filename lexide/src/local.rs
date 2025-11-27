@@ -1,9 +1,10 @@
 /// Local inference implementation using mistral.rs
 use anyhow::{Context, Result};
 use mistralrs::{
-    Constraint, LoraModelBuilder, Model as MistralModel, RequestBuilder, TextMessageRole,
-    TextMessages, TokenSource, VisionModelBuilder,
+    Constraint, LoraModelBuilder, Model as MistralModel, NormalRequest, Request, RequestMessage,
+    ResponseOk, SamplingParams, TokenSource, VisionModelBuilder,
 };
+use tokio::sync::mpsc::channel;
 
 /// Configuration for local inference
 #[derive(Debug, Clone)]
@@ -73,22 +74,70 @@ impl LocalLexide {
         let max_tokens = 10 + 8 * sentence.len();
         let _constraint = create_constraint(sentence);
 
-        let messages = TextMessages::new().add_message(TextMessageRole::User, prompt);
-        let request = RequestBuilder::from(messages).set_sampler_max_len(max_tokens);
-        // Not actually using .set_constraint(constraint); yet because it makes the model way worse
+        // Use completions API with "1\t" prefix to prime the model for proper format
+        let primed_prompt = format!("{}1\t", prompt);
 
-        let response = self
-            .model
-            .send_chat_request(request)
+        let (tx, mut rx) = channel(1);
+
+        let request = Request::Normal(Box::new(NormalRequest {
+            id: 0,
+            messages: RequestMessage::Completion {
+                text: primed_prompt,
+                echo_prompt: false,
+                best_of: None,
+            },
+            sampling_params: SamplingParams {
+                temperature: Some(0.1),
+                top_k: None,
+                top_p: Some(0.9),
+                min_p: None,
+                top_n_logprobs: 0,
+                frequency_penalty: None,
+                presence_penalty: None,
+                repetition_penalty: None,
+                max_len: Some(max_tokens),
+                stop_toks: None,
+                logits_bias: None,
+                n_choices: 1,
+                dry_params: None,
+            },
+            response: tx,
+            return_logprobs: false,
+            is_streaming: false,
+            constraint: Constraint::None,
+            suffix: None,
+            tools: None,
+            tool_choice: None,
+            logits_processors: None,
+            return_raw_logits: false,
+            web_search_options: None,
+            model_id: None,
+        }));
+
+        self.model
+            .inner()
+            .get_sender(None)?
+            .send(request)
             .await
-            .context("Did not receive a valid response from the model")?;
+            .context("Failed to send request")?;
 
-        Ok(response
-            .choices
-            .first()
-            .and_then(|c| c.message.content.as_ref())
-            .map(|s| s.to_string())
-            .unwrap_or_default())
+        let response = rx
+            .recv()
+            .await
+            .context("Channel was erroneously closed!")?
+            .as_result()?;
+
+        let text = match response {
+            ResponseOk::CompletionDone(resp) => resp
+                .choices
+                .first()
+                .map(|c| c.text.clone())
+                .unwrap_or_default(),
+            _ => anyhow::bail!("Got unexpected response type"),
+        };
+
+        // Prepend "1\t" back to the response since we used it to prime the model
+        Ok(format!("1\t{}", text))
     }
 }
 

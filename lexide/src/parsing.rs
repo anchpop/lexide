@@ -41,18 +41,30 @@ pub fn parse_response(response: &str, sentence: &str) -> Result<Tokenization> {
         }
 
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 7 {
+
+        // Handle both formats: with and without leading index column
+        // Format 1 (with index): idx\ttoken\tws\tPOS\tlemma\tdep\thead
+        // Format 2 (without index): token\tws\tPOS\tlemma\tdep\thead
+        let (token_idx, ws_idx, pos_idx, lemma_idx, dep_idx, head_idx) = if parts.len() >= 7 {
+            (1, 2, 3, 4, 5, 6)
+        } else if parts.len() >= 6 {
+            (0, 1, 2, 3, 4, 5)
+        } else {
+            continue;
+        };
+
+        if parts.len() >= 6 {
             let text = Text {
-                text: parts[1].to_string(),
+                text: parts[token_idx].to_string(),
             };
             // Decode whitespace representation
-            let whitespace = match parts[2] {
+            let whitespace = match parts[ws_idx] {
                 "_" => " ".to_string(),
                 "nbsp" => "\u{00A0}".to_string(),
                 "narnbsp" => "\u{202F}".to_string(),
                 "\u{202F} " => "\u{202F}".to_string(), // TODO: remove this once model is updated
-                "  " => "\u{202F}".to_string(), // TODO: remove this once model is updated
-                "\u{a0} " => "\u{202F}".to_string(), // TODO: remove this once model is updated
+                "  " => "\u{202F}".to_string(),        // TODO: remove this once model is updated
+                "\u{a0} " => "\u{202F}".to_string(),   // TODO: remove this once model is updated
                 "thinsp" => "\u{2009}".to_string(),
                 "hairsp" => "\u{200A}".to_string(),
                 "zwsp" => "\u{200B}".to_string(),
@@ -60,12 +72,12 @@ pub fn parse_response(response: &str, sentence: &str) -> Result<Tokenization> {
                 "none" => "".to_string(),
                 other => other.to_string(), // Pass through unknown values
             };
-            let pos = parts[3].to_string();
+            let pos = parts[pos_idx].to_string();
             let lemma = Lemma {
-                lemma: parts[4].to_string(),
+                lemma: parts[lemma_idx].to_string(),
             };
-            let dep = parts[5].to_string();
-            let head = parts[6].parse::<i32>().unwrap_or(-1);
+            let dep = parts[dep_idx].to_string();
+            let head = parts[head_idx].parse::<i32>().unwrap_or(-1);
 
             let pos = serde_plain::from_str(&pos)
                 .context(format!("Failed to parse POS in line: {}", line))?;
@@ -92,7 +104,12 @@ pub fn parse_response(response: &str, sentence: &str) -> Result<Tokenization> {
 
             // Add it to the previous token's whitespace (if there is a previous token)
             if i > 0 {
-                tokens[i - 1].whitespace = " ".to_string();
+                // Append the space instead of overwriting existing whitespace
+                if !tokens[i - 1].whitespace.is_empty() {
+                    tokens[i - 1].whitespace.push(' ');
+                } else {
+                    tokens[i - 1].whitespace = " ".to_string();
+                }
             }
         }
     }

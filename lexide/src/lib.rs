@@ -119,7 +119,7 @@ impl Lexide {
     pub async fn from_pretrained(local_config: LocalConfig) -> Result<Self> {
         Ok(Self::Local(
             LocalLexide::from_pretrained(local_config).await?,
-        )?)
+        ))
     }
 
     #[cfg(feature = "remote")]

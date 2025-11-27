@@ -3,27 +3,21 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChatCompletionRequest {
+struct CompletionRequest {
     model: String,
-    messages: Vec<ChatMessage>,
+    prompt: String,
     temperature: f64,
     max_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<Choice>,
+struct CompletionResponse {
+    choices: Vec<CompletionChoice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Choice {
-    message: ChatMessage,
+struct CompletionChoice {
+    text: String,
 }
 
 /// Configuration for remote inference
@@ -71,19 +65,18 @@ impl RemoteClient {
     /// This is the only method that differs between local and remote implementations.
     /// It takes a pre-formatted prompt and returns the raw model response.
     pub async fn generate(&self, prompt: &str) -> Result<String> {
-        // Use OpenAI-compatible chat completions API
-        let request = ChatCompletionRequest {
+        // Use completions API with "1\t" prefix to prime the model for proper format
+        let primed_prompt = format!("{}1\t", prompt);
+
+        let request = CompletionRequest {
             model: "lexide-gemma-3-27b".to_string(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-            }],
+            prompt: primed_prompt,
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
         };
 
-        // Append /v1/chat/completions to the endpoint URL
-        let url = format!("{}/v1/chat/completions", self.config.endpoint_url.trim_end_matches('/'));
+        // Use /v1/completions endpoint (not chat/completions)
+        let url = format!("{}/v1/completions", self.config.endpoint_url.trim_end_matches('/'));
 
         let response = self
             .client
@@ -102,15 +95,18 @@ impl RemoteClient {
             anyhow::bail!("Remote endpoint returned error {}: {}", status, error_text);
         }
 
-        let chat_response: ChatCompletionResponse = response
+        let completion_response: CompletionResponse = response
             .json()
             .await
             .context("Failed to parse response from remote endpoint")?;
 
-        Ok(chat_response
+        // Prepend "1\t" back to the response since we used it to prime the model
+        let text = completion_response
             .choices
             .first()
-            .map(|c| c.message.content.clone())
-            .unwrap_or_default())
+            .map(|c| c.text.clone())
+            .unwrap_or_default();
+
+        Ok(format!("1\t{}", text))
     }
 }
