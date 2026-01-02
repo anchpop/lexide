@@ -191,7 +191,7 @@ def main():
         overwrite_output_dir=True,
         num_train_epochs=3,
         per_device_train_batch_size=4,
-        per_device_eval_batch_size=8,
+        per_device_eval_batch_size=2,
         gradient_accumulation_steps=4,
         gradient_checkpointing=True,
         warmup_steps=500,

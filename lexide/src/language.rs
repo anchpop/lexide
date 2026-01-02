@@ -9,6 +9,8 @@ pub enum Language {
     Spanish,
     Korean,
     German,
+    Italian,
+    Portuguese,
 }
 
 impl fmt::Display for Language {
@@ -19,6 +21,8 @@ impl fmt::Display for Language {
             Language::Spanish => write!(f, "Spanish"),
             Language::Korean => write!(f, "Korean"),
             Language::German => write!(f, "German"),
+            Language::Italian => write!(f, "Italian"),
+            Language::Portuguese => write!(f, "Portuguese"),
         }
     }
 }

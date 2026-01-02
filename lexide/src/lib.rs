@@ -137,6 +137,7 @@ impl Lexide {
     /// 1. Creating the prompt (shared logic)
     /// 2. Generating the response (local or remote)
     /// 3. Parsing the response (shared logic)
+    #[allow(unreachable_code)]
     pub async fn analyze(&self, sentence: &str, language: Language) -> Result<Tokenization> {
         // Step 1: Create prompt (shared between local and remote)
         let prompt = parsing::create_prompt(sentence, language);
