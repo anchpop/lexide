@@ -127,7 +127,7 @@ impl Lexide {
         Ok(Self::Remote(RemoteClient::new(RemoteConfig {
             endpoint_url: url.to_string(),
             max_tokens: 1024,
-            temperature: 0.1,
+            temperature: 0.0,
         })?))
     }
 

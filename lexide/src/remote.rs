@@ -37,7 +37,7 @@ impl Default for RemoteConfig {
             endpoint_url: std::env::var("LEXIDE_ENDPOINT_URL")
                 .unwrap_or_else(|_| "https://your-modal-endpoint.modal.run/inference".to_string()),
             max_tokens: 512,
-            temperature: 0.1,
+            temperature: 0.0,
         }
     }
 }
