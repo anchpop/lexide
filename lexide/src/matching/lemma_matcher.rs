@@ -19,11 +19,15 @@ use crate::matching::aho_corasick::{AhoCorasick, Match};
 ///
 /// let matches = matcher.find_all(&tokenization);
 /// ```
-pub struct LemmaMatcher {
-    automaton: AhoCorasick<Lemma>,
+/// The type parameter `K` is the key/label type for patterns (defaults to `String`).
+pub struct LemmaMatcher<K = String>
+where
+    K: Clone,
+{
+    automaton: AhoCorasick<Lemma, K>,
 }
 
-impl LemmaMatcher {
+impl<K: Clone> LemmaMatcher<K> {
     /// Creates a new lemma matcher from labeled string patterns.
     ///
     /// # Arguments
@@ -39,8 +43,8 @@ impl LemmaMatcher {
     /// ];
     /// let matcher = LemmaMatcher::new(&patterns);
     /// ```
-    pub fn new(patterns: &[(String, Vec<&str>)]) -> Self {
-        let lemma_patterns: Vec<(String, Vec<Lemma>)> = patterns
+    pub fn new(patterns: &[(K, Vec<&str>)]) -> Self {
+        let lemma_patterns: Vec<(K, Vec<Lemma>)> = patterns
             .iter()
             .map(|(label, pattern)| {
                 (
@@ -69,7 +73,7 @@ impl LemmaMatcher {
     /// # Returns
     ///
     /// A vector of matches, where each match contains the pattern index and token positions.
-    pub fn find_all<'a>(&'a self, tokenization: &'a Tokenization) -> Vec<Match<'a, Lemma>> {
+    pub fn find_all<'a>(&'a self, tokenization: &'a Tokenization) -> Vec<Match<'a, Lemma, K>> {
         let lemma_sequence: Vec<Lemma> = tokenization
             .tokens
             .iter()

@@ -19,11 +19,15 @@ use crate::matching::aho_corasick::{AhoCorasick, Match};
 ///
 /// let matches = matcher.find_all(&tokenization);
 /// ```
-pub struct TextMatcher {
-    automaton: AhoCorasick<Text>,
+/// The type parameter `K` is the key/label type for patterns (defaults to `String`).
+pub struct TextMatcher<K = String>
+where
+    K: Clone,
+{
+    automaton: AhoCorasick<Text, K>,
 }
 
-impl TextMatcher {
+impl<K: Clone> TextMatcher<K> {
     /// Creates a new text matcher from labeled string patterns.
     ///
     /// # Arguments
@@ -39,8 +43,8 @@ impl TextMatcher {
     /// ];
     /// let matcher = TextMatcher::new(&patterns);
     /// ```
-    pub fn new(patterns: &[(String, Vec<&str>)]) -> Self {
-        let text_patterns: Vec<(String, Vec<Text>)> = patterns
+    pub fn new(patterns: &[(K, Vec<&str>)]) -> Self {
+        let text_patterns: Vec<(K, Vec<Text>)> = patterns
             .iter()
             .map(|(label, pattern)| {
                 (
@@ -69,7 +73,7 @@ impl TextMatcher {
     /// # Returns
     ///
     /// A vector of matches, where each match contains the pattern index and token positions.
-    pub fn find_all<'a>(&'a self, tokenization: &'a Tokenization) -> Vec<Match<'a, Text>> {
+    pub fn find_all<'a>(&'a self, tokenization: &'a Tokenization) -> Vec<Match<'a, Text, K>> {
         let text_sequence: Vec<Text> = tokenization
             .tokens
             .iter()

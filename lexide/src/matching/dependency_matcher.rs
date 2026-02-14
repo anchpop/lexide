@@ -10,14 +10,16 @@ pub struct TreeNode {
 }
 
 /// A match found by the dependency matcher.
+///
+/// The type parameter `K` is the key/label type for patterns (defaults to `String`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DependencyMatch<'a> {
+pub struct DependencyMatch<'a, K = String> {
     /// Index of the pattern that matched
     pub pattern_index: usize,
     /// Reference to the tree node that matched
     pub matched_node: &'a TreeNode,
     /// Matched label
-    pub matched_label: String,
+    pub matched_label: K,
 }
 
 /// A pattern matcher that operates on dependency tree structures.
@@ -50,9 +52,13 @@ pub struct DependencyMatch<'a> {
 ///              match_result.matched_node.token.lemma.lemma);
 /// }
 /// ```
+/// The type parameter `K` is the key/label type for patterns (defaults to `String`).
 #[derive(Debug, Clone)]
-pub struct DependencyMatcher {
-    patterns: Vec<(String, TreeNode)>,
+pub struct DependencyMatcher<K = String>
+where
+    K: Clone,
+{
+    patterns: Vec<(K, TreeNode)>,
     root_index: HashMap<String, Vec<usize>>,
 }
 
@@ -72,7 +78,7 @@ impl TryFrom<Tokenization> for TreeNode {
     }
 }
 
-impl DependencyMatcher {
+impl<K: Clone> DependencyMatcher<K> {
     /// Creates a new dependency matcher from tree patterns.
     ///
     /// # Arguments
@@ -85,7 +91,7 @@ impl DependencyMatcher {
     /// let patterns = vec![love_pattern, run_pattern];
     /// let matcher = DependencyMatcher::new(&patterns);
     /// ```
-    pub fn new(patterns: &[(String, TreeNode)]) -> Self {
+    pub fn new(patterns: &[(K, TreeNode)]) -> Self {
         // Build index: lemma -> pattern indices that start with this lemma
         let mut root_index: HashMap<String, Vec<usize>> = HashMap::new();
         for (idx, pattern) in patterns.iter().enumerate() {
@@ -110,7 +116,7 @@ impl DependencyMatcher {
     /// # Returns
     ///
     /// A vector of matches, where each match contains the pattern index and matched node.
-    pub fn find_all<'a>(&'a self, tree: &'a TreeNode) -> Vec<DependencyMatch<'a>> {
+    pub fn find_all<'a>(&'a self, tree: &'a TreeNode) -> Vec<DependencyMatch<'a, K>> {
         let mut matches = Vec::new();
         self.traverse_and_match(tree, &mut matches);
         matches
@@ -140,7 +146,7 @@ impl DependencyMatcher {
     fn traverse_and_match<'a>(
         &'a self,
         node: &'a TreeNode,
-        matches: &mut Vec<DependencyMatch<'a>>,
+        matches: &mut Vec<DependencyMatch<'a, K>>,
     ) {
         let mut visited = HashSet::new();
         self.traverse_and_match_impl(node, matches, &mut visited);
@@ -149,7 +155,7 @@ impl DependencyMatcher {
     fn traverse_and_match_impl<'a>(
         &'a self,
         node: &'a TreeNode,
-        matches: &mut Vec<DependencyMatch<'a>>,
+        matches: &mut Vec<DependencyMatch<'a, K>>,
         visited: &mut HashSet<*const TreeNode>,
     ) {
         // Use pointer address to detect cycles

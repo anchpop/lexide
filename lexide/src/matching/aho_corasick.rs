@@ -33,19 +33,24 @@ where
 ///
 /// This structure can match multiple patterns simultaneously against a sequence,
 /// finding all occurrences of any pattern in linear time.
-pub struct AhoCorasick<T>
+///
+/// The type parameter `K` is the key/label type for patterns (defaults to `String`).
+pub struct AhoCorasick<T, K = String>
 where
     T: Eq + std::hash::Hash + Clone,
+    K: Clone,
 {
     /// The trie nodes
     nodes: Vec<TrieNode<T>>,
     /// The patterns being matched (stored for reference)
-    patterns: Vec<(String, Vec<T>)>,
+    patterns: Vec<(K, Vec<T>)>,
 }
 
 /// A match found by the Aho-Corasick automaton.
+///
+/// The type parameter `K` is the key/label type for patterns (defaults to `String`).
 #[derive(Clone, PartialEq, Eq)]
-pub struct Match<'a, T> {
+pub struct Match<'a, T, K = String> {
     /// Index of the pattern that matched
     pub pattern_index: usize,
     /// End position of the match in the searched sequence (exclusive)
@@ -55,10 +60,10 @@ pub struct Match<'a, T> {
     /// Reference to the pattern that matched
     pub pattern: &'a [T],
     /// Matched label
-    pub matched_label: String,
+    pub matched_label: K,
 }
 
-impl<T: std::fmt::Display> std::fmt::Debug for Match<'_, T> {
+impl<T: std::fmt::Display, K> std::fmt::Debug for Match<'_, T, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Match {{ ")?;
         for (i, item) in self.pattern.iter().enumerate() {
@@ -72,9 +77,10 @@ impl<T: std::fmt::Display> std::fmt::Debug for Match<'_, T> {
     }
 }
 
-impl<T> AhoCorasick<T>
+impl<T, K> AhoCorasick<T, K>
 where
     T: Eq + std::hash::Hash + Clone,
+    K: Clone,
 {
     /// Creates a new Aho-Corasick automaton from a collection of labeled patterns.
     ///
@@ -92,7 +98,7 @@ where
     /// ];
     /// let ac = AhoCorasick::new(&patterns);
     /// ```
-    pub fn new(patterns: &[(String, Vec<T>)]) -> Self {
+    pub fn new(patterns: &[(K, Vec<T>)]) -> Self {
         let mut ac = AhoCorasick {
             nodes: vec![TrieNode::new()],
             patterns: patterns.to_vec(),
@@ -108,7 +114,7 @@ where
     }
 
     /// Builds the trie structure from the patterns.
-    fn build_trie(&mut self, patterns: &[(String, Vec<T>)]) {
+    fn build_trie(&mut self, patterns: &[(K, Vec<T>)]) {
         for (pattern_idx, (_label, pattern)) in patterns.iter().enumerate() {
             let mut current_node = 0;
 
@@ -194,7 +200,7 @@ where
     /// let text = vec!['u', 's', 'h', 'e', 'r', 's'];
     /// let matches: Vec<Match> = ac.find_all(&text).collect();
     /// ```
-    pub fn find_all<'a, 'b>(&'a self, sequence: &'b [T]) -> impl Iterator<Item = Match<'a, T>> + 'a {
+    pub fn find_all<'a, 'b>(&'a self, sequence: &'b [T]) -> impl Iterator<Item = Match<'a, T, K>> + 'a {
         let mut current_node = 0;
         let mut matches = Vec::new();
 
