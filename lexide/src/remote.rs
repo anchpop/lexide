@@ -31,7 +31,7 @@ pub struct RemoteConfig {
     pub temperature: f64,
     /// Maximum idle connections per host (default: 256)
     pub pool_max_idle_per_host: usize,
-    /// Idle connection timeout in seconds (default: 90)
+    /// Idle connection timeout in seconds (default: 300)
     pub pool_idle_timeout_secs: u64,
 }
 
@@ -43,7 +43,7 @@ impl Default for RemoteConfig {
             max_tokens: 512,
             temperature: 0.0,
             pool_max_idle_per_host: 256,
-            pool_idle_timeout_secs: 90,
+            pool_idle_timeout_secs: 300,
         }
     }
 }
