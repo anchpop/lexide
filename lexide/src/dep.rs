@@ -1,7 +1,9 @@
 use std::fmt;
 
 /// Dependency relation types (Universal Dependencies)
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Ord, PartialOrd, Copy)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Ord, PartialOrd, Copy,
+)]
 pub enum DependencyRelation {
     #[serde(rename = "acl")]
     Acl,

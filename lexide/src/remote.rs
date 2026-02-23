@@ -29,6 +29,10 @@ pub struct RemoteConfig {
     pub max_tokens: usize,
     /// Temperature for sampling
     pub temperature: f64,
+    /// Maximum idle connections per host (default: 256)
+    pub pool_max_idle_per_host: usize,
+    /// Idle connection timeout in seconds (default: 90)
+    pub pool_idle_timeout_secs: u64,
 }
 
 impl Default for RemoteConfig {
@@ -38,6 +42,8 @@ impl Default for RemoteConfig {
                 .unwrap_or_else(|_| "https://your-modal-endpoint.modal.run/inference".to_string()),
             max_tokens: 512,
             temperature: 0.0,
+            pool_max_idle_per_host: 256,
+            pool_idle_timeout_secs: 90,
         }
     }
 }
@@ -49,11 +55,15 @@ pub struct RemoteClient {
 }
 
 impl RemoteClient {
-    /// Create a new remote client
+    /// Create a new remote client with connection pooling
     pub fn new(config: RemoteConfig) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(600)) // 10 minutes for cold starts
             .connect_timeout(std::time::Duration::from_secs(30))
+            .pool_max_idle_per_host(config.pool_max_idle_per_host)
+            .pool_idle_timeout(std::time::Duration::from_secs(
+                config.pool_idle_timeout_secs,
+            ))
             .build()
             .context("Failed to create HTTP client")?;
 
@@ -76,7 +86,10 @@ impl RemoteClient {
         };
 
         // Use /v1/completions endpoint (not chat/completions)
-        let url = format!("{}/v1/completions", self.config.endpoint_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/completions",
+            self.config.endpoint_url.trim_end_matches('/')
+        );
 
         let response = self
             .client

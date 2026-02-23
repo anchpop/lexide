@@ -1,5 +1,5 @@
-use crate::{Text, Tokenization};
 use crate::matching::aho_corasick::{AhoCorasick, Match};
+use crate::{Text, Tokenization};
 
 /// A pattern matcher that operates on raw text tokens.
 ///
@@ -54,7 +54,7 @@ impl<K: Clone> TextMatcher<K> {
                         .map(|&s| Text {
                             text: s.to_string(),
                         })
-                        .collect()
+                        .collect(),
                 )
             })
             .collect();

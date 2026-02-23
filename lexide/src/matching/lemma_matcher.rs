@@ -1,5 +1,5 @@
-use crate::{Lemma, Tokenization};
 use crate::matching::aho_corasick::{AhoCorasick, Match};
+use crate::{Lemma, Tokenization};
 
 /// A pattern matcher that operates on lemmatized tokens.
 ///
@@ -54,7 +54,7 @@ impl<K: Clone> LemmaMatcher<K> {
                         .map(|&s| Lemma {
                             lemma: s.to_string(),
                         })
-                        .collect()
+                        .collect(),
                 )
             })
             .collect();
@@ -110,4 +110,3 @@ impl<K: Clone> LemmaMatcher<K> {
         self.automaton.pattern_count()
     }
 }
-

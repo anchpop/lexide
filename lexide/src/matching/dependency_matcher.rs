@@ -366,7 +366,7 @@ fn build_tree_node_impl(
         if child_token.head as usize == token_idx + 1 && idx != token_idx {
             // Recursively build the child node
             let child_node = build_tree_node_impl(tokens, idx, visited);
-            children.push((child_token.dep.clone(), child_node));
+            children.push((child_token.dep, child_node));
         }
     }
 
@@ -2363,82 +2363,122 @@ mod tests {
         let tokenization = Tokenization {
             tokens: vec![
                 Token {
-                    text: Text { text: "qu'".to_string() },
+                    text: Text {
+                        text: "qu'".to_string(),
+                    },
                     whitespace: "".to_string(),
                     pos: PartOfSpeech::Pron,
-                    lemma: Lemma { lemma: "que".to_string() },
+                    lemma: Lemma {
+                        lemma: "que".to_string(),
+                    },
                     dep: DependencyRelation::Obj,
                     head: 8,
                 },
                 Token {
-                    text: Text { text: "est".to_string() },
+                    text: Text {
+                        text: "est".to_string(),
+                    },
                     whitespace: "".to_string(),
                     pos: PartOfSpeech::Aux,
-                    lemma: Lemma { lemma: "être".to_string() },
+                    lemma: Lemma {
+                        lemma: "être".to_string(),
+                    },
                     dep: DependencyRelation::Aux,
                     head: 8,
                 },
                 Token {
-                    text: Text { text: "-".to_string() },
+                    text: Text {
+                        text: "-".to_string(),
+                    },
                     whitespace: "".to_string(),
                     pos: PartOfSpeech::Punct,
-                    lemma: Lemma { lemma: "-".to_string() },
+                    lemma: Lemma {
+                        lemma: "-".to_string(),
+                    },
                     dep: DependencyRelation::Punct,
                     head: 2,
                 },
                 Token {
-                    text: Text { text: "ce".to_string() },
+                    text: Text {
+                        text: "ce".to_string(),
+                    },
                     whitespace: " ".to_string(),
                     pos: PartOfSpeech::Pron,
-                    lemma: Lemma { lemma: "ce".to_string() },
+                    lemma: Lemma {
+                        lemma: "ce".to_string(),
+                    },
                     dep: DependencyRelation::Expl,
                     head: 2,
                 },
                 Token {
-                    text: Text { text: "qu'".to_string() },
+                    text: Text {
+                        text: "qu'".to_string(),
+                    },
                     whitespace: "".to_string(),
                     pos: PartOfSpeech::Sconj,
-                    lemma: Lemma { lemma: "que".to_string() },
+                    lemma: Lemma {
+                        lemma: "que".to_string(),
+                    },
                     dep: DependencyRelation::Mark,
                     head: 8,
                 },
                 Token {
-                    text: Text { text: "il".to_string() },
+                    text: Text {
+                        text: "il".to_string(),
+                    },
                     whitespace: " ".to_string(),
                     pos: PartOfSpeech::Pron,
-                    lemma: Lemma { lemma: "il".to_string() },
+                    lemma: Lemma {
+                        lemma: "il".to_string(),
+                    },
                     dep: DependencyRelation::ExplImpers,
                     head: 8,
                 },
                 Token {
-                    text: Text { text: "ne".to_string() },
+                    text: Text {
+                        text: "ne".to_string(),
+                    },
                     whitespace: " ".to_string(),
                     pos: PartOfSpeech::Part,
-                    lemma: Lemma { lemma: "ne".to_string() },
+                    lemma: Lemma {
+                        lemma: "ne".to_string(),
+                    },
                     dep: DependencyRelation::Advmod,
                     head: 8,
                 },
                 Token {
-                    text: Text { text: "faut".to_string() },
+                    text: Text {
+                        text: "faut".to_string(),
+                    },
                     whitespace: " ".to_string(),
                     pos: PartOfSpeech::Aux,
-                    lemma: Lemma { lemma: "falloir".to_string() },
+                    lemma: Lemma {
+                        lemma: "falloir".to_string(),
+                    },
                     dep: DependencyRelation::Root,
                     head: 0,
                 },
                 Token {
-                    text: Text { text: "pas".to_string() },
+                    text: Text {
+                        text: "pas".to_string(),
+                    },
                     whitespace: " ".to_string(),
                     pos: PartOfSpeech::Adv,
-                    lemma: Lemma { lemma: "pas".to_string() },
+                    lemma: Lemma {
+                        lemma: "pas".to_string(),
+                    },
                     dep: DependencyRelation::Advmod,
                     head: 8,
                 },
                 Token {
-                    text: Text { text: "entendre".to_string() },
+                    text: Text {
+                        text: "entendre".to_string(),
+                    },
                     whitespace: "".to_string(),
                     pos: PartOfSpeech::Verb,
-                    lemma: Lemma { lemma: "entendre".to_string() },
+                    lemma: Lemma {
+                        lemma: "entendre".to_string(),
+                    },
                     dep: DependencyRelation::Xcomp,
                     head: 8,
                 },
@@ -2448,13 +2488,20 @@ mod tests {
         let tree: TreeNode = tokenization.try_into().unwrap();
 
         // Root should be "faut" (falloir), NOT the hyphen!
-        assert_eq!(tree.token.text.text, "faut", "Root token should be 'faut', not '-'");
+        assert_eq!(
+            tree.token.text.text, "faut",
+            "Root token should be 'faut', not '-'"
+        );
         assert_eq!(tree.token.lemma.lemma, "falloir");
         assert_eq!(tree.token.dep, DependencyRelation::Root);
 
         // The root should have multiple children (all tokens with head:8)
         // Children should include: qu', est, qu', il, ne, pas, entendre
-        assert!(tree.children.len() >= 7, "Root should have at least 7 children, got {}", tree.children.len());
+        assert!(
+            tree.children.len() >= 7,
+            "Root should have at least 7 children, got {}",
+            tree.children.len()
+        );
 
         // Verify that the hyphen is NOT the root (it should be a child of "est")
         let has_hyphen_as_root = tree.token.text.text == "-";

@@ -128,6 +128,7 @@ impl Lexide {
             endpoint_url: url.to_string(),
             max_tokens: 1024,
             temperature: 0.0,
+            ..Default::default()
         })?))
     }
 

@@ -140,17 +140,11 @@ fn normalize_unicode(s: &str) -> String {
         .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
         .collect::<String>()
         // Normalize various Unicode punctuation and whitespace characters
-        .replace('\u{2019}', "'") // Right single quotation mark
-        .replace('\u{2018}', "'") // Left single quotation mark
-        .replace('\u{201C}', "\"") // Left double quotation mark
-        .replace('\u{201D}', "\"") // Right double quotation mark
-        .replace('\u{2013}', "-") // En dash
-        .replace('\u{2014}', "-") // Em dash
+        .replace(['\u{2019}', '\u{2018}'], "'") // Left single quotation mark
+        .replace(['\u{201C}', '\u{201D}'], "\"") // Right double quotation mark
+        .replace(['\u{2013}', '\u{2014}'], "-") // Em dash
         .replace('\u{2026}', "...") // Horizontal ellipsis
-        .replace('\u{00A0}', " ") // Non-breaking space
-        .replace('\u{202F}', " ") // Narrow non-breaking space
-        .replace('\u{2009}', " ") // Thin space
-        .replace('\u{200A}', " ") // Hair space
+        .replace(['\u{00A0}', '\u{202F}', '\u{2009}', '\u{200A}'], " ") // Hair space
         .replace('\u{200B}', "") // Zero-width space
         .replace('\u{3000}', " ") // Ideographic space
 }
@@ -181,7 +175,7 @@ fn fix_reconstruction(tokens: &mut Vec<Token>, sentence: &str) -> bool {
             tokens.remove(last_idx);
             return true;
         }
-        if reconstructed_without_last_token.trim_end_matches(&[' ', '\u{202F}']) == sentence {
+        if reconstructed_without_last_token.trim_end_matches([' ', '\u{202F}']) == sentence {
             tokens.remove(last_idx);
             tokens[last_idx - 1].whitespace = "".to_string();
             return true;

@@ -61,10 +61,7 @@ async fn main() -> Result<()> {
         .map(async |sentence| {
             let result: lexide::Tokenization = {
                 // Analyze a sentence
-                lexide
-                    .analyze(sentence, Language::English)
-                    .await
-                    .unwrap()
+                lexide.analyze(sentence, Language::English).await.unwrap()
             };
 
             println!("Tokenization: {:?}", result);
@@ -74,7 +71,11 @@ async fn main() -> Result<()> {
         .await;
 
     let duration = start.elapsed();
-    println!("Analysis complete! (took {:.2?}) ({:.2} sentences/s)", duration, sentences.len() as f64 / duration.as_secs_f64());
+    println!(
+        "Analysis complete! (took {:.2?}) ({:.2} sentences/s)",
+        duration,
+        sentences.len() as f64 / duration.as_secs_f64()
+    );
 
     Ok(())
 }

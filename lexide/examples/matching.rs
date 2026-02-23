@@ -10,8 +10,7 @@ async fn main() -> Result<()> {
     }
 
     #[cfg(feature = "remote")]
-    let lexide =
-        Lexide::from_server("https://anchpop--lexide-gemma-3-27b-vllm-serve.modal.run")?;
+    let lexide = Lexide::from_server("https://anchpop--lexide-gemma-3-27b-vllm-serve.modal.run")?;
 
     #[cfg(feature = "local")]
     let lexide = Lexide::from_pretrained(lexide::LocalConfig::default()).await?;
@@ -28,7 +27,7 @@ async fn main() -> Result<()> {
     // TextMatcher - exact text
     let text_matcher = TextMatcher::new(&[
         ("cats_are".to_string(), vec!["cats", "are"]),
-        ("the_cats".to_string(), vec!["The", "cats"])
+        ("the_cats".to_string(), vec!["The", "cats"]),
     ]);
     let text_matches = text_matcher.find_all(&tokenization);
     println!("Text matches: {:?}", text_matches);
@@ -36,13 +35,14 @@ async fn main() -> Result<()> {
     // LemmaMatcher - matches lemmas (ignores inflection)
     let lemma_matcher = LemmaMatcher::new(&[
         ("cat_be".to_string(), vec!["cat", "be"]),
-        ("cat_sleep".to_string(), vec!["cat", "sleep"])
+        ("cat_sleep".to_string(), vec!["cat", "sleep"]),
     ]);
     let lemma_matches = lemma_matcher.find_all(&tokenization);
     println!("Lemma matches: {:?}", lemma_matches);
 
     // Quick existence check
-    let contains_cat = LemmaMatcher::new(&[("cat".to_string(), vec!["cat"])]).contains(&tokenization);
+    let contains_cat =
+        LemmaMatcher::new(&[("cat".to_string(), vec!["cat"])]).contains(&tokenization);
     println!("Contains 'cat': {}", contains_cat);
 
     println!("\n=== Dependency Tree Matching ===\n");
@@ -72,7 +72,10 @@ async fn main() -> Result<()> {
         for m in &matches {
             println!(
                 "  Pattern '{}' (index {}) matched at node: '{}' (lemma: '{}')",
-                m.matched_label, m.pattern_index, m.matched_node.token.text.text, m.matched_node.token.lemma.lemma
+                m.matched_label,
+                m.pattern_index,
+                m.matched_node.token.text.text,
+                m.matched_node.token.lemma.lemma
             );
         }
     } else {
@@ -99,7 +102,10 @@ async fn main() -> Result<()> {
         for m in &cat_matches {
             println!(
                 "  Pattern '{}' (index {}) matched at node: '{}' (lemma: '{}')",
-                m.matched_label, m.pattern_index, m.matched_node.token.text.text, m.matched_node.token.lemma.lemma
+                m.matched_label,
+                m.pattern_index,
+                m.matched_node.token.text.text,
+                m.matched_node.token.lemma.lemma
             );
         }
     } else {
@@ -125,7 +131,10 @@ async fn main() -> Result<()> {
         for m in &no_matches {
             println!(
                 "  Pattern '{}' (index {}) matched at node: '{}' (lemma: '{}')",
-                m.matched_label, m.pattern_index, m.matched_node.token.text.text, m.matched_node.token.lemma.lemma
+                m.matched_label,
+                m.pattern_index,
+                m.matched_node.token.text.text,
+                m.matched_node.token.lemma.lemma
             );
         }
     } else {

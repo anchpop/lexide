@@ -200,7 +200,7 @@ where
     /// let text = vec!['u', 's', 'h', 'e', 'r', 's'];
     /// let matches: Vec<Match> = ac.find_all(&text).collect();
     /// ```
-    pub fn find_all<'a, 'b>(&'a self, sequence: &'b [T]) -> impl Iterator<Item = Match<'a, T, K>> + 'a {
+    pub fn find_all<'a>(&'a self, sequence: &[T]) -> impl Iterator<Item = Match<'a, T, K>> + 'a {
         let mut current_node = 0;
         let mut matches = Vec::new();
 
@@ -301,18 +301,27 @@ mod tests {
         assert_eq!(matches.len(), 3);
 
         // "she" at position 1-4
-        assert!(matches.iter().any(|m| m.pattern_index == 1 && m.start == 1 && m.end == 4 && m.matched_label == "she"));
+        assert!(matches.iter().any(|m| m.pattern_index == 1
+            && m.start == 1
+            && m.end == 4
+            && m.matched_label == "she"));
         // "he" at position 2-4
-        assert!(matches.iter().any(|m| m.pattern_index == 0 && m.start == 2 && m.end == 4 && m.matched_label == "he"));
+        assert!(matches.iter().any(|m| m.pattern_index == 0
+            && m.start == 2
+            && m.end == 4
+            && m.matched_label == "he"));
         // "hers" at position 2-6
-        assert!(matches.iter().any(|m| m.pattern_index == 3 && m.start == 2 && m.end == 6 && m.matched_label == "hers"));
+        assert!(matches.iter().any(|m| m.pattern_index == 3
+            && m.start == 2
+            && m.end == 6
+            && m.matched_label == "hers"));
     }
 
     #[test]
     fn test_contains() {
         let patterns = vec![
             ("he".to_string(), vec!['h', 'e']),
-            ("hello".to_string(), vec!['l', 'l', 'o'])
+            ("hello".to_string(), vec!['l', 'l', 'o']),
         ];
         let ac = AhoCorasick::new(&patterns);
 
@@ -326,7 +335,7 @@ mod tests {
         let patterns = vec![
             ("seq1".to_string(), vec![1, 2, 3]),
             ("seq2".to_string(), vec![2, 3, 4]),
-            ("seq3".to_string(), vec![3, 4])
+            ("seq3".to_string(), vec![3, 4]),
         ];
         let ac = AhoCorasick::new(&patterns);
 
@@ -343,7 +352,7 @@ mod tests {
     fn test_overlapping_patterns() {
         let patterns = vec![
             ("aa".to_string(), vec!['a', 'a']),
-            ("aaa".to_string(), vec!['a', 'a', 'a'])
+            ("aaa".to_string(), vec!['a', 'a', 'a']),
         ];
         let ac = AhoCorasick::new(&patterns);
 

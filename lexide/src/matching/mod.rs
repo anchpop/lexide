@@ -4,13 +4,13 @@
 //! using either raw text or lemmatized forms.
 
 mod aho_corasick;
+mod dependency_matcher;
 mod lemma_matcher;
 mod text_matcher;
-mod dependency_matcher;
 
+pub use dependency_matcher::{DependencyMatch, DependencyMatcher, TreeNode};
 pub use lemma_matcher::LemmaMatcher;
 pub use text_matcher::TextMatcher;
-pub use dependency_matcher::{DependencyMatcher, DependencyMatch, TreeNode};
 
 #[cfg(test)]
 mod tests {
@@ -129,7 +129,7 @@ mod tests {
     fn test_lemma_matcher_multiple_patterns() {
         let patterns = vec![
             ("the_cat".to_string(), vec!["the", "cat"]),
-            ("be_sleep".to_string(), vec!["be", "sleep"])
+            ("be_sleep".to_string(), vec!["be", "sleep"]),
         ];
         let matcher = LemmaMatcher::new(&patterns);
 
@@ -154,7 +154,7 @@ mod tests {
         let patterns = vec![
             ("a".to_string(), vec!["a"]),
             ("b".to_string(), vec!["b"]),
-            ("c".to_string(), vec!["c"])
+            ("c".to_string(), vec!["c"]),
         ];
         let matcher = TextMatcher::new(&patterns);
 

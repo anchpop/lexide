@@ -156,7 +156,8 @@ fn create_constraint(sentence: &str) -> Constraint {
     let ws_pattern = "(_|none|nbsp|thinsp|hairsp|zwsp|ideogrp)";
 
     // Valid POS tags (from your pos.rs)
-    let pos_pattern = "(ADJ|ADP|ADV|AUX|CCONJ|DET|INTJ|NOUN|NUM|PART|PRON|PROPN|PUNCT|SCONJ|SYM|VERB|X)";
+    let pos_pattern =
+        "(ADJ|ADP|ADV|AUX|CCONJ|DET|INTJ|NOUN|NUM|PART|PRON|PROPN|PUNCT|SCONJ|SYM|VERB|X)";
 
     // Valid dependency relations (from your dep.rs)
     let dep_pattern = "(acl|advcl|advmod|amod|appos|aux|case|cc|ccomp|clf|compound|conj|cop|csubj|dep|det|discourse|dislocated|expl|fixed|flat|goeswith|iobj|list|mark|nmod|nsubj|nummod|obj|obl|orphan|parataxis|punct|reparandum|root|vocative|xcomp)";

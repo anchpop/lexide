@@ -13,8 +13,7 @@ async fn main() -> Result<()> {
     }
 
     #[cfg(feature = "remote")]
-    let lexide =
-        Lexide::from_server("https://anchpop--lexide-gemma-3-27b-vllm-serve.modal.run")?;
+    let lexide = Lexide::from_server("https://anchpop--lexide-gemma-3-27b-vllm-serve.modal.run")?;
 
     #[cfg(feature = "local")]
     let lexide = Lexide::from_pretrained(LocalConfig::default()).await?;
