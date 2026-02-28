@@ -74,7 +74,18 @@ impl TryFrom<Tokenization> for TreeNode {
             .position(|(idx, t)| t.dep == DependencyRelation::Root || t.head as usize == idx + 1)
             .ok_or("No root token found in tokenization")?;
 
-        Ok(build_tree_node(&value.tokens, root_idx))
+        let tree = build_tree_node(&value.tokens, root_idx);
+
+        // Validate that all tokens ended up in the tree. Tokens with out-of-bounds
+        // head indices become orphaned and produce overly broad patterns that match
+        // far too many sentences (e.g. a bare "être" root matching every sentence
+        // containing "être").
+        let node_count = count_nodes(&tree);
+        if node_count != value.tokens.len() {
+            return Err("Tree has orphaned tokens (likely due to invalid head indices)");
+        }
+
+        Ok(tree)
     }
 }
 
@@ -333,6 +344,14 @@ impl TreeNode {
         // Pattern matches if all needed children were found
         needed.is_empty()
     }
+}
+
+fn count_nodes(node: &TreeNode) -> usize {
+    1 + node
+        .children
+        .iter()
+        .map(|(_, child)| count_nodes(child))
+        .sum::<usize>()
 }
 
 fn build_tree_node(tokens: &[Token], token_idx: usize) -> TreeNode {
@@ -3003,5 +3022,108 @@ mod tests {
                 _ => panic!("Unexpected pattern index matched: {}", m.pattern_index),
             }
         }
+    }
+
+    #[test]
+    fn test_tree_node_rejects_orphaned_tokens() {
+        // Simulates the "être sur son 31" bug: tokens 1-3 have head=5 (out of bounds),
+        // so they become orphaned and the tree only contains the root "être".
+        let tokenization = Tokenization {
+            tokens: vec![
+                Token {
+                    text: Text {
+                        text: "être".to_string(),
+                    },
+                    whitespace: " ".to_string(),
+                    pos: PartOfSpeech::Aux,
+                    lemma: Lemma {
+                        lemma: "être".to_string(),
+                    },
+                    dep: DependencyRelation::Root,
+                    head: 0,
+                },
+                Token {
+                    text: Text {
+                        text: "sur".to_string(),
+                    },
+                    whitespace: " ".to_string(),
+                    pos: PartOfSpeech::Adp,
+                    lemma: Lemma {
+                        lemma: "sur".to_string(),
+                    },
+                    dep: DependencyRelation::Case,
+                    head: 5, // Out of bounds! Only 4 tokens.
+                },
+                Token {
+                    text: Text {
+                        text: "son".to_string(),
+                    },
+                    whitespace: " ".to_string(),
+                    pos: PartOfSpeech::Det,
+                    lemma: Lemma {
+                        lemma: "son".to_string(),
+                    },
+                    dep: DependencyRelation::Det,
+                    head: 5, // Out of bounds!
+                },
+                Token {
+                    text: Text {
+                        text: "31".to_string(),
+                    },
+                    whitespace: "".to_string(),
+                    pos: PartOfSpeech::Num,
+                    lemma: Lemma {
+                        lemma: "31".to_string(),
+                    },
+                    dep: DependencyRelation::Nummod,
+                    head: 5, // Out of bounds!
+                },
+            ],
+        };
+
+        let result = TreeNode::try_from(tokenization);
+        assert!(
+            result.is_err(),
+            "Should reject tokenization with orphaned tokens"
+        );
+    }
+
+    #[test]
+    fn test_tree_node_accepts_valid_tokenization() {
+        // A valid tokenization where all tokens are reachable
+        let tokenization = Tokenization {
+            tokens: vec![
+                Token {
+                    text: Text {
+                        text: "I".to_string(),
+                    },
+                    whitespace: " ".to_string(),
+                    pos: PartOfSpeech::Pron,
+                    lemma: Lemma {
+                        lemma: "I".to_string(),
+                    },
+                    dep: DependencyRelation::Nsubj,
+                    head: 2,
+                },
+                Token {
+                    text: Text {
+                        text: "run".to_string(),
+                    },
+                    whitespace: "".to_string(),
+                    pos: PartOfSpeech::Verb,
+                    lemma: Lemma {
+                        lemma: "run".to_string(),
+                    },
+                    dep: DependencyRelation::Root,
+                    head: 0,
+                },
+            ],
+        };
+
+        let result = TreeNode::try_from(tokenization);
+        assert!(result.is_ok(), "Should accept valid tokenization");
+        let tree = result.unwrap();
+        assert_eq!(tree.token.lemma.lemma, "run");
+        assert_eq!(tree.children.len(), 1);
     }
 }
