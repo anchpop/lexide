@@ -5,10 +5,14 @@
 
 mod aho_corasick;
 mod dependency_matcher;
+mod discontinuous_lemma_matcher;
 mod lemma_matcher;
 mod text_matcher;
 
 pub use dependency_matcher::{DependencyMatch, DependencyMatcher, TreeNode};
+pub use discontinuous_lemma_matcher::{
+    DiscontinuousLemmaMatcher, DiscontinuousMatch, GapConstraint,
+};
 pub use lemma_matcher::LemmaMatcher;
 pub use text_matcher::TextMatcher;
 
