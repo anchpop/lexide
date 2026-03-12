@@ -1,7 +1,6 @@
 name: lexide-pipeline
 
 resources:
-  cloud: lambda
   accelerators: {RTXA6000:1, A100-80GB:1, RTX6000-Ada:1, H100:1}
   disk_size: 100
 

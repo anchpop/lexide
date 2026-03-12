@@ -188,7 +188,6 @@ def main():
     
     training_args = TrainingArguments(
         output_dir="./checkpoints",
-        overwrite_output_dir=True,
         num_train_epochs=3,
         per_device_train_batch_size=4,
         per_device_eval_batch_size=2,
@@ -196,8 +195,8 @@ def main():
         gradient_checkpointing=True,
         warmup_steps=500,
         learning_rate=2e-4,
-        fp16=False,
-        bf16=True,
+        fp16=not torch.cuda.is_bf16_supported(),
+        bf16=torch.cuda.is_bf16_supported(),
         logging_steps=100,
         eval_strategy="steps",
         eval_steps=500,
@@ -234,10 +233,9 @@ def main():
     trainer.save_model("./final_model")
     tokenizer.save_pretrained("./final_model")
 
-    # Optional: Push to HuggingFace Hub
+    # Push to HuggingFace Hub (don't block on this)
     hf_username = os.getenv("HF_USERNAME")
     if hf_username:
-        # Build repo name: username/lexide-MODEL_NAME
         hf_repo_name = f"{hf_username}/lexide-{short_model_name}"
         print(f"Pushing model to HuggingFace Hub: {hf_repo_name}")
         try:
@@ -247,6 +245,24 @@ def main():
         except Exception as e:
             print(f"Failed to push to HuggingFace: {e}")
             print("Model saved locally in ./final_model")
+
+    # Run evaluation on test set
+    print("\nRunning evaluation...")
+    try:
+        from evaluate import load_test_data, evaluate_model, compute_percentages, print_results_table, log_to_wandb
+        from inference import MultilingualNLPInference
+
+        inferencer = MultilingualNLPInference(
+            base_model_name=model_args.model_name,
+            adapter_path="./final_model"
+        )
+        test_data = load_test_data(data_dir=data_args.data_dir, max_samples_per_lang=200)
+        raw_metrics = evaluate_model(inferencer, test_data)
+        results = compute_percentages(raw_metrics)
+        print_results_table(results)
+        log_to_wandb(results)
+    except Exception as e:
+        print(f"Evaluation failed: {e}")
 
     print("Training complete!")
     wandb.finish()

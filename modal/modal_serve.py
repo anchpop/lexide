@@ -123,7 +123,7 @@ VLLM_PORT = 8000
     scaledown_window=5 * 60,  # Keep container warm for 5 minutes
     timeout=10 * 60,
 )
-@modal.concurrent(max_inputs=180)  # Handle up to 180 concurrent requests
+@modal.concurrent(max_inputs=360, target_inputs=160)
 @modal.web_server(port=VLLM_PORT, startup_timeout=10 * 60)
 def serve():
     """
