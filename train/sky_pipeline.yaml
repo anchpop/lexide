@@ -1,0 +1,53 @@
+name: lexide-pipeline
+
+resources:
+  cloud: lambda
+  accelerators: {RTXA6000:1, A100-80GB:1, RTX6000-Ada:1, H100:1}
+  disk_size: 100
+
+workdir: .
+
+setup: |
+  pip install torch transformers wandb tqdm numpy sentencepiece protobuf huggingface_hub
+
+envs:
+  WANDB_API_KEY: ${WANDB_API_KEY}
+  HF_TOKEN: ${HF_TOKEN}
+  HF_USERNAME: anchpop
+
+run: |
+  set -e
+  cd ~/sky_workdir
+  mkdir -p output/stage1 output/eval
+
+  echo "=========================================="
+  echo "Training: CANINE-S + ByT5 decoder (unified)"
+  echo "=========================================="
+  python src/stage1_train.py \
+    --data_dir data \
+    --output_dir output/stage1 \
+    --max_length 2048 \
+    --batch_size 8 \
+    --grad_accum 2 \
+    --num_epochs 10 \
+    --backbone_lr 2e-5 \
+    --head_lr 1e-3 \
+    --decoder_lr 1e-4 \
+    --lemma_tokens_per_sent 4 \
+    --num_workers 4 \
+    --wandb \
+    --run_name stage1-unified
+
+  echo "=========================================="
+  echo "Evaluation"
+  echo "=========================================="
+  python src/eval_pipeline.py \
+    --data_dir data \
+    --model_path output/stage1/best_model.pt \
+    --output_dir output/eval \
+    --eval_sent_boundary
+
+  echo "=========================================="
+  echo "Done!"
+  echo "=========================================="
+  cat output/eval/eval_results.json
