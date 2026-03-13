@@ -220,6 +220,75 @@ fn fix_reconstruction(tokens: &mut Vec<Token>, sentence: &str) -> bool {
         return true;
     }
 
+    // Fix 3: Compare only the non-whitespace characters (after unicode normalization).
+    // If the actual text content matches, the model just got the whitespace wrong
+    // (e.g. missing thin nbsp before French punctuation). Realign tokens to the
+    // original sentence by matching each token's text and consuming whatever
+    // whitespace follows in the original.
+    let non_ws = |s: &str| -> String {
+        normalize_unicode(s)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    };
+
+    if non_ws(&reconstructed) == non_ws(sentence) {
+        let sentence_chars: Vec<char> = sentence.chars().collect();
+        let mut sentence_pos = 0;
+
+        for token in tokens.iter_mut() {
+            // Skip any leading whitespace in the original at current position
+            while sentence_pos < sentence_chars.len()
+                && sentence_chars[sentence_pos].is_whitespace()
+            {
+                sentence_pos += 1;
+            }
+
+            // Match the token's non-whitespace characters against the original
+            let token_normalized = normalize_unicode(&token.text.text);
+            let expected_chars: usize = token_normalized
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .count();
+            let start_pos = sentence_pos;
+            let mut matched = 0;
+
+            while matched < expected_chars && sentence_pos < sentence_chars.len() {
+                if !sentence_chars[sentence_pos].is_whitespace() {
+                    matched += 1;
+                }
+                sentence_pos += 1;
+            }
+
+            token.text.text = sentence_chars[start_pos..sentence_pos]
+                .iter()
+                .collect();
+
+            // Consume trailing whitespace as this token's whitespace
+            let ws_start = sentence_pos;
+            while sentence_pos < sentence_chars.len()
+                && sentence_chars[sentence_pos].is_whitespace()
+            {
+                sentence_pos += 1;
+            }
+
+            token.whitespace = if ws_start < sentence_pos {
+                sentence_chars[ws_start..sentence_pos].iter().collect()
+            } else {
+                String::new()
+            };
+        }
+
+        // Verify reconstruction after realignment
+        let final_reconstructed: String = tokens
+            .iter()
+            .map(|token| format!("{}{}", token.text.text, token.whitespace))
+            .collect();
+        if final_reconstructed == sentence {
+            return true;
+        }
+    }
+
     false
 }
 
@@ -509,6 +578,141 @@ mod tests {
         // Verify both accents were restored
         assert_eq!(tokens[0].text.text, "Crème");
         assert_eq!(tokens[1].text.text, "brûlée");
+    }
+
+    #[test]
+    fn test_fix_reconstruction_french_missing_space_before_punctuation() {
+        // Model drops the thin nbsp before French ? — common failure mode
+        let mut tokens = vec![
+            create_test_token(
+                "Le",
+                "\u{202F}",
+                PartOfSpeech::Det,
+                "le",
+                DependencyRelation::Det,
+                2,
+            ),
+            create_test_token(
+                "portable",
+                "",
+                PartOfSpeech::Noun,
+                "portable",
+                DependencyRelation::Root,
+                0,
+            ),
+            create_test_token(
+                "!",
+                "",
+                PartOfSpeech::Punct,
+                "!",
+                DependencyRelation::Punct,
+                2,
+            ),
+        ];
+
+        // Model produced "Le\u{202F}portable!" but input was "Le portable\u{202F}!"
+        // The thin nbsp is on the wrong token and the regular space is missing
+        assert!(fix_reconstruction(
+            &mut tokens,
+            "Le portable\u{202F}!"
+        ));
+        assert_eq!(tokens[0].text.text, "Le");
+        assert_eq!(tokens[0].whitespace, " ");
+        assert_eq!(tokens[1].text.text, "portable");
+        assert_eq!(tokens[1].whitespace, "\u{202F}");
+        assert_eq!(tokens[2].text.text, "!");
+    }
+
+    #[test]
+    fn test_fix_reconstruction_french_no_space_before_question_mark() {
+        // Model outputs "Un ordre?" but input was "Un ordre ?"
+        let mut tokens = vec![
+            create_test_token(
+                "Un",
+                "\u{202F}",
+                PartOfSpeech::Det,
+                "un",
+                DependencyRelation::Det,
+                2,
+            ),
+            create_test_token(
+                "ordre",
+                "",
+                PartOfSpeech::Noun,
+                "ordre",
+                DependencyRelation::Root,
+                0,
+            ),
+            create_test_token(
+                "?",
+                "",
+                PartOfSpeech::Punct,
+                "?",
+                DependencyRelation::Punct,
+                2,
+            ),
+        ];
+
+        assert!(fix_reconstruction(
+            &mut tokens,
+            "Un ordre\u{202F}?"
+        ));
+        assert_eq!(tokens[0].whitespace, " ");
+        assert_eq!(tokens[1].whitespace, "\u{202F}");
+    }
+
+    #[test]
+    fn test_fix_reconstruction_french_comma_non_tag_question() {
+        // "Tu voulais, non ?" — model drops space before ?
+        let mut tokens = vec![
+            create_test_token(
+                "Tu",
+                " ",
+                PartOfSpeech::Pron,
+                "tu",
+                DependencyRelation::Nsubj,
+                2,
+            ),
+            create_test_token(
+                "voulais",
+                "",
+                PartOfSpeech::Verb,
+                "vouloir",
+                DependencyRelation::Root,
+                0,
+            ),
+            create_test_token(
+                ",",
+                " ",
+                PartOfSpeech::Punct,
+                ",",
+                DependencyRelation::Punct,
+                2,
+            ),
+            create_test_token(
+                "non",
+                "",
+                PartOfSpeech::Adv,
+                "non",
+                DependencyRelation::Discourse,
+                2,
+            ),
+            create_test_token(
+                "?",
+                "",
+                PartOfSpeech::Punct,
+                "?",
+                DependencyRelation::Punct,
+                2,
+            ),
+        ];
+
+        // Reconstructed: "Tu voulais, non?" vs original "Tu voulais, non\u{202F}?"
+        assert!(fix_reconstruction(
+            &mut tokens,
+            "Tu voulais, non\u{202F}?"
+        ));
+        assert_eq!(tokens[3].whitespace, "\u{202F}");
     }
 
     #[test]
