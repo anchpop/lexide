@@ -121,7 +121,7 @@ pub fn parse_response(response: &str, sentence: &str) -> Result<Tokenization> {
             .map(|token| format!("{}{}", token.text.text, token.whitespace))
             .collect::<String>();
         anyhow::bail!(
-            "Reconstructed text does not match the original sentence ({} != {}) in response: {:?}",
+            "Reconstructed text does not match the original sentence ({:?} != {:?}) in response: {:?}",
             reconstructed_text,
             sentence,
             response
