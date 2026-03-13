@@ -41,8 +41,6 @@ class MultilingualNLPInference:
         sentence: str,
         language: str,
         max_length: int = 512,
-        temperature: float = 0.1,
-        top_p: float = 0.95
     ) -> str:
         language_names = {
             "eng": "English",
@@ -72,9 +70,7 @@ Analysis:"""
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=256,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=True,
+                do_sample=False,
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id
             )

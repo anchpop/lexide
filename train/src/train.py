@@ -256,7 +256,7 @@ def main():
             base_model_name=model_args.model_name,
             adapter_path="./final_model"
         )
-        test_data = load_test_data(data_dir=data_args.data_dir, max_samples_per_lang=200)
+        test_data = load_test_data(data_dir=data_args.data_dir, max_samples_per_lang=50)
         raw_metrics = evaluate_model(inferencer, test_data)
         results = compute_percentages(raw_metrics)
         print_results_table(results)
