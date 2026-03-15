@@ -260,9 +260,7 @@ fn fix_reconstruction(tokens: &mut Vec<Token>, sentence: &str) -> bool {
                 sentence_pos += 1;
             }
 
-            token.text.text = sentence_chars[start_pos..sentence_pos]
-                .iter()
-                .collect();
+            token.text.text = sentence_chars[start_pos..sentence_pos].iter().collect();
 
             // Consume trailing whitespace as this token's whitespace
             let ws_start = sentence_pos;
@@ -612,10 +610,7 @@ mod tests {
 
         // Model produced "Le\u{202F}portable!" but input was "Le portable\u{202F}!"
         // The thin nbsp is on the wrong token and the regular space is missing
-        assert!(fix_reconstruction(
-            &mut tokens,
-            "Le portable\u{202F}!"
-        ));
+        assert!(fix_reconstruction(&mut tokens, "Le portable\u{202F}!"));
         assert_eq!(tokens[0].text.text, "Le");
         assert_eq!(tokens[0].whitespace, " ");
         assert_eq!(tokens[1].text.text, "portable");
@@ -653,10 +648,7 @@ mod tests {
             ),
         ];
 
-        assert!(fix_reconstruction(
-            &mut tokens,
-            "Un ordre\u{202F}?"
-        ));
+        assert!(fix_reconstruction(&mut tokens, "Un ordre\u{202F}?"));
         assert_eq!(tokens[0].whitespace, " ");
         assert_eq!(tokens[1].whitespace, "\u{202F}");
     }
@@ -708,10 +700,7 @@ mod tests {
         ];
 
         // Reconstructed: "Tu voulais, non?" vs original "Tu voulais, non\u{202F}?"
-        assert!(fix_reconstruction(
-            &mut tokens,
-            "Tu voulais, non\u{202F}?"
-        ));
+        assert!(fix_reconstruction(&mut tokens, "Tu voulais, non\u{202F}?"));
         assert_eq!(tokens[3].whitespace, "\u{202F}");
     }
 

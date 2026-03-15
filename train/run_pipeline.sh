@@ -35,7 +35,9 @@ if [ "$MODE" = "local" ]; then
         --data_dir data \
         --model_path output/stage1/best_model.pt \
         --output_dir output/eval \
-        --eval_sent_boundary
+        --eval_sent_boundary \
+        --wandb \
+        --run_name eval-unified-local
 
 elif [ "$MODE" = "sky" ]; then
     echo "Launching on Lambda via SkyPilot..."

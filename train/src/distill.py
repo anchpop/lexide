@@ -30,7 +30,7 @@ from data_loader import load_and_prepare_data
 @dataclass
 class DistillArgs:
     teacher_base: str = field(default="google/gemma-3-27b-it")
-    teacher_adapter: str = field(default="./final_model")
+    teacher_adapter: str = field(default="anchpop/lexide-gemma-3-27b-it")
     student_base: str = field(default="google/gemma-3-270m-it")
     temperature: float = field(default=2.0)
     alpha: float = field(default=0.5, metadata={"help": "Weight for KD loss vs CE loss. 1.0 = pure KD."})
@@ -132,6 +132,12 @@ class DistillationTrainer(Trainer):
 
         # Only compute KD loss where labels are valid (not padding)
         mask = (shift_labels != -100).float()
+
+        # Align vocab sizes — PEFT can add extra embedding dimensions (r=64)
+        # that don't correspond to real tokens. Truncate to the smaller vocab.
+        min_vocab = min(shift_logits.size(-1), shift_teacher.size(-1))
+        shift_logits = shift_logits[..., :min_vocab]
+        shift_teacher = shift_teacher[..., :min_vocab]
 
         student_log_probs = F.log_softmax(shift_logits / T, dim=-1)
         teacher_probs = F.softmax(shift_teacher / T, dim=-1)

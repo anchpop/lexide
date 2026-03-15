@@ -1,0 +1,31 @@
+name: byt5-base-exp
+
+resources:
+  accelerators: GH200:1
+
+envs:
+  WANDB_API_KEY: ${WANDB_API_KEY}
+  HF_TOKEN: ${HF_TOKEN}
+  HF_USERNAME: anchpop
+  CUDA_VISIBLE_DEVICES: "0"
+
+run: |
+  set -e
+  cd ~/sky_workdir
+  mkdir -p output/byt5_base
+  /usr/bin/python3 src/byt5_xxl_train.py \
+    --data_dir data \
+    --output_dir output/byt5_base \
+    --model_name google/byt5-base \
+    --max_length 2048 \
+    --batch_size 16 \
+    --grad_accum 1 \
+    --num_epochs 10 \
+    --lora_lr 2e-5 \
+    --head_lr 1e-3 \
+    --lora_r 64 \
+    --lora_alpha 128 \
+    --lemma_tokens_per_sent 4 \
+    --num_workers 4 \
+    --wandb \
+    --run_name byt5-base-lora

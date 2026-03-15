@@ -21,9 +21,8 @@ setup: |
   cd ~/sky_workdir
   /usr/bin/python3 -m pip install accelerate bitsandbytes datasets jsonlines peft scikit-learn \
     sentencepiece tqdm 'transformers>=4.50.0,<4.57.0' trl wandb 'Pillow>=9.1.0' 'numpy<2' tf-keras
-  # pip can't uninstall the apt torch, which is what we want - system CUDA torch stays
 
-# Training command
+# Train teacher, then distill into student
 run: |
   cd ~/sky_workdir
   export CUDA_VISIBLE_DEVICES=0
@@ -34,13 +33,28 @@ run: |
   export WANDB_API_KEY=${WANDB_API_KEY}
   export HF_USERNAME=${HF_USERNAME}
 
-  # Use system python (has CUDA torch from apt: python3-torch-cuda)
+  # Step 1: Train teacher model (27b with LoRA)
+  echo "=== STEP 1: Training teacher model (${MODEL_NAME}) ==="
   /usr/bin/python3 -m accelerate.commands.launch \
     --mixed_precision bf16 \
     --num_processes 1 \
     --num_machines 1 \
     --dynamo_backend no \
     src/train.py
+
+  # Step 2: Distill teacher into students
+  # Use local adapter first (faster than pulling from HF)
+  export TEACHER_ADAPTER=./final_model
+  for STUDENT in gemma-3-12b-it gemma-3-4b-it gemma-3-1b-it gemma-3-270m-it; do
+    echo "=== STEP 2: Distilling into ${STUDENT} ==="
+    export STUDENT_MODEL="${STUDENT}"
+    /usr/bin/python3 -m accelerate.commands.launch \
+      --mixed_precision bf16 \
+      --num_processes 1 \
+      --num_machines 1 \
+      --dynamo_backend no \
+      src/distill.py
+  done
 
 envs:
   # models: gemma-3-270m-it, gemma-3-1b-it, gemma-3-4b-it, gemma-3-12b-it, gemma-3-27b-it

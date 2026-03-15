@@ -21,6 +21,13 @@ import torch
 from transformers import CanineTokenizer
 from tqdm import tqdm
 
+try:
+    import wandb
+
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+
 from stage1_train import (
     BIO_POS_ID2LABEL,
     BIO_POS_LABEL2ID,
@@ -325,6 +332,9 @@ def evaluate_per_language(args):
         results[lang_code] = lang_metrics
         print(f"  {lang_name}: " + ", ".join(f"{k}={v:.4f}" for k, v in lang_metrics.items()))
 
+        if HAS_WANDB and args.wandb:
+            wandb.log({f"eval/{lang_code}/{k}": v for k, v in lang_metrics.items() if isinstance(v, float)})
+
         # Print errors
         for err_type, err_list in errors.items():
             if err_list:
@@ -367,6 +377,9 @@ def evaluate_per_language(args):
     with open(out_path, "w") as f:
         json.dump({"per_language": results, "average": avg}, f, indent=2)
     print(f"\nResults saved to {out_path}")
+
+    if HAS_WANDB and args.wandb:
+        wandb.log({f"eval/avg/{k}": v for k, v in avg.items()})
 
     return results
 
@@ -431,7 +444,11 @@ def evaluate_sentence_boundaries(args):
     prec = tp / max(tp + fp, 1)
     rec = tp / max(tp + fn, 1)
     f1 = 2 * prec * rec / max(prec + rec, 1e-8)
+    sent_metrics = {"sent_bound_prec": prec, "sent_bound_rec": rec, "sent_bound_f1": f1}
     print(f"Sentence boundary: P={prec:.4f} R={rec:.4f} F1={f1:.4f}")
+
+    if HAS_WANDB and args.wandb:
+        wandb.log({f"eval/{k}": v for k, v in sent_metrics.items()})
 
 
 def main():
@@ -440,12 +457,21 @@ def main():
     p.add_argument("--model_path", default="output/stage1/best_model.pt")
     p.add_argument("--output_dir", default="output/eval")
     p.add_argument("--eval_sent_boundary", action="store_true")
+    p.add_argument("--wandb", action="store_true")
+    p.add_argument("--wandb_project", default="lexide-pipeline")
+    p.add_argument("--run_name", default="eval")
     args = p.parse_args()
+
+    if HAS_WANDB and args.wandb:
+        wandb.init(project=args.wandb_project, name=args.run_name, config=vars(args))
 
     results = evaluate_per_language(args)
 
     if args.eval_sent_boundary:
         evaluate_sentence_boundaries(args)
+
+    if HAS_WANDB and args.wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":

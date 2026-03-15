@@ -305,8 +305,7 @@ mod tests {
         let patterns = vec![("ni_ni_ni".to_string(), vec!["ni", "ni", "ni"])];
         let matcher = DiscontinuousLemmaMatcher::new(&patterns, None);
 
-        let tokenization =
-            make_tokenization(&["ni", "toi", "ni", "moi", "ni", "personne"]);
+        let tokenization = make_tokenization(&["ni", "toi", "ni", "moi", "ni", "personne"]);
         let matches = matcher.find_all(&tokenization);
 
         assert_eq!(matches.len(), 1);

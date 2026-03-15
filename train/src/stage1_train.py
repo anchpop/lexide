@@ -280,6 +280,127 @@ def collate_fn(batch):
 # ============================================================
 # Model
 # ============================================================
+class CRF(nn.Module):
+    """Linear-chain CRF for BIO-POS sequence labeling."""
+
+    def __init__(self, num_tags):
+        super().__init__()
+        self.num_tags = num_tags
+        # transitions[i, j] = score of transitioning from tag i to tag j
+        self.transitions = nn.Parameter(torch.randn(num_tags, num_tags) * 0.02)
+        self.start_transitions = nn.Parameter(torch.randn(num_tags) * 0.02)
+        self.end_transitions = nn.Parameter(torch.randn(num_tags) * 0.02)
+
+        # Build valid transition mask: I-X can only follow B-X or I-X
+        # This is applied as a hard constraint (not learned)
+        self._init_constraints()
+
+    def _init_constraints(self):
+        """Set impossible transitions to -10000."""
+        with torch.no_grad():
+            for i in range(self.num_tags):
+                label_i = BIO_POS_ID2LABEL.get(i, "O")
+                for j in range(self.num_tags):
+                    label_j = BIO_POS_ID2LABEL.get(j, "O")
+                    if label_j.startswith("I-"):
+                        pos_j = label_j[2:]
+                        # I-X can only follow B-X or I-X
+                        if label_i != f"B-{pos_j}" and label_i != f"I-{pos_j}":
+                            self.transitions[i, j] = -10000.0
+                # Can't start with I-*
+                if label_i.startswith("I-"):
+                    self.start_transitions[i] = -10000.0
+
+    def forward(self, emissions, labels, mask):
+        """Compute negative log-likelihood loss.
+
+        Args:
+            emissions: (batch, seq_len, num_tags)
+            labels: (batch, seq_len) with -100 for padding
+            mask: (batch, seq_len) boolean, True for valid positions
+        Returns:
+            scalar loss (mean over batch)
+        """
+        # Replace -100 labels with 0 (will be masked out)
+        labels = labels.clamp(min=0)
+
+        # Forward algorithm (log-partition function)
+        log_Z = self._forward_alg(emissions, mask)
+        # Score of the gold sequence
+        gold_score = self._score_sentence(emissions, labels, mask)
+        # NLL = log_Z - gold_score
+        nll = log_Z - gold_score
+        return nll.mean()
+
+    def _forward_alg(self, emissions, mask):
+        """Forward algorithm to compute log-partition function."""
+        batch_size, seq_len, num_tags = emissions.shape
+        # score: (batch, num_tags)
+        score = self.start_transitions + emissions[:, 0]
+
+        for t in range(1, seq_len):
+            # score_t[b, j] = logsumexp_i(score[b, i] + trans[i, j] + emit[b, t, j])
+            emit = emissions[:, t].unsqueeze(1)  # (batch, 1, num_tags)
+            trans = self.transitions.unsqueeze(0)  # (1, num_tags, num_tags)
+            next_score = score.unsqueeze(2) + trans + emit  # (batch, num_tags, num_tags)
+            next_score = torch.logsumexp(next_score, dim=1)  # (batch, num_tags)
+            # Only update where mask is True
+            score = torch.where(mask[:, t].unsqueeze(1), next_score, score)
+
+        score = score + self.end_transitions
+        return torch.logsumexp(score, dim=1)  # (batch,)
+
+    def _score_sentence(self, emissions, labels, mask):
+        """Score a given tag sequence."""
+        batch_size, seq_len, _ = emissions.shape
+        score = self.start_transitions[labels[:, 0]]
+        score = score + emissions[torch.arange(batch_size), 0, labels[:, 0]]
+
+        for t in range(1, seq_len):
+            m = mask[:, t]
+            trans = self.transitions[labels[:, t - 1], labels[:, t]]
+            emit = emissions[torch.arange(batch_size), t, labels[:, t]]
+            score = score + (trans + emit) * m
+
+        # End transition from last valid tag
+        last_idx = mask.long().sum(dim=1) - 1
+        last_tags = labels[torch.arange(batch_size), last_idx]
+        score = score + self.end_transitions[last_tags]
+        return score
+
+    def decode(self, emissions, mask):
+        """Viterbi decoding.
+
+        Args:
+            emissions: (batch, seq_len, num_tags)
+            mask: (batch, seq_len) boolean
+        Returns:
+            best_tags: (batch, seq_len) tensor of tag indices
+        """
+        batch_size, seq_len, num_tags = emissions.shape
+        score = self.start_transitions + emissions[:, 0]  # (batch, num_tags)
+        history = []
+
+        for t in range(1, seq_len):
+            # (batch, num_tags, 1) + (1, num_tags, num_tags) -> (batch, num_tags, num_tags)
+            next_score = score.unsqueeze(2) + self.transitions.unsqueeze(0)
+            next_score, indices = next_score.max(dim=1)  # (batch, num_tags)
+            next_score = next_score + emissions[:, t]
+            score = torch.where(mask[:, t].unsqueeze(1), next_score, score)
+            history.append(indices)
+
+        score = score + self.end_transitions
+        _, best_last = score.max(dim=1)  # (batch,)
+
+        # Trace back
+        best_tags = torch.zeros(batch_size, seq_len, dtype=torch.long, device=emissions.device)
+        best_tags[:, -1] = best_last
+        for t in range(len(history) - 1, -1, -1):
+            best_tags[:, t] = history[t][torch.arange(batch_size), best_tags[:, t + 1]]
+
+        return best_tags
+
+
 class Biaffine(nn.Module):
     def __init__(self, in_dim, out_dim=1):
         super().__init__()
@@ -317,6 +438,7 @@ class CanineForNLP(nn.Module):
         self.lang_emb = nn.Embedding(num_langs, hidden)
 
         self.bio_pos_head = nn.Linear(hidden, num_bio_pos)
+        self.bio_crf = CRF(num_bio_pos)
         self.sent_head = nn.Linear(hidden, 2)
 
         self.root_emb = nn.Parameter(torch.randn(hidden) * 0.02)
@@ -506,10 +628,15 @@ class CanineForNLP(nn.Module):
 # ============================================================
 def compute_loss(bio_logits, sent_logits, arc_scores, rel_scores,
                  bio_labels, sent_labels, dep_info, device,
-                 lemma_logits=None, lemma_labels=None, lemma_loss_weight=1.0):
-    bio_loss = F.cross_entropy(
-        bio_logits.view(-1, NUM_BIO_POS), bio_labels.view(-1), ignore_index=-100,
-    )
+                 lemma_logits=None, lemma_labels=None, lemma_loss_weight=1.0,
+                 bio_crf=None):
+    if bio_crf is not None:
+        bio_mask = bio_labels >= 0  # (batch, seq_len)
+        bio_loss = bio_crf(bio_logits, bio_labels, bio_mask)
+    else:
+        bio_loss = F.cross_entropy(
+            bio_logits.view(-1, NUM_BIO_POS), bio_labels.view(-1), ignore_index=-100,
+        )
 
     valid_sent = sent_labels[sent_labels >= 0]
     if len(valid_sent) > 0:
@@ -574,6 +701,7 @@ def evaluate(model, loader, device):
     model.eval()
     stats = defaultdict(float)
     n_batches = 0
+    bio_crf = getattr(model, 'bio_crf', None)
 
     for batch in tqdm(loader, desc="Eval", leave=False):
         ids = batch["input_ids"].to(device)
@@ -583,17 +711,21 @@ def evaluate(model, loader, device):
         lang_ids = batch["lang_ids"].to(device)
         dep_info = batch["dep_info"]
 
-        bio_log, sent_log, arc_sc, rel_sc, lem_log, lem_lab = model(
-            ids, mask, dep_info, lang_ids, max_lemma_tokens_per_sent=8)
-        losses = compute_loss(bio_log, sent_log, arc_sc, rel_sc, bio_lab, sent_lab, dep_info, device,
-                              lemma_logits=lem_log, lemma_labels=lem_lab)
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            bio_log, sent_log, arc_sc, rel_sc, lem_log, lem_lab = model(
+                ids, mask, dep_info, lang_ids, max_lemma_tokens_per_sent=8)
+            losses = compute_loss(bio_log, sent_log, arc_sc, rel_sc, bio_lab, sent_lab, dep_info, device,
+                                  lemma_logits=lem_log, lemma_labels=lem_lab, bio_crf=bio_crf)
         for k, v in losses.items():
             stats[f"loss_{k}"] += v.item()
         n_batches += 1
 
         # BIO-POS accuracy
         valid = bio_lab >= 0
-        preds = bio_log.argmax(-1)
+        if bio_crf is not None:
+            preds = bio_crf.decode(bio_log, valid)
+        else:
+            preds = bio_log.argmax(-1)
         stats["bio_correct"] += (preds[valid] == bio_lab[valid]).sum().item()
         stats["bio_total"] += valid.sum().item()
 
@@ -734,7 +866,8 @@ def train(args):
                         max_lemma_tokens_per_sent=args.lemma_tokens_per_sent)
                     losses = compute_loss(bio_log, sent_log, arc_sc, rel_sc, bio_lab, sent_lab, dep_info, device,
                                           lemma_logits=lem_log, lemma_labels=lem_lab,
-                                          lemma_loss_weight=args.lemma_loss_weight)
+                                          lemma_loss_weight=args.lemma_loss_weight,
+                                          bio_crf=model.bio_crf)
                 scaler.scale(losses["total"] / args.grad_accum).backward()
             else:
                 bio_log, sent_log, arc_sc, rel_sc, lem_log, lem_lab = model(
@@ -742,7 +875,8 @@ def train(args):
                     max_lemma_tokens_per_sent=args.lemma_tokens_per_sent)
                 losses = compute_loss(bio_log, sent_log, arc_sc, rel_sc, bio_lab, sent_lab, dep_info, device,
                                       lemma_logits=lem_log, lemma_labels=lem_lab,
-                                      lemma_loss_weight=args.lemma_loss_weight)
+                                      lemma_loss_weight=args.lemma_loss_weight,
+                                      bio_crf=model.bio_crf)
                 (losses["total"] / args.grad_accum).backward()
 
             if (batch_idx + 1) % args.grad_accum == 0:
