@@ -42,6 +42,19 @@ impl fmt::Display for Lemma {
     }
 }
 
+/// A lemma paired with its part of speech, for POS-aware matching.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct LemmaPos {
+    pub lemma: String,
+    pub pos: PartOfSpeech,
+}
+
+impl fmt::Display for LemmaPos {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}({})", self.lemma, self.pos)
+    }
+}
+
 /// Represents a single token with its linguistic annotations
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Token {

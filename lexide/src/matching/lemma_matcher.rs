@@ -1,19 +1,21 @@
 use crate::matching::aho_corasick::{AhoCorasick, Match};
-use crate::{Lemma, Tokenization};
+use crate::pos::PartOfSpeech;
+use crate::{LemmaPos, Tokenization};
 
-/// A pattern matcher that operates on lemmatized tokens.
+/// A pattern matcher that operates on lemmatized tokens with POS awareness.
 ///
-/// Searches for sequences of lemmas within a tokenization,
-/// making it useful for finding semantic patterns regardless of inflection.
+/// Searches for sequences of (lemma, POS) pairs within a tokenization,
+/// making it useful for finding semantic patterns regardless of inflection
+/// while distinguishing different grammatical roles (e.g., "être" as VERB vs AUX).
 ///
 /// # Example
 ///
 /// ```ignore
 /// use lexide::matching::LemmaMatcher;
+/// use lexide::pos::PartOfSpeech;
 ///
 /// let patterns = vec![
-///     vec!["run", "quickly"],  // Will match "ran quickly", "running quickly", etc.
-///     vec!["cat", "sleep"],    // Will match "cats sleeping", "cat slept", etc.
+///     ("be_happy".to_string(), vec![("be", PartOfSpeech::Verb), ("happy", PartOfSpeech::Adj)]),
 /// ];
 /// let matcher = LemmaMatcher::new(&patterns);
 ///
@@ -24,35 +26,26 @@ pub struct LemmaMatcher<K = String>
 where
     K: Clone,
 {
-    automaton: AhoCorasick<Lemma, K>,
+    automaton: AhoCorasick<LemmaPos, K>,
 }
 
 impl<K: Clone> LemmaMatcher<K> {
-    /// Creates a new lemma matcher from labeled string patterns.
+    /// Creates a new lemma matcher from labeled patterns with POS tags.
     ///
     /// # Arguments
     ///
-    /// * `patterns` - A slice of (label, pattern) tuples, where each pattern is a slice of lemma string references
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let patterns = vec![
-    ///     ("happy_phrase".to_string(), vec!["be", "happy"]),
-    ///     ("running".to_string(), vec!["run", "fast"]),
-    /// ];
-    /// let matcher = LemmaMatcher::new(&patterns);
-    /// ```
-    pub fn new(patterns: &[(K, Vec<&str>)]) -> Self {
-        let lemma_patterns: Vec<(K, Vec<Lemma>)> = patterns
+    /// * `patterns` - A slice of (label, pattern) tuples, where each pattern is a slice of (lemma, POS) pairs
+    pub fn new(patterns: &[(K, Vec<(&str, PartOfSpeech)>)]) -> Self {
+        let lemma_pos_patterns: Vec<(K, Vec<LemmaPos>)> = patterns
             .iter()
             .map(|(label, pattern)| {
                 (
                     label.clone(),
                     pattern
                         .iter()
-                        .map(|&s| Lemma {
+                        .map(|&(s, pos)| LemmaPos {
                             lemma: s.to_string(),
+                            pos,
                         })
                         .collect(),
                 )
@@ -60,7 +53,7 @@ impl<K: Clone> LemmaMatcher<K> {
             .collect();
 
         Self {
-            automaton: AhoCorasick::new(&lemma_patterns),
+            automaton: AhoCorasick::new(&lemma_pos_patterns),
         }
     }
 
@@ -73,14 +66,20 @@ impl<K: Clone> LemmaMatcher<K> {
     /// # Returns
     ///
     /// A vector of matches, where each match contains the pattern index and token positions.
-    pub fn find_all<'a>(&'a self, tokenization: &'a Tokenization) -> Vec<Match<'a, Lemma, K>> {
-        let lemma_sequence: Vec<Lemma> = tokenization
+    pub fn find_all<'a>(
+        &'a self,
+        tokenization: &'a Tokenization,
+    ) -> Vec<Match<'a, LemmaPos, K>> {
+        let lemma_pos_sequence: Vec<LemmaPos> = tokenization
             .tokens
             .iter()
-            .map(|token| token.lemma.clone())
+            .map(|token| LemmaPos {
+                lemma: token.lemma.lemma.clone(),
+                pos: token.pos,
+            })
             .collect();
 
-        self.automaton.find_all(&lemma_sequence).collect()
+        self.automaton.find_all(&lemma_pos_sequence).collect()
     }
 
     /// Checks if any pattern exists in the tokenization.
@@ -96,13 +95,16 @@ impl<K: Clone> LemmaMatcher<K> {
     ///
     /// `true` if any pattern is found, `false` otherwise.
     pub fn contains(&self, tokenization: &Tokenization) -> bool {
-        let lemma_sequence: Vec<Lemma> = tokenization
+        let lemma_pos_sequence: Vec<LemmaPos> = tokenization
             .tokens
             .iter()
-            .map(|token| token.lemma.clone())
+            .map(|token| LemmaPos {
+                lemma: token.lemma.lemma.clone(),
+                pos: token.pos,
+            })
             .collect();
 
-        self.automaton.contains(&lemma_sequence)
+        self.automaton.contains(&lemma_pos_sequence)
     }
 
     /// Returns the number of patterns in this matcher.

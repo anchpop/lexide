@@ -115,8 +115,11 @@ mod tests {
 
     #[test]
     fn test_lemma_matcher_finds_pattern() {
-        // Match using lemmas - "cat" lemma will match "cats" text
-        let patterns = vec![("cat_be".to_string(), vec!["cat", "be"])];
+        // Match using lemmas+POS - "cat"(Noun) lemma will match "cats" text
+        let patterns = vec![(
+            "cat_be".to_string(),
+            vec![("cat", PartOfSpeech::Noun), ("be", PartOfSpeech::Aux)],
+        )];
         let matcher = LemmaMatcher::new(&patterns);
 
         let tokenization = create_test_tokenization();
@@ -130,10 +133,31 @@ mod tests {
     }
 
     #[test]
+    fn test_lemma_matcher_no_match_wrong_pos() {
+        // Same lemmas but wrong POS — should not match
+        let patterns = vec![(
+            "cat_be".to_string(),
+            vec![("cat", PartOfSpeech::Noun), ("be", PartOfSpeech::Verb)],
+        )];
+        let matcher = LemmaMatcher::new(&patterns);
+
+        let tokenization = create_test_tokenization();
+        // "are" has POS::Aux, not POS::Verb, so this should not match
+        let matches = matcher.find_all(&tokenization);
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
     fn test_lemma_matcher_multiple_patterns() {
         let patterns = vec![
-            ("the_cat".to_string(), vec!["the", "cat"]),
-            ("be_sleep".to_string(), vec!["be", "sleep"]),
+            (
+                "the_cat".to_string(),
+                vec![("the", PartOfSpeech::Det), ("cat", PartOfSpeech::Noun)],
+            ),
+            (
+                "be_sleep".to_string(),
+                vec![("be", PartOfSpeech::Aux), ("sleep", PartOfSpeech::Verb)],
+            ),
         ];
         let matcher = LemmaMatcher::new(&patterns);
 
@@ -146,7 +170,14 @@ mod tests {
 
     #[test]
     fn test_lemma_matcher_contains() {
-        let patterns = vec![("cat_be_sleep".to_string(), vec!["cat", "be", "sleep"])];
+        let patterns = vec![(
+            "cat_be_sleep".to_string(),
+            vec![
+                ("cat", PartOfSpeech::Noun),
+                ("be", PartOfSpeech::Aux),
+                ("sleep", PartOfSpeech::Verb),
+            ],
+        )];
         let matcher = LemmaMatcher::new(&patterns);
 
         let tokenization = create_test_tokenization();

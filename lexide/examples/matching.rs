@@ -1,5 +1,6 @@
 use anyhow::Result;
 use lexide::matching::{DependencyMatcher, LemmaMatcher, TextMatcher, TreeNode};
+use lexide::pos::PartOfSpeech;
 use lexide::{Language, Lexide};
 
 #[tokio::main]
@@ -32,17 +33,24 @@ async fn main() -> Result<()> {
     let text_matches = text_matcher.find_all(&tokenization);
     println!("Text matches: {:?}", text_matches);
 
-    // LemmaMatcher - matches lemmas (ignores inflection)
+    // LemmaMatcher - matches lemmas+POS (ignores inflection, distinguishes grammatical role)
     let lemma_matcher = LemmaMatcher::new(&[
-        ("cat_be".to_string(), vec!["cat", "be"]),
-        ("cat_sleep".to_string(), vec!["cat", "sleep"]),
+        (
+            "cat_be".to_string(),
+            vec![("cat", PartOfSpeech::Noun), ("be", PartOfSpeech::Aux)],
+        ),
+        (
+            "cat_sleep".to_string(),
+            vec![("cat", PartOfSpeech::Noun), ("sleep", PartOfSpeech::Verb)],
+        ),
     ]);
     let lemma_matches = lemma_matcher.find_all(&tokenization);
     println!("Lemma matches: {:?}", lemma_matches);
 
     // Quick existence check
     let contains_cat =
-        LemmaMatcher::new(&[("cat".to_string(), vec!["cat"])]).contains(&tokenization);
+        LemmaMatcher::new(&[("cat".to_string(), vec![("cat", PartOfSpeech::Noun)])])
+            .contains(&tokenization);
     println!("Contains 'cat': {}", contains_cat);
 
     println!("\n=== Dependency Tree Matching ===\n");
