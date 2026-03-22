@@ -1,0 +1,64 @@
+name: lexide-xlmr
+
+resources:
+  accelerators: {A100-80GB:1, A100:1, GH200:1}
+  disk_size: 100
+  autostop:
+    idle_minutes: 30
+    down: true
+
+workdir: .
+
+setup: |
+  pip install torch transformers wandb tqdm numpy sentencepiece protobuf huggingface_hub
+
+envs:
+  WANDB_API_KEY: ${WANDB_API_KEY}
+  HF_TOKEN: ${HF_TOKEN}
+  HF_USERNAME: anchpop
+  CUDA_LAUNCH_BLOCKING: "1"
+
+run: |
+  set -e
+  cd ~/sky_workdir
+  mkdir -p output/xlmr
+
+  echo "=========================================="
+  echo "Training: XLM-R Large + biaffine deps"
+  echo "=========================================="
+  python src/xlmr_train.py \
+    --data_dir data \
+    --output_dir output/xlmr \
+    --max_length 512 \
+    --batch_size 32 \
+    --grad_accum 1 \
+    --num_epochs 10 \
+    --backbone_lr 2e-5 \
+    --head_lr 1e-3 \
+    --num_workers 4 \
+    --wandb \
+    --run_name xlmr-biaffine
+
+  echo "=========================================="
+  echo "Training: Lemmatizer (using finetuned XLM-R)"
+  echo "=========================================="
+  mkdir -p output/lemma
+  python src/lemma_train.py \
+    --data_dir data \
+    --output_dir output/lemma \
+    --xlmr_checkpoint output/xlmr/best_model.pt \
+    --batch_size 32 \
+    --num_epochs 10 \
+    --lr 3e-4 \
+    --d_model 512 \
+    --nhead 4 \
+    --num_enc_layers 4 \
+    --num_dec_layers 4 \
+    --d_ff 1024 \
+    --num_workers 4 \
+    --wandb \
+    --run_name lemmatizer
+
+  echo "=========================================="
+  echo "Done!"
+  echo "=========================================="

@@ -1,0 +1,44 @@
+name: lexide-char-tokenizer
+
+resources:
+  accelerators: {RTXA6000:1, RTX6000-Ada:1, A100:1, A100-80GB:1}
+  disk_size: 50
+  autostop:
+    idle_minutes: 30
+    down: true
+
+workdir: .
+
+setup: |
+  pip install torch transformers wandb tqdm numpy huggingface_hub
+
+envs:
+  WANDB_API_KEY: ${WANDB_API_KEY}
+  HF_TOKEN: ${HF_TOKEN}
+  HF_USERNAME: anchpop
+
+run: |
+  set -e
+  cd ~/sky_workdir
+  mkdir -p output/tokenizer
+
+  echo "=========================================="
+  echo "Training: Character-level tokenizer"
+  echo "=========================================="
+  python src/tokenizer_train.py \
+    --data_dir data \
+    --output_dir output/tokenizer \
+    --batch_size 64 \
+    --num_epochs 5 \
+    --lr 3e-4 \
+    --char_emb_dim 192 \
+    --lang_emb_dim 48 \
+    --hidden_dim 512 \
+    --num_layers 4 \
+    --num_workers 4 \
+    --wandb \
+    --run_name char-tokenizer-crf
+
+  echo "=========================================="
+  echo "Done!"
+  echo "=========================================="
