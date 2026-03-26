@@ -41,7 +41,7 @@ NUM_POS = len(UPOS_TAGS)
 
 LANG_MAP = {
     "eng": "English", "deu": "German", "fra": "French", "spa": "Spanish",
-    "kor": "Korean", "por": "Portuguese", "ita": "Italian",
+    "kor": "Korean", "por": "Portuguese", "ita": "Italian", "rus": "Russian",
 }
 LANG2ID = {lang: i for i, lang in enumerate(LANG_MAP)}
 NUM_LANGS = len(LANG2ID)

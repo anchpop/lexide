@@ -21,6 +21,7 @@ LANGUAGE_NAMES = {
     "kor": "Korean",
     "por": "Portuguese",
     "ita": "Italian",
+    "rus": "Russian",
 }
 
 
@@ -171,7 +172,7 @@ def print_results_table(results: Dict[str, Dict[str, float]]):
 
     # Per-language rows
     all_values = {m: [] for m in metrics}
-    lang_order = ["eng", "deu", "fra", "spa", "kor", "por", "ita"]
+    lang_order = ["eng", "deu", "fra", "spa", "kor", "por", "ita", "rus"]
     for lang in lang_order:
         if lang not in results:
             continue
@@ -205,7 +206,7 @@ def log_to_wandb(results: Dict[str, Dict[str, float]]):
 
     # Create W&B table
     table = wandb.Table(columns=["Language"] + metrics)
-    lang_order = ["eng", "deu", "fra", "spa", "kor", "por", "ita"]
+    lang_order = ["eng", "deu", "fra", "spa", "kor", "por", "ita", "rus"]
 
     all_values = {m: [] for m in metrics}
     for lang in lang_order:

@@ -29,7 +29,7 @@ except ImportError:
 
 LANG_MAP = {
     "eng": "English", "deu": "German", "fra": "French", "spa": "Spanish",
-    "kor": "Korean", "por": "Portuguese", "ita": "Italian",
+    "kor": "Korean", "por": "Portuguese", "ita": "Italian", "rus": "Russian",
 }
 
 

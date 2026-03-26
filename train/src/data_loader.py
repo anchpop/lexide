@@ -21,6 +21,7 @@ class MultilingualNLPDataset:
             "kor": "Korean",
             "por": "Portuguese",
             "ita": "Italian",
+            "rus": "Russian",
         }
 
     def load_data(self, languages: Optional[List[str]] = None):
