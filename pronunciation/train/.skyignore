@@ -1,0 +1,5 @@
+data/
+output/
+wandb/
+.venv/
+__pycache__/

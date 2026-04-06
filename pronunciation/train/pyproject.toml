@@ -1,0 +1,17 @@
+[project]
+name = "lexide-pronunciation"
+version = "0.1.0"
+description = "Multilingual Conformer+CTC model for IPA-based pronunciation grading"
+requires-python = ">=3.11"
+dependencies = [
+    "accelerate>=1.10.1",
+    "datasets>=4.2.0",
+    "onnx>=1.16.0",
+    "onnxruntime>=1.18.0",
+    "phonemizer>=3.3.0",
+    "soundfile>=0.13.0",
+    "torch>=2.8.0",
+    "torchaudio>=2.8.0",
+    "tqdm>=4.67.1",
+    "wandb>=0.22.2",
+]

@@ -1,0 +1,92 @@
+name: lexide-pronunciation
+
+resources:
+  accelerators: {A100-80GB:1, A100:1, GH200:1}
+  disk_size: 500
+  autostop:
+    idle_minutes: 60
+    down: true
+
+workdir: .
+
+setup: |
+  pip install torch transformers wandb tqdm numpy sentencepiece protobuf huggingface_hub
+  pip install torchaudio datasets phonemizer soundfile onnx onnxruntime
+  pip uninstall -y torchcodec 2>/dev/null || true
+  python3 -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, version: {torch.__version__}, arch: {torch.cuda.get_arch_list()}')"
+  sudo apt-get update && sudo apt-get install -y espeak-ng
+
+envs:
+  WANDB_API_KEY: ${WANDB_API_KEY}
+  HF_TOKEN: ${HF_TOKEN}
+  HF_USERNAME: anchpop
+  TOKENIZERS_PARALLELISM: "false"
+  HF_AUDIO_DECODER: soundfile
+  CUDA_VISIBLE_DEVICES: "0"
+
+run: |
+  set -e
+  cd ~/sky_workdir
+  mkdir -p data/raw data/manifests output/conformer
+
+  echo "=========================================="
+  echo "Step 1: Download datasets"
+  echo "=========================================="
+  python scripts/download_data.py \
+    --output_dir data/raw \
+    --languages en,de,es,fr
+
+  # Clean up HF cache to save disk (data is also cached in data/raw/)
+  echo "Clearing HF cache to free disk..."
+  rm -rf ~/.cache/huggingface/hub/
+
+  echo "=========================================="
+  echo "Step 2: Preprocess (text -> IPA)"
+  echo "=========================================="
+  python scripts/preprocess.py \
+    --cache_dir data/raw \
+    --output_dir data/manifests \
+    --max_hours 2000 \
+    --languages en,de,es,fr
+
+  echo "=========================================="
+  echo "Step 3: Build IPA vocabulary"
+  echo "=========================================="
+  python scripts/build_vocab.py \
+    --manifest_dir data/manifests \
+    --output data/vocab.json
+
+  echo "=========================================="
+  echo "Step 4: Train Conformer+CTC"
+  echo "=========================================="
+  python -m src.train \
+    --data_dir data/manifests \
+    --vocab_path data/vocab.json \
+    --output_dir output/conformer \
+    --model_dim 512 \
+    --num_layers 24 \
+    --num_heads 8 \
+    --ffn_dim 2048 \
+    --batch_size 32 \
+    --grad_accum 2 \
+    --num_epochs 50 \
+    --lr 5e-4 \
+    --warmup_steps 25000 \
+    --num_workers 0 \
+    --eval_steps 5000 \
+    --save_steps 5000 \
+    --wandb \
+    --run_name conformer-ctc-ipa-16lang
+
+  echo "=========================================="
+  echo "Step 5: ONNX export + quantization"
+  echo "=========================================="
+  python -m src.export \
+    --checkpoint output/conformer/best_model.pt \
+    --vocab_path data/vocab.json \
+    --output output/conformer/model.onnx \
+    --quantized_output output/conformer/model_int8.onnx
+
+  echo "=========================================="
+  echo "Done!"
+  echo "=========================================="
