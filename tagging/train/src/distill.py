@@ -58,9 +58,22 @@ def load_teacher(args: DistillArgs):
         torch_dtype=torch.bfloat16,
     )
 
-    # Load and merge LoRA adapter
+    # Replace Gemma4ClippableLinear wrappers with inner nn.Linear for PEFT compatibility
+    try:
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
+        count = 0
+        for name, module in model.named_modules():
+            for child_name, child in module.named_children():
+                if isinstance(child, Gemma4ClippableLinear):
+                    setattr(module, child_name, child.linear)
+                    count += 1
+        if count:
+            print(f"Teacher: replaced {count} Gemma4ClippableLinear wrappers with inner nn.Linear")
+    except ImportError:
+        pass
+
+    # Load LoRA adapter — keep as PeftModel (don't merge into quantized weights)
     model = PeftModel.from_pretrained(model, args.teacher_adapter)
-    model = model.merge_and_unload()
     model.eval()
 
     for param in model.parameters():
@@ -224,7 +237,7 @@ def main():
 
     training_args = TrainingArguments(
         output_dir="./checkpoints-distill",
-        num_train_epochs=5,
+        num_train_epochs=2,
         per_device_train_batch_size=8,
         per_device_eval_batch_size=4,
         gradient_accumulation_steps=2,

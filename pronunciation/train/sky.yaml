@@ -1,0 +1,41 @@
+resources:
+  cloud: lambda
+  accelerators: {A100:1, H100:1, A10:1, A100-80GB:1}
+  disk_size: 200
+
+  autostop:
+    idle_minutes: 30
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+  ~/data: ../data/audio
+
+setup: |
+  cd ~/sky_workdir
+  pip install --index-url https://download.pytorch.org/whl/cu124 torch torchaudio
+  pip install transformers datasets soundfile tqdm wandb
+
+run: |
+  cd ~/sky_workdir
+  export CUDA_VISIBLE_DEVICES=0
+  export WANDB_PROJECT="lexide-pronunciation"
+  export WANDB_API_KEY=${WANDB_API_KEY}
+  export HF_TOKEN=${HF_TOKEN}
+
+  # Phoneme data must be already preprocessed locally (before sky launch).
+  # Audio dir is mounted read-only at ~/data via file_mounts above.
+
+  python -m src.train \
+    --data-dir ~/data \
+    --epochs 10 \
+    --batch-size 8 \
+    --lr 1e-3 \
+    --save-dir checkpoints \
+    --hf-repo anchpop/lexide-pronunciation-stress
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null

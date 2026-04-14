@@ -216,6 +216,8 @@ def main():
         gradient_checkpointing=True,
         warmup_steps=500,
         learning_rate=2e-4,
+        lr_scheduler_type="cosine",
+        weight_decay=0.01,
         fp16=not torch.cuda.is_bf16_supported(),
         bf16=torch.cuda.is_bf16_supported(),
         logging_steps=100,

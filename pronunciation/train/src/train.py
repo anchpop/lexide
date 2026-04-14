@@ -1,248 +1,309 @@
-"""Training loop for Conformer+CTC pronunciation model."""
+"""Train stress prediction head on top of frozen wav2vec2."""
 
 import argparse
-import os
 from pathlib import Path
 
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, WeightedRandomSampler
+import torch.nn.functional as F
+import torchaudio.functional as AF
+from torch.utils.data import DataLoader, ConcatDataset, random_split
 from tqdm import tqdm
 
-from .audio import AudioProcessor
-from .dataset import (
-    PronunciationDataset,
-    collate_fn,
-    compute_language_weights,
-)
-from .evaluate import evaluate
-from .model import ConformerCTCModel
-from .vocab import IPAVocab
+import wandb
+
+from .dataset import StressDataset, collate_fn, NUM_STRESS_LABELS
+from .model import Wav2Vec2StressModel, load_processor
 
 
-def noam_schedule(step: int, warmup_steps: int) -> float:
-    """Noam-style LR: linear warmup then inverse sqrt decay."""
-    if step < warmup_steps:
-        return step / max(warmup_steps, 1)
-    return (warmup_steps / step) ** 0.5
+def forced_align_frame_labels(
+    ctc_logits: torch.Tensor,   # (frames, vocab)
+    phoneme_ids: torch.Tensor,  # (num_phonemes,)
+    stress_seq: torch.Tensor,   # (num_phonemes,)
+    num_frames: int,
+    blank_id: int,
+) -> torch.Tensor:
+    """Use torchaudio's forced_align to map each frame to a phoneme,
+    then use stress_seq to derive per-frame stress labels.
+
+    Frames aligned to blank get label STRESS_NONE (0).
+    """
+    log_probs = F.log_softmax(ctc_logits[:num_frames], dim=-1).unsqueeze(0)  # (1, T, V)
+    targets = phoneme_ids.unsqueeze(0)  # (1, L)
+
+    # forced_align returns (frame_alignments, frame_scores)
+    # frame_alignments[0, t] = token index (0..L-1) or blank
+    # It uses the token IDs we give it, not indices — so we pass through.
+    alignments, _ = AF.forced_align(log_probs, targets, blank=blank_id)
+    alignments = alignments.squeeze(0)  # (T,)
+
+    frame_stress = torch.zeros(num_frames, dtype=torch.long, device=ctc_logits.device)
+    # Walk through alignments, mapping each emitted token to its position in the target
+    phoneme_pos = -1
+    prev_token = blank_id
+    for t in range(num_frames):
+        tok = alignments[t].item()
+        if tok == blank_id:
+            continue
+        # When we see a new non-blank token, advance to next phoneme in target
+        if tok != prev_token:
+            phoneme_pos += 1
+        prev_token = tok
+        if 0 <= phoneme_pos < stress_seq.shape[0]:
+            frame_stress[t] = stress_seq[phoneme_pos]
+
+    return frame_stress
 
 
-def save_checkpoint(
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    step: int,
-    epoch: int,
-    output_dir: str,
-    best: bool = False,
-) -> None:
-    path = os.path.join(output_dir, "best_model.pt" if best else f"checkpoint_{step}.pt")
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "step": step,
-            "epoch": epoch,
-        },
-        path,
-    )
+def compute_frame_labels_batch(ctc_logits, phoneme_ids, stress_seq, phoneme_lens,
+                               audio_lens, blank_id, conv_ratio):
+    """Compute per-frame stress labels for each sample in the batch via forced alignment.
+
+    conv_ratio: how many audio samples per output frame (320 for wav2vec2 @ 16kHz).
+    """
+    batch_size, max_frames = ctc_logits.shape[:2]
+    frame_labels = torch.zeros(batch_size, max_frames, dtype=torch.long, device=ctc_logits.device)
+    frame_masks = torch.zeros(batch_size, max_frames, dtype=torch.bool, device=ctc_logits.device)
+
+    for i in range(batch_size):
+        n_frames = min(audio_lens[i].item() // conv_ratio, max_frames)
+        n_phonemes = phoneme_lens[i].item()
+        if n_frames <= 0 or n_phonemes == 0 or n_frames < n_phonemes:
+            continue
+
+        try:
+            labels = forced_align_frame_labels(
+                ctc_logits[i],
+                phoneme_ids[i, :n_phonemes],
+                stress_seq[i, :n_phonemes],
+                n_frames,
+                blank_id,
+            )
+            frame_labels[i, :n_frames] = labels
+            frame_masks[i, :n_frames] = True
+        except Exception as e:
+            # Forced alignment can fail if sequence is too long for the frames
+            continue
+
+    return frame_labels, frame_masks
 
 
-def cleanup_checkpoints(output_dir: str, keep: int = 3) -> None:
-    ckpts = sorted(Path(output_dir).glob("checkpoint_*.pt"), key=lambda p: p.stat().st_mtime)
-    for p in ckpts[:-keep]:
-        p.unlink()
+def train_epoch(model, loader, optimizer, blank_id, conv_ratio, device, epoch):
+    model.train()
+    model.backbone.eval()
+
+    total_loss = 0
+    total_frames = 0
+    correct = 0
+    n_batches = 0
+
+    pbar = tqdm(loader, desc=f"Epoch {epoch}")
+    for batch in pbar:
+        audio = batch["audio"].to(device)
+        audio_mask = batch["audio_mask"].to(device)
+        audio_lens = batch["audio_lens"].to(device)
+        phoneme_ids = batch["phoneme_ids"].to(device)
+        phoneme_lens = batch["phoneme_lens"].to(device)
+        stress_seq = batch["stress_seq"].to(device)
+
+        outputs = model(audio, attention_mask=audio_mask)
+        stress_logits = outputs["stress_logits"]
+        ctc_logits = outputs["ctc_logits"]
+
+        frame_labels, frame_masks = compute_frame_labels_batch(
+            ctc_logits, phoneme_ids, stress_seq, phoneme_lens,
+            audio_lens, blank_id, conv_ratio,
+        )
+
+        # Only compute loss on valid (masked) frames
+        valid = frame_masks.view(-1)
+        if valid.sum() == 0:
+            continue
+
+        flat_logits = stress_logits.view(-1, NUM_STRESS_LABELS)[valid]
+        flat_labels = frame_labels.view(-1)[valid]
+
+        loss = F.cross_entropy(flat_logits, flat_labels)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        preds = flat_logits.argmax(dim=-1)
+        batch_correct = (preds == flat_labels).sum().item()
+        batch_n = flat_labels.shape[0]
+
+        total_loss += loss.item() * batch_n
+        correct += batch_correct
+        total_frames += batch_n
+        n_batches += 1
+
+        pbar.set_postfix(loss=f"{loss.item():.3f}", acc=f"{batch_correct/batch_n:.3f}")
+
+    return total_loss / max(total_frames, 1), correct / max(total_frames, 1)
 
 
-def get_manifest_paths(data_dir: str, split: str) -> list[str]:
-    return sorted(str(p) for p in Path(data_dir).glob(f"manifest_*_{split}.jsonl"))
+@torch.no_grad()
+def eval_epoch(model, loader, blank_id, conv_ratio, device):
+    model.eval()
+    total_loss = 0
+    total_frames = 0
+    correct = 0
+    per_class_correct = [0] * NUM_STRESS_LABELS
+    per_class_total = [0] * NUM_STRESS_LABELS
+
+    for batch in tqdm(loader, desc="Eval"):
+        audio = batch["audio"].to(device)
+        audio_mask = batch["audio_mask"].to(device)
+        audio_lens = batch["audio_lens"].to(device)
+        phoneme_ids = batch["phoneme_ids"].to(device)
+        phoneme_lens = batch["phoneme_lens"].to(device)
+        stress_seq = batch["stress_seq"].to(device)
+
+        outputs = model(audio, attention_mask=audio_mask)
+        stress_logits = outputs["stress_logits"]
+        ctc_logits = outputs["ctc_logits"]
+
+        frame_labels, frame_masks = compute_frame_labels_batch(
+            ctc_logits, phoneme_ids, stress_seq, phoneme_lens,
+            audio_lens, blank_id, conv_ratio,
+        )
+
+        valid = frame_masks.view(-1)
+        if valid.sum() == 0:
+            continue
+
+        flat_logits = stress_logits.view(-1, NUM_STRESS_LABELS)[valid]
+        flat_labels = frame_labels.view(-1)[valid]
+
+        loss = F.cross_entropy(flat_logits, flat_labels)
+        total_loss += loss.item() * flat_labels.shape[0]
+
+        preds = flat_logits.argmax(dim=-1)
+        correct += (preds == flat_labels).sum().item()
+        total_frames += flat_labels.shape[0]
+
+        for c in range(NUM_STRESS_LABELS):
+            mask_c = flat_labels == c
+            per_class_correct[c] += (preds[mask_c] == c).sum().item()
+            per_class_total[c] += mask_c.sum().item()
+
+    per_class_acc = {
+        f"acc_class_{c}": per_class_correct[c] / per_class_total[c]
+        if per_class_total[c] > 0 else 0
+        for c in range(NUM_STRESS_LABELS)
+    }
+    return total_loss / max(total_frames, 1), correct / max(total_frames, 1), per_class_acc
 
 
 def main():
     parser = argparse.ArgumentParser()
-    # Data
-    parser.add_argument("--data_dir", type=str, required=True)
-    parser.add_argument("--vocab_path", type=str, required=True)
-    # Model
-    parser.add_argument("--model_dim", type=int, default=512)
-    parser.add_argument("--num_layers", type=int, default=24)
-    parser.add_argument("--num_heads", type=int, default=8)
-    parser.add_argument("--ffn_dim", type=int, default=2048)
-    parser.add_argument("--conv_kernel_size", type=int, default=31)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    # Training
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--grad_accum", type=int, default=1)
-    parser.add_argument("--num_epochs", type=int, default=50)
-    parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--warmup_steps", type=int, default=25000)
-    parser.add_argument("--weight_decay", type=float, default=1e-6)
-    parser.add_argument("--max_grad_norm", type=float, default=5.0)
-    parser.add_argument("--lang_temp", type=float, default=2.0)
-    parser.add_argument("--num_workers", type=int, default=4)
-    # Output
-    parser.add_argument("--output_dir", type=str, default="output/conformer")
-    parser.add_argument("--eval_steps", type=int, default=5000)
-    parser.add_argument("--save_steps", type=int, default=5000)
-    parser.add_argument("--log_steps", type=int, default=100)
-    # WandB
-    parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--run_name", type=str, default="conformer-ctc-ipa-16lang")
+    parser.add_argument("--data-dir", type=Path, default=Path("../data/audio"))
+    parser.add_argument("--model-name", type=str, default="facebook/wav2vec2-lv-60-espeak-cv-ft")
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--max-audio-sec", type=float, default=16.0)
+    parser.add_argument("--val-split", type=float, default=0.05)
+    parser.add_argument("--save-dir", type=Path, default=Path("checkpoints"))
+    parser.add_argument("--wandb-project", type=str, default="lexide-pronunciation")
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--hf-repo", type=str, default=None,
+                        help="HF repo to push final model to (e.g. anchpop/lexide-pronunciation-stress)")
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    assert torch.cuda.is_available(), "CUDA not available — check torch install"
+    device = torch.device("cuda")
+    print(f"Using device: {device} ({torch.cuda.get_device_name(0)})")
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    processor = load_processor(args.model_name)
+    model = Wav2Vec2StressModel(args.model_name).to(device)
+    blank_id = processor.tokenizer.pad_token_id
+    conv_ratio = 320  # wav2vec2-large downsamples 16kHz audio by 320x → 50fps frames
 
-    # Vocab
-    vocab = IPAVocab.from_file(args.vocab_path)
+    trainable = sum(p.numel() for p in model.get_trainable_params())
+    total = sum(p.numel() for p in model.parameters())
+    print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
 
-    # Audio processor
-    audio_proc = AudioProcessor()
+    # Load pre-computed phoneme datasets
+    datasets = []
+    for lang_dir in sorted(args.data_dir.iterdir()):
+        phonemes_file = lang_dir / "phonemes.jsonl"
+        if phonemes_file.exists():
+            ds = StressDataset(phonemes_file, processor.tokenizer, max_audio_sec=args.max_audio_sec)
+            print(f"Loaded {lang_dir.name}: {len(ds)} samples")
+            datasets.append(ds)
 
-    # Datasets
-    train_manifests = get_manifest_paths(args.data_dir, "train")
-    val_manifests = get_manifest_paths(args.data_dir, "val")
-    assert train_manifests, f"No train manifests found in {args.data_dir}"
-    assert val_manifests, f"No val manifests found in {args.data_dir}"
+    if not datasets:
+        raise RuntimeError("No phonemes.jsonl files found — run preprocess.py first")
 
-    train_dataset = PronunciationDataset(train_manifests, vocab, audio_proc)
-    val_dataset = PronunciationDataset(val_manifests, vocab, audio_proc)
-
-    # Language-balanced sampling
-    weights = compute_language_weights(train_dataset.entries, temperature=args.lang_temp)
-    sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+    full_dataset = ConcatDataset(datasets)
+    val_size = int(len(full_dataset) * args.val_split)
+    train_size = len(full_dataset) - val_size
+    train_ds, val_ds = random_split(
+        full_dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(42),
+    )
+    print(f"Train: {train_size}, Val: {val_size}")
 
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        sampler=sampler,
-        collate_fn=collate_fn,
-        num_workers=args.num_workers,
-        pin_memory=True,
+        train_ds, batch_size=args.batch_size, shuffle=True,
+        collate_fn=collate_fn, num_workers=args.num_workers, pin_memory=True,
     )
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=args.num_workers,
-        pin_memory=True,
+        val_ds, batch_size=args.batch_size, shuffle=False,
+        collate_fn=collate_fn, num_workers=args.num_workers, pin_memory=True,
     )
 
-    # Model
-    model = ConformerCTCModel(
-        vocab_size=vocab.size,
-        model_dim=args.model_dim,
-        num_heads=args.num_heads,
-        ffn_dim=args.ffn_dim,
-        num_layers=args.num_layers,
-        depthwise_conv_kernel_size=args.conv_kernel_size,
-        dropout=args.dropout,
-    ).to(device)
+    optimizer = torch.optim.AdamW(model.get_trainable_params(), lr=args.lr, weight_decay=0.01)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
-    print(f"Vocab size: {vocab.size}")
-    print(f"Train samples: {len(train_dataset):,}")
-    print(f"Val samples: {len(val_dataset):,}")
+    wandb.init(project=args.wandb_project, config=vars(args))
+    args.save_dir.mkdir(parents=True, exist_ok=True)
+    best_val_loss = float("inf")
 
-    # Optimizer + scheduler
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        betas=(0.9, 0.98),
-        weight_decay=args.weight_decay,
-    )
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lambda step: noam_schedule(step + 1, args.warmup_steps)
-    )
+    for epoch in range(1, args.epochs + 1):
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, blank_id, conv_ratio, device, epoch)
+        val_loss, val_acc, per_class_acc = eval_epoch(model, val_loader, blank_id, conv_ratio, device)
+        scheduler.step()
 
-    # CTC loss
-    ctc_loss = nn.CTCLoss(blank=vocab.blank_id, reduction="mean", zero_infinity=True)
+        # Log learned layer weights
+        weights = torch.softmax(model.layer_weights.detach(), dim=0).cpu().tolist()
+        top_layer = max(range(len(weights)), key=lambda i: weights[i])
 
-    # bf16 mixed precision
-    scaler = torch.amp.GradScaler("cuda", enabled=True)
+        print(f"Epoch {epoch}: train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
+              f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} top_layer={top_layer}")
 
-    # WandB
-    if args.wandb:
-        import wandb
-        wandb.init(project="lexide-pronunciation", name=args.run_name, config=vars(args))
+        wandb.log({
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+            "lr": scheduler.get_last_lr()[0],
+            "top_layer": top_layer,
+            **per_class_acc,
+            **{f"layer_weight_{i}": w for i, w in enumerate(weights)},
+        })
 
-    # Training loop
-    global_step = 0
-    best_per = float("inf")
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save({
+                "stress_head": model.stress_head.state_dict(),
+                "layer_weights": model.layer_weights.detach().cpu(),
+                "args": vars(args),
+            }, args.save_dir / "best.pt")
 
-    for epoch in range(args.num_epochs):
-        model.train()
-        epoch_loss = 0.0
-        epoch_steps = 0
+    wandb.finish()
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
-            mels = batch["mels"].to(device)
-            mel_lengths = batch["mel_lengths"].to(device)
-            labels = batch["labels"].to(device)
-            label_lengths = batch["label_lengths"].to(device)
-
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                log_probs, output_lengths = model(mels, mel_lengths)
-                loss = ctc_loss(log_probs, labels, output_lengths, label_lengths)
-
-            if args.grad_accum > 1:
-                loss = loss / args.grad_accum
-
-            scaler.scale(loss).backward()
-
-            if (global_step + 1) % args.grad_accum == 0:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm)
-                scaler.step(optimizer)
-                scaler.update()
-                scheduler.step()
-                optimizer.zero_grad()
-
-            epoch_loss += loss.item() * (args.grad_accum if args.grad_accum > 1 else 1)
-            epoch_steps += 1
-            global_step += 1
-
-            # Log
-            if global_step % args.log_steps == 0:
-                avg_loss = epoch_loss / epoch_steps
-                lr = scheduler.get_last_lr()[0]
-                print(f"Step {global_step} | loss={avg_loss:.4f} | lr={lr:.2e}")
-                if args.wandb:
-                    wandb.log({"train/loss": avg_loss, "train/lr": lr}, step=global_step)
-
-            # Eval
-            if global_step % args.eval_steps == 0:
-                results = evaluate(model, val_loader, vocab, device=device)
-                print(f"Step {global_step} | PER={results['overall_per']:.4f}")
-                for lang, per in sorted(results["per_by_lang"].items()):
-                    print(f"  {lang}: {per:.4f}")
-
-                if args.wandb:
-                    log_dict = {"val/per": results["overall_per"]}
-                    for lang, per in results["per_by_lang"].items():
-                        log_dict[f"val/per_{lang}"] = per
-                    wandb.log(log_dict, step=global_step)
-
-                if results["overall_per"] < best_per:
-                    best_per = results["overall_per"]
-                    save_checkpoint(model, optimizer, scheduler, global_step, epoch, args.output_dir, best=True)
-
-                model.train()
-
-            # Save periodic checkpoint
-            if global_step % args.save_steps == 0:
-                save_checkpoint(model, optimizer, scheduler, global_step, epoch, args.output_dir)
-                cleanup_checkpoints(args.output_dir)
-
-        print(f"Epoch {epoch} done | avg_loss={epoch_loss / max(epoch_steps, 1):.4f}")
-
-    if args.wandb:
-        wandb.finish()
+    if args.hf_repo:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        api.create_repo(args.hf_repo, exist_ok=True)
+        api.upload_file(
+            path_or_fileobj=str(args.save_dir / "best.pt"),
+            path_in_repo="best.pt",
+            repo_id=args.hf_repo,
+        )
+        print(f"Uploaded to https://huggingface.co/{args.hf_repo}")
 
 
 if __name__ == "__main__":

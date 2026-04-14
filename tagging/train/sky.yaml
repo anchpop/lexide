@@ -44,7 +44,7 @@ run: |
 
   # Step 2: Distill teacher into students
   # Use local adapter first (faster than pulling from HF)
-  export TEACHER_ADAPTER=./final_model
+  export TEACHER_ADAPTER=anchpop/lexide-gemma-4-31B-it
   for STUDENT in gemma-4-26B-A4B-it gemma-4-E4B-it gemma-4-E2B-it; do
     echo "=== STEP 2: Distilling into ${STUDENT} ==="
     export STUDENT_MODEL="${STUDENT}"

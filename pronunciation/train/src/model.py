@@ -1,105 +1,73 @@
-"""Conformer + CTC model for multilingual IPA pronunciation grading."""
+"""Wav2vec2 with a learnable-layer-weighted stress prediction head."""
 
 import torch
 import torch.nn as nn
-import torchaudio
+from transformers import (
+    Wav2Vec2ForCTC, Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor,
+    Wav2Vec2Processor,
+)
 
-from .audio import SpecAugment
 
+class Wav2Vec2StressModel(nn.Module):
+    """Freeze wav2vec2 backbone, train a learnable layer-weighted stress head.
 
-class ConformerCTCModel(nn.Module):
-    """Conformer encoder with Conv2d subsampling and CTC head.
-
-    Default config (~110M params):
-        model_dim=512, num_layers=24, ffn_dim=2048, num_heads=8
+    Mallela et al. (2025) found that stress info is strongest in the middle
+    transformer layers, not the final one. So instead of using just the last
+    hidden state, we take all layers and let the head learn a weighted sum.
+    This is the SUPERB-style probing approach.
     """
 
-    def __init__(
-        self,
-        vocab_size: int,
-        input_dim: int = 80,
-        model_dim: int = 512,
-        num_heads: int = 8,
-        ffn_dim: int = 2048,
-        num_layers: int = 24,
-        depthwise_conv_kernel_size: int = 31,
-        dropout: float = 0.1,
-    ):
+    def __init__(self, model_name: str = "facebook/wav2vec2-lv-60-espeak-cv-ft", num_labels: int = 3):
         super().__init__()
+        self.backbone = Wav2Vec2ForCTC.from_pretrained(model_name)
+        hidden_size = self.backbone.config.hidden_size  # 1024
+        num_layers = self.backbone.config.num_hidden_layers + 1  # +1 for embedding
 
-        # Conv2d subsampling: reduces time dimension by 4x
-        self.subsample = nn.Sequential(
-            nn.Conv2d(1, model_dim, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(model_dim, model_dim, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-        )
-        # After subsampling: (B, model_dim, T/4, input_dim/4)
-        # Flatten channel+freq dims and project to model_dim
-        self.subsample_proj = nn.Linear(model_dim * (input_dim // 4), model_dim)
-        self.subsample_norm = nn.LayerNorm(model_dim)
-        self.subsample_dropout = nn.Dropout(dropout)
+        # Freeze the entire backbone (including the original CTC head)
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        self.backbone.eval()
 
-        # Conformer encoder
-        self.conformer = torchaudio.models.Conformer(
-            input_dim=model_dim,
-            num_heads=num_heads,
-            ffn_dim=ffn_dim,
-            num_layers=num_layers,
-            depthwise_conv_kernel_size=depthwise_conv_kernel_size,
-            dropout=dropout,
+        # Learnable weights across layers (softmax-normalized at use time)
+        self.layer_weights = nn.Parameter(torch.zeros(num_layers))
+
+        # Stress prediction head
+        self.stress_head = nn.Sequential(
+            nn.Linear(hidden_size, 256),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, num_labels),
         )
 
-        # CTC projection
-        self.ctc_head = nn.Linear(model_dim, vocab_size)
+    def forward(self, input_values, attention_mask=None):
+        with torch.no_grad():
+            outputs = self.backbone(
+                input_values=input_values,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
 
-        # SpecAugment (applied during training only)
-        self.spec_augment = SpecAugment()
+        # Stack all layers: (num_layers, batch, frames, hidden_size)
+        stacked = torch.stack(outputs.hidden_states, dim=0)
 
-    def _subsample_lengths(self, lengths: torch.Tensor) -> torch.Tensor:
-        """Compute output lengths after two stride-2 conv layers."""
-        # Each conv with kernel=3, stride=2, padding=1: L_out = floor((L_in + 1) / 2)
-        lengths = (lengths + 1) // 2
-        lengths = (lengths + 1) // 2
-        return lengths
+        # Weighted sum across layers (softmax weights for stable training)
+        weights = torch.softmax(self.layer_weights, dim=0)
+        weighted = (stacked * weights.view(-1, 1, 1, 1)).sum(dim=0)  # (batch, frames, hidden)
 
-    def forward(
-        self, mels: torch.Tensor, mel_lengths: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            mels: (B, T, n_mels)
-            mel_lengths: (B,)
-        Returns:
-            log_probs: (T', B, vocab_size) — CTC time-first convention
-            output_lengths: (B,)
-        """
-        # SpecAugment during training
-        if self.training:
-            # SpecAugment expects (B, n_mels, T)
-            x = mels.transpose(1, 2)
-            x = self.spec_augment(x)
-            x = x.transpose(1, 2)
-        else:
-            x = mels
+        stress_logits = self.stress_head(weighted)
 
-        # Subsampling: (B, T, n_mels) -> (B, 1, T, n_mels) -> conv
-        x = x.unsqueeze(1)
-        x = self.subsample(x)  # (B, model_dim, T/4, n_mels/4)
-        B, C, T, F = x.shape
-        x = x.permute(0, 2, 1, 3).reshape(B, T, C * F)  # (B, T/4, model_dim * n_mels/4)
-        x = self.subsample_proj(x)  # (B, T/4, model_dim)
-        x = self.subsample_norm(x)
-        x = self.subsample_dropout(x)
+        return {
+            "stress_logits": stress_logits,
+            "ctc_logits": outputs.logits,  # from frozen original head
+            "layer_weights": weights,
+        }
 
-        output_lengths = self._subsample_lengths(mel_lengths)
+    def get_trainable_params(self):
+        yield self.layer_weights
+        yield from self.stress_head.parameters()
 
-        # Conformer
-        x, output_lengths = self.conformer(x, output_lengths)
 
-        # CTC head
-        logits = self.ctc_head(x)  # (B, T', vocab_size)
-        log_probs = logits.log_softmax(dim=-1)
-        log_probs = log_probs.transpose(0, 1)  # (T', B, vocab_size)
-
-        return log_probs, output_lengths
+def load_processor(model_name: str = "facebook/wav2vec2-lv-60-espeak-cv-ft"):
+    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
+    tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_name)
+    return Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)

@@ -1,5 +1,4 @@
-data/
-output/
-wandb/
 .venv/
 __pycache__/
+*.pyc
+checkpoints/

@@ -41,7 +41,7 @@ run: |
 
 envs:
   TEACHER_ADAPTER: anchpop/lexide-gemma-4-31B-it
-  STUDENT_MODELS: "gemma-4-26B-A4B-it gemma-4-E4B-it gemma-4-E2B-it"
+  STUDENT_MODELS: "gemma-4-E4B-it"
   HF_USERNAME: anchpop
 
 secrets:

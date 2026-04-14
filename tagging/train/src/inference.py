@@ -26,7 +26,21 @@ class MultilingualNLPInference:
             torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
             device_map="auto" if self.device == "cuda" else None
         )
-        
+
+        # Replace Gemma4ClippableLinear wrappers with inner nn.Linear for PEFT compatibility
+        try:
+            from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
+            count = 0
+            for name, module in self.model.named_modules():
+                for child_name, child in module.named_children():
+                    if isinstance(child, Gemma4ClippableLinear):
+                        setattr(module, child_name, child.linear)
+                        count += 1
+            if count:
+                print(f"Replaced {count} Gemma4ClippableLinear wrappers with inner nn.Linear")
+        except ImportError:
+            pass
+
         if Path(adapter_path).exists():
             print(f"Loading LoRA adapter from {adapter_path}...")
             self.model = PeftModel.from_pretrained(self.model, adapter_path)
