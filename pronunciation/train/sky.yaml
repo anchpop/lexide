@@ -1,6 +1,6 @@
 resources:
   cloud: lambda
-  accelerators: {A100:1, H100:1, A10:1, A100-80GB:1}
+  accelerators: GH200:1
   disk_size: 200
 
   autostop:
@@ -15,7 +15,9 @@ file_mounts:
 
 setup: |
   cd ~/sky_workdir
-  pip install --index-url https://download.pytorch.org/whl/cu124 torch torchaudio
+  # Pin torch >= 2.8 (matches pyproject) — transformers 5.x requires >= 2.6 (CVE-2025-32434).
+  # cu128 has aarch64 wheels for GH200; cu124 ships older torch on aarch64.
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
   pip install transformers datasets soundfile tqdm wandb
 
 run: |
@@ -28,13 +30,17 @@ run: |
   # Phoneme data must be already preprocessed locally (before sky launch).
   # Audio dir is mounted read-only at ~/data via file_mounts above.
 
+  # GH200 config: bf16, batch=64 (96GB HBM3, room to grow), lr linearly scaled
+  # from the original 1e-3 @ batch 8 baseline, 16 dataloader workers.
   python -m src.train \
     --data-dir ~/data \
     --epochs 10 \
-    --batch-size 8 \
-    --lr 1e-3 \
+    --batch-size 64 \
+    --lr 4e-3 \
+    --num-workers 16 \
+    --bf16 \
     --save-dir checkpoints \
-    --hf-repo anchpop/lexide-pronunciation-stress
+    --hf-repo anchpop/lexide-pronunciation-stress-xlsr53
 
 secrets:
   HF_TOKEN: null
