@@ -1,0 +1,58 @@
+resources:
+  cloud: lambda
+  # GH200 preferred, H100 fallback. Lambda's GH200 capacity is bursty;
+  # H100 has 80GB and works fine for this workload.
+  accelerators: {GH200:1, H100:1}
+  disk_size: 200
+
+  autostop:
+    idle_minutes: 30
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+  ~/data: ../data/audio
+
+setup: |
+  cd ~/sky_workdir
+  # Pin torch >= 2.8 (matches pyproject) — transformers 5.x requires >= 2.6 (CVE-2025-32434).
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  pip install transformers datasets soundfile tqdm wandb
+
+run: |
+  cd ~/sky_workdir
+  export CUDA_VISIBLE_DEVICES=0
+  export WANDB_PROJECT="lexide-pronunciation"
+  export WANDB_API_KEY=${WANDB_API_KEY}
+  export HF_TOKEN=${HF_TOKEN}
+
+  # Phoneme data must be preprocessed locally (before sky launch).
+  # Audio dir is mounted read-only at ~/data via file_mounts above.
+
+  # Train a phoneme CTC head from scratch on top of the 2B-param XLS-R backbone.
+  # xls-r-2b is the largest publicly-released wav2vec2 variant (vs xlsr-53 at ~300M).
+  # No espeak-finetuned variant exists at this size, so we load the raw backbone
+  # and initialize a fresh lm_head at vocab_size=392 to match the espeak tokenizer
+  # loaded from xlsr-53-espeak-cv-ft (whose processor is a known-good espeak vocab).
+  # Backbone stays frozen; only the new head (1920 -> 392) is trained.
+  # lr=1e-3 because head starts from random init (vs 1e-4 for the warm-start case
+  # where the head was already trained). 10 epochs for the same reason.
+  # batch=32 because activations are larger with hidden=1920 vs 1024.
+  python -m src.train_phoneme \
+    --data-dir ~/data \
+    --model-name facebook/wav2vec2-xls-r-2b \
+    --processor-source facebook/wav2vec2-xlsr-53-espeak-cv-ft \
+    --vocab-size 392 \
+    --epochs 10 \
+    --batch-size 32 \
+    --lr 1e-3 \
+    --num-workers 16 \
+    --bf16 \
+    --save-dir checkpoints-phoneme \
+    --hf-repo anchpop/lexide-pronunciation-phoneme-xls-r-2b
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null

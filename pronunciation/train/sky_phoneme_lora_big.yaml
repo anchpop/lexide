@@ -1,0 +1,51 @@
+resources:
+  cloud: lambda
+  accelerators: {GH200:1, H100:1}
+  disk_size: 200
+
+  autostop:
+    idle_minutes: 30
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+  ~/data: ../data/audio
+
+setup: |
+  cd ~/sky_workdir
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  pip install transformers datasets soundfile tqdm wandb peft
+
+run: |
+  cd ~/sky_workdir
+  export CUDA_VISIBLE_DEVICES=0
+  export WANDB_PROJECT="lexide-pronunciation"
+  export WANDB_API_KEY=${WANDB_API_KEY}
+  export HF_TOKEN=${HF_TOKEN}
+
+  # Maxed-out LoRA: rank=64 (4x the standard rank-16) across all attention projections
+  # AND the FFN linears. Roughly ~100M trainable LoRA params + 753K lm_head, vs ~9M for
+  # the rank-16 attention-only variant. Tests whether the standard config was
+  # capacity-limited vs whether the bottleneck is something structural.
+  python -m src.train_phoneme \
+    --data-dir ~/data \
+    --model-name facebook/wav2vec2-xls-r-2b \
+    --processor-source facebook/wav2vec2-xlsr-53-espeak-cv-ft \
+    --vocab-size 392 \
+    --lora \
+    --lora-rank 64 \
+    --lora-targets q_proj k_proj v_proj out_proj intermediate_dense output_dense \
+    --gradient-checkpointing \
+    --epochs 5 \
+    --batch-size 32 \
+    --lr 3e-4 \
+    --num-workers 16 \
+    --bf16 \
+    --save-dir checkpoints-phoneme-lora-big \
+    --hf-repo anchpop/lexide-pronunciation-phoneme-xls-r-2b-lora-big
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null
