@@ -1,10 +1,9 @@
-"""Head-only CTC fine-tune of wav2vec2-xlsr-53-espeak-cv-ft on the multilingual data.
+"""Full-backbone CTC fine-tune of a wav2vec2 model on multilingual espeak phoneme labels.
 
-Freezes the 317M-param backbone, leaves only `lm_head` (~400K params) trainable, and
-re-fits it on the existing FLEURS + TTS phoneme data across all 7 languages. The goal
-is to move the close-call substitutions documented in the French quirks doc (e.g.
-/ɛ/→/e/, /y/→/i/, /e/→/i/) where the correct phoneme is already in the head's top-10
-but ranked below the chosen one.
+The canonical recipe: load a raw multilingual wav2vec2 backbone (e.g. xls-r-2b),
+override the CTC head to match the espeak tokenizer vocab (392 tokens), and train
+the whole thing end-to-end with bf16 + gradient checkpointing. Validated against
+xls-r-2b giving val_loss ≈ 227 and a 75% verifier baseline on French TTS.
 
 Saves a full `Wav2Vec2ForCTC` via `save_pretrained()` so downstream callers (Modal
 endpoint etc.) can load with vanilla `from_pretrained(repo)`.
@@ -26,41 +25,6 @@ from .dataset import StressDataset, collate_fn
 from .model import load_processor
 
 
-def freeze_backbone(model: Wav2Vec2ForCTC):
-    """Freeze everything except lm_head."""
-    for p in model.wav2vec2.parameters():
-        p.requires_grad = False
-    for p in model.lm_head.parameters():
-        p.requires_grad = True
-
-
-def unfreeze_all(model: Wav2Vec2ForCTC):
-    """Train every parameter (full fine-tune mode)."""
-    for p in model.parameters():
-        p.requires_grad = True
-
-
-def apply_lora(model: Wav2Vec2ForCTC, rank: int, target_modules: list[str]):
-    """Wrap backbone with LoRA adapters on the given modules; keep lm_head fully trainable.
-
-    Adapts the (self-supervised-pretrained) backbone for phoneme classification without
-    full-model retraining. Param count scales with rank × number of target modules
-    × number of layers (wav2vec2-xls-r-2b has 48 transformer layers).
-    """
-    from peft import LoraConfig, get_peft_model
-    lora_config = LoraConfig(
-        r=rank,
-        lora_alpha=2 * rank,
-        target_modules=target_modules,
-        lora_dropout=0.05,
-        bias="none",
-        # Train lm_head normally (not as a LoRA adapter) since it's small and being
-        # learned from random init.
-        modules_to_save=["lm_head"],
-    )
-    return get_peft_model(model, lora_config)
-
-
 def make_labels(phoneme_ids: torch.Tensor, phoneme_lens: torch.Tensor) -> torch.Tensor:
     """CTC loss expects padding marked with -100. Collator pads with 0; convert here."""
     labels = phoneme_ids.clone()
@@ -70,17 +34,8 @@ def make_labels(phoneme_ids: torch.Tensor, phoneme_lens: torch.Tensor) -> torch.
     return labels
 
 
-def train_epoch(model, loader, optimizer, device, epoch, use_bf16, backbone_eval_mode=True):
+def train_epoch(model, loader, optimizer, device, epoch, use_bf16):
     model.train()
-    if backbone_eval_mode:
-        # Frozen-backbone case: keep wav2vec2 in eval mode so SpecAug and dropout
-        # don't disturb the pretrained activations. For LoRA / full fine-tune we want
-        # those regularizers on, so skip this.
-        backbone = getattr(model, "wav2vec2", None) or getattr(
-            getattr(model, "base_model", None), "model", model,
-        ).wav2vec2
-        backbone.eval()
-
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         if use_bf16 else contextlib.nullcontext()
@@ -119,7 +74,7 @@ def train_epoch(model, loader, optimizer, device, epoch, use_bf16, backbone_eval
         t_lb = time.perf_counter()
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
-            [p for p in model.parameters() if p.requires_grad], max_norm=float("inf"),
+            model.parameters(), max_norm=float("inf"),
         )
         optimizer.step()
         optimizer.zero_grad()
@@ -180,19 +135,19 @@ def eval_epoch(model, loader, device, use_bf16):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path, default=Path("../data/audio"))
-    parser.add_argument("--model-name", type=str, default="facebook/wav2vec2-xlsr-53-espeak-cv-ft")
+    parser.add_argument("--model-name", type=str, default="facebook/wav2vec2-xls-r-2b")
     parser.add_argument("--processor-source", type=str, default=None,
                         help="Where to load the tokenizer + feature extractor from. "
                              "Defaults to --model-name. Set this when --model-name is a raw "
-                             "backbone without a tokenizer (e.g. wav2vec2-xls-r-1b/2b); "
+                             "backbone without a tokenizer (e.g. wav2vec2-xls-r-2b); "
                              "use facebook/wav2vec2-xlsr-53-espeak-cv-ft for the espeak vocab.")
     parser.add_argument("--vocab-size", type=int, default=None,
                         help="Override CTC head vocab size. Needed when loading a raw backbone "
                              "(default config has no vocab_size). Should match the processor "
                              "tokenizer's vocab (392 for espeak).")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--max-audio-sec", type=float, default=16.0)
     parser.add_argument("--val-split", type=float, default=0.05)
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints-phoneme"))
@@ -204,22 +159,9 @@ def main():
                         help="Restrict training to these language codes (e.g. fra eng). "
                              "Default: all phonemes.jsonl files found under data-dir.")
     parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("--lora", action="store_true",
-                        help="Wrap backbone in LoRA adapters; train adapters + lm_head.")
-    parser.add_argument("--lora-rank", type=int, default=16)
-    parser.add_argument("--lora-targets", nargs="+",
-                        default=["q_proj", "k_proj", "v_proj"],
-                        help="Module names to apply LoRA to (e.g. q_proj k_proj v_proj out_proj "
-                             "intermediate_dense output_dense). More modules = more capacity "
-                             "but slower training.")
-    parser.add_argument("--full-finetune", action="store_true",
-                        help="Unfreeze all parameters and train end-to-end. Use lower lr "
-                             "(~1e-5) and gradient-checkpointing to fit in memory.")
     parser.add_argument("--gradient-checkpointing", action="store_true",
-                        help="Trade compute for activation memory. Essential for full fine-tune.")
+                        help="Trade compute for activation memory. Essential at 2B scale.")
     args = parser.parse_args()
-    if sum([args.lora, args.full_finetune]) > 1:
-        raise SystemExit("Pick at most one of --lora / --full-finetune (default = head-only)")
 
     assert torch.cuda.is_available(), "CUDA not available"
     device = torch.device("cuda")
@@ -242,20 +184,6 @@ def main():
 
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
-        # When the backbone is frozen (or LoRA-adapted) and gradient checkpointing
-        # is on, gradients need a path back from the embedding to the trainable
-        # params. enable_input_require_grads forces the embedding output to
-        # carry require_grad so the gradient graph isn't broken at the checkpoint
-        # boundary.
-        if hasattr(model, "enable_input_require_grads"):
-            model.enable_input_require_grads()
-
-    if args.lora:
-        model = apply_lora(model, args.lora_rank, args.lora_targets)
-    elif args.full_finetune:
-        unfreeze_all(model)
-    else:
-        freeze_backbone(model)
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -297,10 +225,7 @@ def main():
         persistent_workers=args.num_workers > 0,
     )
 
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=args.lr, weight_decay=0.01,
-    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     backbone_slug = args.model_name.split("/")[-1]
@@ -315,10 +240,7 @@ def main():
         hf_api.create_repo(args.hf_repo, exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
-        train_stats = train_epoch(
-            model, train_loader, optimizer, device, epoch, args.bf16,
-            backbone_eval_mode=not (args.lora or args.full_finetune),
-        )
+        train_stats = train_epoch(model, train_loader, optimizer, device, epoch, args.bf16)
         val_loss = eval_epoch(model, val_loader, device, args.bf16)
         scheduler.step()
 
@@ -349,30 +271,13 @@ def main():
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            # Save full Wav2Vec2ForCTC + processor so HF repo is self-contained
+            # Save full Wav2Vec2ForCTC + processor so the HF repo is self-contained
             # and downstream `from_pretrained(repo)` just works.
-            # For PEFT-wrapped models, deepcopy + merge_and_unload first so the saved
-            # repo is a vanilla Wav2Vec2ForCTC (no peft dependency on the load side).
-            # Costs ~4GB extra GPU memory during the copy; original training model
-            # keeps its LoRA wrapping and continues training untouched.
-            try:
-                from peft import PeftModel
-                _is_peft = isinstance(model, PeftModel)
-            except ImportError:
-                _is_peft = False
-            if _is_peft:
-                import copy
-                save_model = copy.deepcopy(model).merge_and_unload()
-                save_model.save_pretrained(args.save_dir)
-                del save_model
-                torch.cuda.empty_cache()
-            else:
-                model.save_pretrained(args.save_dir)
+            model.save_pretrained(args.save_dir)
             processor.save_pretrained(args.save_dir)
             # Upload on every improvement so the HF repo always reflects the
-            # current best — lets us stop training whenever without losing
-            # progress. Synchronous upload; xls-r-2b is ~8GB so this can take
-            # a couple minutes per epoch on a slow link.
+            # current best — lets us stop training whenever without losing progress.
+            # Synchronous; the ~8GB model takes a couple minutes per epoch.
             if hf_api is not None:
                 print(f"Uploading epoch {epoch} (val_loss={val_loss:.4f}) to HF...")
                 hf_api.upload_folder(

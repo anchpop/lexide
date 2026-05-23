@@ -30,12 +30,22 @@ STRESS_NONE = 0
 STRESS_PRIMARY = 1
 STRESS_SECONDARY = 2
 
+# IPA vowels (monophthongs + near-variants used by espeak-ng across our languages)
+IPA_VOWELS = set("iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaɶɑɒɚɝᵻ")
+
+# Diacritics that continue the preceding vowel (length, nasalization, etc.)
+VOWEL_CONTINUATIONS = set("ːˑ̠̞̯̥̃̊̈")
+
+WORD_BOUNDARIES = set(" \t\n|_-")
+
 
 def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int]]:
     """Run espeak-ng and parse IPA output into (phonemes, stress_labels).
 
-    Stress markers ˈ and ˌ attach to all following phonemes until the next
-    word boundary or stress mark.
+    Stress markers ˈ and ˌ precede a syllable. The stress attaches to that
+    syllable's vowel nucleus only (plus any length/nasalization diacritics).
+    A new vowel after a consonant marks a new syllable → resets stress to none
+    unless a fresh marker appeared.
     """
     result = subprocess.run(
         ["espeak-ng", "-v", espeak_lang, "-q", "--ipa", "-x", text],
@@ -45,19 +55,53 @@ def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int]]:
 
     phonemes = []
     stress = []
-    current_stress = STRESS_NONE
+    pending_stress = None      # set when we see ˈ or ˌ, consumed by next vowel
+    current_stress = STRESS_NONE  # active stress state for the current vowel
+    in_vowel = False           # are we currently emitting the nucleus of a syllable?
 
     for char in raw:
         if char == "ˈ":
-            current_stress = STRESS_PRIMARY
+            pending_stress = STRESS_PRIMARY
+            in_vowel = False
         elif char == "ˌ":
-            current_stress = STRESS_SECONDARY
-        elif char in " \t\n|_":
-            # Word/syllable boundary — reset stress
+            pending_stress = STRESS_SECONDARY
+            in_vowel = False
+        elif char in WORD_BOUNDARIES:
+            pending_stress = None
             current_stress = STRESS_NONE
-        else:
+            in_vowel = False
+        elif char in IPA_VOWELS:
+            if pending_stress is not None:
+                # Stressed vowel: consume the pending marker
+                current_stress = pending_stress
+                pending_stress = None
+            elif not in_vowel:
+                # New syllable after a consonant → unstressed
+                current_stress = STRESS_NONE
+            # else: continuation of diphthong (vowel right after vowel) → inherit
+            in_vowel = True
             phonemes.append(char)
             stress.append(current_stress)
+        elif char in VOWEL_CONTINUATIONS:
+            # Length mark, nasalization, etc. — combining diacritics in espeak's
+            # output. Append to the previous phoneme so the combined string (e.g.
+            # "ɛ̃", "iː", "ɐ̃") matches the tokenizer's *precomposed* vocab tokens.
+            # Emitting them as standalone tokens caused them to be looked up
+            # individually, which made the diacritic UNK and silently stripped
+            # nasalization / length / etc. from training labels — the dominant
+            # cause of confident nasal-vowel denasalization in xls-r-2b-full.
+            if phonemes:
+                phonemes[-1] += char
+            else:
+                # Stray diacritic at start of output — no previous token to attach to
+                phonemes.append(char)
+                stress.append(STRESS_NONE)
+        else:
+            # Consonant — not stress-bearing
+            in_vowel = False
+            current_stress = STRESS_NONE
+            phonemes.append(char)
+            stress.append(STRESS_NONE)
 
     return phonemes, stress
 

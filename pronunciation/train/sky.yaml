@@ -30,17 +30,19 @@ run: |
   # Phoneme data must be already preprocessed locally (before sky launch).
   # Audio dir is mounted read-only at ~/data via file_mounts above.
 
-  # GH200 config: bf16, batch=64 (96GB HBM3, room to grow), lr linearly scaled
-  # from the original 1e-3 @ batch 8 baseline, 16 dataloader workers.
+  # Stress head training on top of the xls-r-2b phoneme backbone. The bigger
+  # backbone (1920 hidden × 49 layers vs xlsr-53's 1024 × 25) means activations
+  # retained for the SUPERB-style layer-weighted probe are ~4x bigger, so we cut
+  # batch from 64 to 32 and halve lr to compensate.
   python -m src.train \
     --data-dir ~/data \
     --epochs 10 \
-    --batch-size 64 \
-    --lr 4e-3 \
+    --batch-size 32 \
+    --lr 2e-3 \
     --num-workers 16 \
     --bf16 \
     --save-dir checkpoints \
-    --hf-repo anchpop/lexide-pronunciation-stress-xlsr53
+    --hf-repo anchpop/lexide-pronunciation-stress
 
 secrets:
   HF_TOKEN: null

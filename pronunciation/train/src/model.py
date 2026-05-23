@@ -17,11 +17,11 @@ class Wav2Vec2StressModel(nn.Module):
     This is the SUPERB-style probing approach.
     """
 
-    def __init__(self, model_name: str = "facebook/wav2vec2-xlsr-53-espeak-cv-ft", num_labels: int = 3):
+    def __init__(self, model_name: str = "anchpop/lexide-pronunciation-phoneme-xls-r-2b", num_labels: int = 3):
         super().__init__()
         self.backbone = Wav2Vec2ForCTC.from_pretrained(model_name)
-        hidden_size = self.backbone.config.hidden_size  # 1024
-        num_layers = self.backbone.config.num_hidden_layers + 1  # +1 for embedding
+        hidden_size = self.backbone.config.hidden_size  # 1920 on xls-r-2b
+        num_layers = self.backbone.config.num_hidden_layers + 1  # +1 for embedding (49 on xls-r-2b)
 
         # Freeze the entire backbone (including the original CTC head)
         for param in self.backbone.parameters():
@@ -67,7 +67,7 @@ class Wav2Vec2StressModel(nn.Module):
         yield from self.stress_head.parameters()
 
 
-def load_processor(model_name: str = "facebook/wav2vec2-xlsr-53-espeak-cv-ft"):
+def load_processor(model_name: str = "anchpop/lexide-pronunciation-phoneme-xls-r-2b"):
     feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
     tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_name)
     return Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)

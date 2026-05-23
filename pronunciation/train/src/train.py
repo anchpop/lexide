@@ -248,7 +248,7 @@ def eval_epoch(model, loader, blank_id, conv_ratio, device):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path, default=Path("../data/audio"))
-    parser.add_argument("--model-name", type=str, default="facebook/wav2vec2-xlsr-53-espeak-cv-ft")
+    parser.add_argument("--model-name", type=str, default="anchpop/lexide-pronunciation-phoneme-xls-r-2b")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
