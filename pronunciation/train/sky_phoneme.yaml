@@ -4,19 +4,23 @@ resources:
   disk_size: 200
 
   autostop:
-    idle_minutes: 30
+    idle_minutes: 120
     down: true
 
 workdir: .
 
 file_mounts:
   ~/.netrc: ~/.netrc
-  ~/data: ../data/audio
 
 setup: |
   cd ~/sky_workdir
   pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
   pip install transformers datasets soundfile tqdm wandb
+  # Pull audio + phoneme labels from the private HF dataset. Decouples cluster
+  # bring-up from local wifi (cluster<->HF peering is fast; local<->cluster is
+  # bottlenecked by whatever connection the user is on). `hf download` is
+  # idempotent — re-running just verifies file hashes against the cache.
+  hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
 
 run: |
   cd ~/sky_workdir

@@ -4,14 +4,13 @@ resources:
   disk_size: 200
 
   autostop:
-    idle_minutes: 30
+    idle_minutes: 120
     down: true
 
 workdir: .
 
 file_mounts:
   ~/.netrc: ~/.netrc
-  ~/data: ../data/audio
 
 setup: |
   cd ~/sky_workdir
@@ -19,6 +18,9 @@ setup: |
   # cu128 has aarch64 wheels for GH200; cu124 ships older torch on aarch64.
   pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
   pip install transformers datasets soundfile tqdm wandb
+  # Pull audio + phoneme labels from the private HF dataset (faster than rsync
+  # over local wifi). `hf download` is idempotent on re-runs.
+  hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
 
 run: |
   cd ~/sky_workdir
@@ -27,8 +29,8 @@ run: |
   export WANDB_API_KEY=${WANDB_API_KEY}
   export HF_TOKEN=${HF_TOKEN}
 
-  # Phoneme data must be already preprocessed locally (before sky launch).
-  # Audio dir is mounted read-only at ~/data via file_mounts above.
+  # Audio + phoneme labels are pulled from the private HF dataset during setup
+  # (see above), so a fresh cluster doesn't need anything beyond the workdir.
 
   # Stress head training on top of the xls-r-2b phoneme backbone. The bigger
   # backbone (1920 hidden × 49 layers vs xlsr-53's 1024 × 25) means activations
