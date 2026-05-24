@@ -1,4 +1,10 @@
-"""Dataset: load audio + pre-computed espeak phonemes with stress labels."""
+"""Dataset: load audio + pre-computed espeak phonemes (with separate stress field).
+
+On disk the phonemes.jsonl stores phonemes and stress as parallel arrays — that
+format is what train/relabel-french/ produces and edits. At load time we
+*interleave* stress markers (ˈ for primary, ˌ for secondary) into the CTC
+token sequence so a single CTC head can learn to emit them inline.
+"""
 
 import json
 from pathlib import Path
@@ -7,18 +13,18 @@ import soundfile as sf
 import torch
 from torch.utils.data import Dataset
 
-STRESS_NONE = 0
+
+# Per-phoneme stress codes used by preprocess.py and relabel-french.
 STRESS_PRIMARY = 1
 STRESS_SECONDARY = 2
-NUM_STRESS_LABELS = 3
 
 
-class StressDataset(Dataset):
-    """Yields (audio, phoneme_token_ids, stress_per_phoneme) triples.
+class PhonemeDataset(Dataset):
+    """Yields (audio, phoneme_token_ids) pairs.
 
-    The phoneme token IDs are mapped to the base model's tokenizer vocabulary
-    so that torchaudio's forced_align can align them against the frozen CTC
-    logits at training time.
+    Phoneme sequences include inline stress markers (ˈ, ˌ) — the tokenizer must
+    have them in its vocab (see STRESS_TOKENS in train_phoneme.py).
+    Unknown phonemes are skipped.
     """
 
     def __init__(self, phonemes_path: Path, tokenizer, max_audio_sec: float = 16.0):
@@ -28,6 +34,13 @@ class StressDataset(Dataset):
         audio_dir = phonemes_path.parent
         self.samples = []
         unk_id = tokenizer.unk_token_id
+        primary_id = tokenizer.convert_tokens_to_ids("ˈ")
+        secondary_id = tokenizer.convert_tokens_to_ids("ˌ")
+        if primary_id == unk_id or secondary_id == unk_id:
+            raise RuntimeError(
+                "Tokenizer must have ˈ and ˌ in its vocab — call "
+                "tokenizer.add_tokens(['ˈ', 'ˌ']) before constructing PhonemeDataset."
+            )
 
         with open(phonemes_path) as f:
             for line in f:
@@ -36,15 +49,17 @@ class StressDataset(Dataset):
                 if not wav_path.exists():
                     continue
 
-                # Map espeak phonemes to base model's vocabulary
+                # Interleave stress markers into the phoneme sequence.
                 phoneme_ids = []
-                stress_seq = []
-                for phoneme, stress in zip(rec["phonemes"], rec["stress"]):
+                for phoneme, s in zip(rec["phonemes"], rec["stress"]):
+                    if s == STRESS_PRIMARY:
+                        phoneme_ids.append(primary_id)
+                    elif s == STRESS_SECONDARY:
+                        phoneme_ids.append(secondary_id)
                     tid = tokenizer.convert_tokens_to_ids(phoneme)
                     if tid == unk_id or tid is None:
-                        continue  # Skip unknown phonemes — forced align can't place them
+                        continue
                     phoneme_ids.append(tid)
-                    stress_seq.append(stress)
 
                 if not phoneme_ids:
                     continue
@@ -52,7 +67,6 @@ class StressDataset(Dataset):
                 self.samples.append({
                     "wav_path": str(wav_path),
                     "phoneme_ids": phoneme_ids,
-                    "stress_seq": stress_seq,
                     "lang": rec["lang"],
                 })
 
@@ -70,7 +84,6 @@ class StressDataset(Dataset):
         return {
             "audio": torch.from_numpy(audio).float(),
             "phoneme_ids": torch.tensor(sample["phoneme_ids"], dtype=torch.long),
-            "stress_seq": torch.tensor(sample["stress_seq"], dtype=torch.long),
             "lang": sample["lang"],
         }
 
@@ -83,7 +96,6 @@ def collate_fn(batch):
     audio_batch = torch.zeros(len(batch), max_audio)
     audio_mask = torch.zeros(len(batch), max_audio, dtype=torch.long)
     phoneme_batch = torch.zeros(len(batch), max_phonemes, dtype=torch.long)
-    stress_batch = torch.zeros(len(batch), max_phonemes, dtype=torch.long)
     audio_lens = torch.zeros(len(batch), dtype=torch.long)
     phoneme_lens = torch.zeros(len(batch), dtype=torch.long)
 
@@ -93,7 +105,6 @@ def collate_fn(batch):
         audio_batch[i, :a] = item["audio"]
         audio_mask[i, :a] = 1
         phoneme_batch[i, :p] = item["phoneme_ids"]
-        stress_batch[i, :p] = item["stress_seq"]
         audio_lens[i] = a
         phoneme_lens[i] = p
 
@@ -103,6 +114,5 @@ def collate_fn(batch):
         "audio_lens": audio_lens,
         "phoneme_ids": phoneme_batch,
         "phoneme_lens": phoneme_lens,
-        "stress_seq": stress_batch,
         "langs": [item["lang"] for item in batch],
     }

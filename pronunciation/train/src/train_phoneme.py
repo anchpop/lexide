@@ -19,10 +19,27 @@ from torch.utils.data import DataLoader, ConcatDataset, random_split
 from tqdm import tqdm
 
 import wandb
-from transformers import Wav2Vec2ForCTC
+from transformers import (
+    Wav2Vec2ForCTC, Wav2Vec2Processor,
+    Wav2Vec2FeatureExtractor, Wav2Vec2CTCTokenizer,
+)
 
-from .dataset import StressDataset, collate_fn
-from .model import load_processor
+from .dataset import PhonemeDataset, collate_fn
+
+
+# Stress markers we add to the espeak tokenizer so the CTC head can emit them
+# inline alongside phonemes (replaces the old separate SUPERB-style stress probe).
+STRESS_TOKENS = ["ˈ", "ˌ"]
+
+
+def load_processor(model_name: str) -> Wav2Vec2Processor:
+    """Construct a Wav2Vec2Processor by pulling the feature extractor + tokenizer
+    from the named HF repo. Use this for a raw backbone like wav2vec2-xls-r-2b,
+    pointed at e.g. facebook/wav2vec2-xlsr-53-espeak-cv-ft for the espeak vocab.
+    """
+    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
+    tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_name)
+    return Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
 
 
 def make_labels(phoneme_ids: torch.Tensor, phoneme_lens: torch.Tensor) -> torch.Tensor:
@@ -141,10 +158,6 @@ def main():
                              "Defaults to --model-name. Set this when --model-name is a raw "
                              "backbone without a tokenizer (e.g. wav2vec2-xls-r-2b); "
                              "use facebook/wav2vec2-xlsr-53-espeak-cv-ft for the espeak vocab.")
-    parser.add_argument("--vocab-size", type=int, default=None,
-                        help="Override CTC head vocab size. Needed when loading a raw backbone "
-                             "(default config has no vocab_size). Should match the processor "
-                             "tokenizer's vocab (392 for espeak).")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-5)
@@ -168,15 +181,20 @@ def main():
     print(f"Using device: {device} ({torch.cuda.get_device_name(0)})")
 
     processor = load_processor(args.processor_source or args.model_name)
-    # When loading a raw backbone (no CTC head), override the head's vocab_size
-    # so it matches the espeak tokenizer (392 tokens). `ignore_mismatched_sizes`
-    # tolerates the absent / mis-shaped lm_head in the source checkpoint.
-    model_kwargs = {}
-    if args.vocab_size is not None:
-        model_kwargs["vocab_size"] = args.vocab_size
-        model_kwargs["pad_token_id"] = processor.tokenizer.pad_token_id
-        model_kwargs["ignore_mismatched_sizes"] = True
-    model = Wav2Vec2ForCTC.from_pretrained(args.model_name, **model_kwargs).to(device)
+    # Extend the espeak tokenizer with stress markers so the CTC head can emit
+    # them inline; final vocab is 394 (392 espeak + ˈ + ˌ).
+    n_added = processor.tokenizer.add_tokens(STRESS_TOKENS)
+    print(f"Added {n_added} stress tokens to tokenizer; vocab_size now {len(processor.tokenizer)}")
+
+    # Loading from a raw backbone (no CTC head) — override head dims to match
+    # the extended tokenizer. `ignore_mismatched_sizes` tolerates the absent /
+    # mis-shaped lm_head in the source checkpoint.
+    model = Wav2Vec2ForCTC.from_pretrained(
+        args.model_name,
+        vocab_size=len(processor.tokenizer),
+        pad_token_id=processor.tokenizer.pad_token_id,
+        ignore_mismatched_sizes=True,
+    ).to(device)
     # Silently zero out CTC infinity losses (occurs when input_length is too short
     # for the target sequence — without this, a single bad sample turns the whole
     # batch's mean loss to inf and the next backward step NaNs the head weights).
@@ -195,7 +213,7 @@ def main():
             continue
         phonemes_file = lang_dir / "phonemes.jsonl"
         if phonemes_file.exists():
-            ds = StressDataset(phonemes_file, processor.tokenizer, max_audio_sec=args.max_audio_sec)
+            ds = PhonemeDataset(phonemes_file, processor.tokenizer, max_audio_sec=args.max_audio_sec)
             print(f"Loaded {lang_dir.name}: {len(ds)} samples")
             datasets.append(ds)
     if not datasets:

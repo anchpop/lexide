@@ -5,8 +5,9 @@ Writes a per-language JSONL with entries:
      "phonemes": ["h", "ɛ", "l", ...],
      "stress": [0, 0, 0, ...]}
 
-These pre-computed phoneme sequences are used at training time to avoid
-subprocess overhead and ensure determinism.
+The separate `stress` array (per-phoneme) is what the French rhythmic-group
+relabeler (train/relabel-french/) edits. Training-time interleaving of stress
+into CTC token sequences happens in dataset.py.
 """
 
 import argparse
@@ -33,8 +34,11 @@ STRESS_SECONDARY = 2
 # IPA vowels (monophthongs + near-variants used by espeak-ng across our languages)
 IPA_VOWELS = set("iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaɶɑɒɚɝᵻ")
 
-# Diacritics that continue the preceding vowel (length, nasalization, etc.)
-VOWEL_CONTINUATIONS = set("ːˑ̠̞̯̥̃̊̈")
+# Diacritics that continue the preceding vowel (length, nasalization, etc.).
+# Appended to the previous phoneme so the combined string (e.g. "ɛ̃", "iː") matches
+# the tokenizer's precomposed vocab — emitting them standalone made them UNK and
+# silently stripped nasalization/length from training labels.
+VOWEL_CONTINUATIONS = set("ːˑ̠̞̯̥̃̊̈")
 
 WORD_BOUNDARIES = set(" \t\n|_-")
 
@@ -72,24 +76,16 @@ def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int]]:
             in_vowel = False
         elif char in IPA_VOWELS:
             if pending_stress is not None:
-                # Stressed vowel: consume the pending marker
                 current_stress = pending_stress
                 pending_stress = None
             elif not in_vowel:
-                # New syllable after a consonant → unstressed
                 current_stress = STRESS_NONE
-            # else: continuation of diphthong (vowel right after vowel) → inherit
             in_vowel = True
             phonemes.append(char)
             stress.append(current_stress)
         elif char in VOWEL_CONTINUATIONS:
-            # Length mark, nasalization, etc. — combining diacritics in espeak's
-            # output. Append to the previous phoneme so the combined string (e.g.
-            # "ɛ̃", "iː", "ɐ̃") matches the tokenizer's *precomposed* vocab tokens.
-            # Emitting them as standalone tokens caused them to be looked up
-            # individually, which made the diacritic UNK and silently stripped
-            # nasalization / length / etc. from training labels — the dominant
-            # cause of confident nasal-vowel denasalization in xls-r-2b-full.
+            # Combining diacritic — append to previous phoneme so the combined
+            # string matches the tokenizer's precomposed vocab tokens (ɛ̃, iː).
             if phonemes:
                 phonemes[-1] += char
             else:
