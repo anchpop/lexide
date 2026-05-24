@@ -1,0 +1,50 @@
+resources:
+  cloud: lambda
+  accelerators: {GH200:1, H100:1}
+  disk_size: 200
+
+  autostop:
+    idle_minutes: 120
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+
+setup: |
+  cd ~/sky_workdir
+  # Pin torch >= 2.8 (matches pyproject) — transformers 5.x requires >= 2.6 (CVE-2025-32434).
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  pip install transformers datasets soundfile tqdm wandb
+
+run: |
+  cd ~/sky_workdir
+  export CUDA_VISIBLE_DEVICES=0
+  export WANDB_PROJECT="lexide-pronunciation"
+  export WANDB_API_KEY=${WANDB_API_KEY}
+  export HF_TOKEN=${HF_TOKEN}
+
+  # Pull (or refresh) audio + phoneme labels from the private HF dataset on every
+  # run — same pattern as the phoneme training. Idempotent on re-runs.
+  hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
+
+  # Stress head training on top of the (frozen) xls-r-2b phoneme backbone.
+  # SUPERB-style probe: learnable layer weights across all 49 transformer
+  # outputs + small MLP. Backbone stays frozen — only ~10MB of new params
+  # trained, with the phoneme model's behavior unchanged.
+  # batch=32 vs xlsr-53's 64 because xls-r-2b retains 4x more activation memory
+  # (more layers x bigger hidden). lr halved to match the batch reduction.
+  python -m src.train \
+    --data-dir ~/data \
+    --epochs 10 \
+    --batch-size 32 \
+    --lr 2e-3 \
+    --num-workers 16 \
+    --bf16 \
+    --save-dir checkpoints-stress \
+    --hf-repo anchpop/lexide-pronunciation-stress
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null

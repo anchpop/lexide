@@ -1,12 +1,13 @@
 """Full-backbone CTC fine-tune of a wav2vec2 model on multilingual espeak phoneme labels.
 
-The canonical recipe: load a raw multilingual wav2vec2 backbone (e.g. xls-r-2b),
-override the CTC head to match the espeak tokenizer vocab (392 tokens), and train
-the whole thing end-to-end with bf16 + gradient checkpointing. Validated against
-xls-r-2b giving val_loss ≈ 227 and a 75% verifier baseline on French TTS.
+Canonical phoneme-only recipe: load a raw multilingual wav2vec2 backbone (e.g.
+xls-r-2b), override the CTC head to match the espeak tokenizer vocab (392 tokens),
+train end-to-end with bf16 + gradient checkpointing. Stress is handled by a
+SEPARATE head (train.py + model.py) — see feedback memory on why inline-stress
+in the CTC vocab is structurally suboptimal.
 
-Saves a full `Wav2Vec2ForCTC` via `save_pretrained()` so downstream callers (Modal
-endpoint etc.) can load with vanilla `from_pretrained(repo)`.
+Saves a full `Wav2Vec2ForCTC` via `save_pretrained()` so downstream callers
+(Modal endpoint, stress-head training) can load with vanilla `from_pretrained`.
 """
 
 import argparse
@@ -19,27 +20,10 @@ from torch.utils.data import DataLoader, ConcatDataset, random_split
 from tqdm import tqdm
 
 import wandb
-from transformers import (
-    Wav2Vec2ForCTC, Wav2Vec2Processor,
-    Wav2Vec2FeatureExtractor, Wav2Vec2CTCTokenizer,
-)
+from transformers import Wav2Vec2ForCTC
 
-from .dataset import PhonemeDataset, collate_fn
-
-
-# Stress markers we add to the espeak tokenizer so the CTC head can emit them
-# inline alongside phonemes (replaces the old separate SUPERB-style stress probe).
-STRESS_TOKENS = ["ˈ", "ˌ"]
-
-
-def load_processor(model_name: str) -> Wav2Vec2Processor:
-    """Construct a Wav2Vec2Processor by pulling the feature extractor + tokenizer
-    from the named HF repo. Use this for a raw backbone like wav2vec2-xls-r-2b,
-    pointed at e.g. facebook/wav2vec2-xlsr-53-espeak-cv-ft for the espeak vocab.
-    """
-    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-    tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_name)
-    return Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
+from .dataset import StressDataset, collate_fn
+from .model import load_processor
 
 
 def make_labels(phoneme_ids: torch.Tensor, phoneme_lens: torch.Tensor) -> torch.Tensor:
@@ -181,14 +165,9 @@ def main():
     print(f"Using device: {device} ({torch.cuda.get_device_name(0)})")
 
     processor = load_processor(args.processor_source or args.model_name)
-    # Extend the espeak tokenizer with stress markers so the CTC head can emit
-    # them inline; final vocab is 394 (392 espeak + ˈ + ˌ).
-    n_added = processor.tokenizer.add_tokens(STRESS_TOKENS)
-    print(f"Added {n_added} stress tokens to tokenizer; vocab_size now {len(processor.tokenizer)}")
-
     # Loading from a raw backbone (no CTC head) — override head dims to match
-    # the extended tokenizer. `ignore_mismatched_sizes` tolerates the absent /
-    # mis-shaped lm_head in the source checkpoint.
+    # the espeak tokenizer (392 tokens). `ignore_mismatched_sizes` tolerates the
+    # absent / mis-shaped lm_head in the source checkpoint.
     model = Wav2Vec2ForCTC.from_pretrained(
         args.model_name,
         vocab_size=len(processor.tokenizer),
@@ -213,7 +192,7 @@ def main():
             continue
         phonemes_file = lang_dir / "phonemes.jsonl"
         if phonemes_file.exists():
-            ds = PhonemeDataset(phonemes_file, processor.tokenizer, max_audio_sec=args.max_audio_sec)
+            ds = StressDataset(phonemes_file, processor.tokenizer, max_audio_sec=args.max_audio_sec)
             print(f"Loaded {lang_dir.name}: {len(ds)} samples")
             datasets.append(ds)
     if not datasets:
