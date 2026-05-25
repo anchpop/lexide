@@ -24,27 +24,29 @@ run: |
   export WANDB_API_KEY=${WANDB_API_KEY}
   export HF_TOKEN=${HF_TOKEN}
 
-  # Pull (or refresh) audio + phoneme labels from the private HF dataset on every
-  # run — that way `sky exec` can queue new jobs against updated data without
-  # re-running setup. `hf download` is idempotent: matching hashes are skipped.
+  # Pull (or refresh) audio + phoneme labels from the private HF dataset.
   hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
 
-  # Full fine-tune of xls-r-2b for phoneme CTC across all 7 languages. Trains all
-  # 2.16B params; lower lr (1e-5) because the whole backbone moves; gradient
-  # checkpointing keeps activation memory manageable; batch=16 fits comfortably
-  # on GH200's 96GB HBM at this scale.
-  python -m src.train_phoneme \
+  # Unified factorized-CTC + stress, fresh from xls-r-2b.
+  # Stress loss is disabled for the first 1000 steps so CTC can converge enough
+  # for forced_align to produce meaningful per-frame stress targets.
+  # batch=16 + gradient checkpointing fits comfortably on GH200's 96GB at 2B scale.
+  python -m src.train_unified \
     --data-dir ~/data \
     --model-name facebook/wav2vec2-xls-r-2b \
     --processor-source facebook/wav2vec2-xlsr-53-espeak-cv-ft \
     --gradient-checkpointing \
-    --epochs 5 \
+    --epochs 7 \
     --batch-size 16 \
-    --lr 1e-5 \
+    --backbone-lr 1e-5 \
+    --head-lr 1e-3 \
+    --stress-weight 0.3 \
+    --stress-warmup-steps 400 \
+    --vad-weight 0 \
     --num-workers 16 \
     --bf16 \
-    --save-dir checkpoints-phoneme \
-    --hf-repo anchpop/lexide-pronunciation-phoneme-xls-r-2b
+    --save-dir checkpoints-unified \
+    --hf-repo anchpop/lexide-pronunciation-unified-xls-r-2b
 
 secrets:
   HF_TOKEN: null
