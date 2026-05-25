@@ -3,7 +3,7 @@
 Usage:
     python -m pronunciation.inference.infer path/to/audio.wav [more.wav ...]
 
-The unified model is `anchpop/lexide-pronunciation-unified-xls-r-2b`: a
+The unified model is `anchpop/lexide-pronunciation-unified`: a
 Wav2Vec2 backbone with three factorized heads (nonblank/phoneme/stress) —
 see train/src/factorized_ctc.py for training-time details. The repo ships
 the backbone via standard `save_pretrained` plus a `factorized_heads.pt`
@@ -22,7 +22,7 @@ from transformers import (
     Wav2Vec2Processor,
 )
 
-REPO = "anchpop/lexide-pronunciation-unified-xls-r-2b"
+REPO = "anchpop/lexide-pronunciation-unified"
 STRESS_MARKS = {0: "", 1: "ˈ", 2: "ˌ"}
 
 

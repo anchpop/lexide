@@ -1,6 +1,6 @@
 resources:
   cloud: lambda
-  accelerators: {GH200:1, H100:1}
+  accelerators: GH200:1
   disk_size: 200
 
   autostop:
@@ -46,7 +46,7 @@ run: |
     --num-workers 16 \
     --bf16 \
     --save-dir checkpoints-unified \
-    --hf-repo anchpop/lexide-pronunciation-unified-xls-r-2b
+    --hf-repo anchpop/lexide-pronunciation-unified
 
 secrets:
   HF_TOKEN: null
