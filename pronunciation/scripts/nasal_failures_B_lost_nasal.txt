@@ -1,0 +1,24 @@
+# Group B: model lost the nasalization, replaced with plain oral vowel.
+# Audit question: "did the speaker nasalize, or did they say a clear oral /a/?"
+# This is the high-information cluster — these are the genuine nasal-recognition failures
+# (if speaker really nasalized) vs. data ambiguity (if speaker didn't).
+# 15 clips.
+#
+# Nose-pinch test: mimic the vowel and pinch your nose. If the sound changes
+# a lot when you pinch → it was nasal. If barely any change → it was oral.
+
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/21a_pain.wav  exp=[p ɛ̃]  pred=[t a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/21d_un.wav  exp=[œ̃]  pred=[a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/22a_vin.wav  exp=[v ɛ̃]  pred=[v a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/23a_teint.wav  exp=[t ɛ̃]  pred=[t a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b015_est_un.wav  exp=[ɛ t œ̃]  pred=[e t a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b021_a_un.wav  exp=[ɑ œ̃]  pred=[ɑ a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b029_un.wav  exp=[œ̃]  pred=[a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b036_en.wav  exp=[ɑ̃]  pred=[a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b041_bien.wav  exp=[b j ɛ̃]  pred=[b j a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b057_maintenant.wav  exp=[m ɛ̃ t ə n ɑ̃]  pred=[m a t ə n ɔ]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b154_dans_un.wav  exp=[d ɑ̃ z œ̃]  pred=[d ɑ̃ z a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b172_demain.wav  exp=[d ə m ɛ̃]  pred=[d ə m a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b178_est_mon.wav  exp=[ɛ m ɔ̃]  pred=[ɛ m u]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b186_rien.wav  exp=[ʁ i ɛ̃]  pred=[x i n a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b191_un_bon.wav  exp=[œ̃ b ɔ̃]  pred=[a m b ɔ̃ ŋ]

@@ -1,0 +1,36 @@
+# 28 nasal-vowel failures from Jean-Cavard eval (current best VAD model).
+# Format: path  exp=[expected phonemes]  pred=[model's prediction]
+# Paths are ABSOLUTE — the Jean-Cavard eval set lives in the sibling `yap`
+# repo (~/coding/yap/generate-data/), not in this lexide checkout. These
+# files are machine-specific eval artifacts; useful for diagnostic notes but
+# not portable. If running on a different machine, regenerate by re-running
+# the held-out eval and pasting failing clips here.
+
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/19b_poison.wav  exp=[p w a z ɔ̃]  pred=[p w a z ɔ̃ n]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/21a_pain.wav  exp=[p ɛ̃]  pred=[t a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/21c_pont.wav  exp=[p ɔ̃]  pred=[p ɔ̃ ŋ]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/21d_un.wav  exp=[œ̃]  pred=[a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/22a_vin.wav  exp=[v ɛ̃]  pred=[v a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/23a_teint.wav  exp=[t ɛ̃]  pred=[t a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/23c_ton.wav  exp=[t ɔ̃]  pred=[t o ŋ]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/41_je_voudrais_un_cafe_sil_vous_plait.wav  exp=[ʒ ə v u d ʁ ɛ z œ̃ k a f e s i l v u p l ɛ]  pred=[ʒ ə v u d ʁ ɛ œ̃ k a f e s i l v u p l ɛ]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/43_tu_habites_ou_exactement.wav  exp=[t y a b i t z u ɛ ɡ z a k t ə m ɑ̃]  pred=[t y a b i t u ɛ ɡ z a k t ə m ɑ̃]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/45_je_ne_te_le_redemanderai_pas.wav  exp=[ʒ ə n ə t ə l ə ʁ ə d ə m ɑ̃ d ʁ e p a]  pred=[ʒ ə n ə t ə l ə ʁ ə d ə m ɑ̃ d ə ʁ e p a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/48_on_se_retrouve_devant_le_cafe_a_huit_heures.wav  exp=[ɔ̃ s ə ʁ ə t ʁ u v d ə v ɑ̃ l ə k a f e a y i t œ ʁ]  pred=[ɔ̃ s ə ʁ ə t ʁ u v d ə v ɑ̃ l ə k a f e a y i t œ ʁ]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b015_est_un.wav  exp=[ɛ t œ̃]  pred=[e t a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b021_a_un.wav  exp=[ɑ œ̃]  pred=[ɑ a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b029_un.wav  exp=[œ̃]  pred=[a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b036_en.wav  exp=[ɑ̃]  pred=[a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b041_bien.wav  exp=[b j ɛ̃]  pred=[b j a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b053_comment.wav  exp=[k ɔ m ɑ̃]  pred=[k o m ɑ̃]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b057_maintenant.wav  exp=[m ɛ̃ t ə n ɑ̃]  pred=[m a t ə n ɔ]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b072_sont.wav  exp=[s ɔ̃]  pred=[s ɔ̃ m]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b114_c_est_un.wav  exp=[s ɛ t œ̃]  pred=[s e t ɛ̃]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b115_tout_le_monde.wav  exp=[t u l ə m ɔ̃ d]  pred=[t u l ə m ɔ̃ ŋ d]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b131_ton.wav  exp=[t ɔ̃]  pred=[t ɔ̃ ŋ]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b154_dans_un.wav  exp=[d ɑ̃ z œ̃]  pred=[d ɑ̃ z a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b167_de_son.wav  exp=[d ə s ɔ̃]  pred=[d ø s ɔ̃]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b172_demain.wav  exp=[d ə m ɛ̃]  pred=[d ə m a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b178_est_mon.wav  exp=[ɛ m ɔ̃]  pred=[ɛ m u]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b186_rien.wav  exp=[ʁ i ɛ̃]  pred=[x i n a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b191_un_bon.wav  exp=[œ̃ b ɔ̃]  pred=[a m b ɔ̃ ŋ]

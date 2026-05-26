@@ -1,0 +1,58 @@
+resources:
+  cloud: lambda
+  accelerators: GH200:1
+  disk_size: 200
+
+  autostop:
+    idle_minutes: 120
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+
+setup: |
+  cd ~/sky_workdir
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  pip install transformers datasets soundfile tqdm wandb panphon
+
+run: |
+  cd ~/sky_workdir
+  export CUDA_VISIBLE_DEVICES=0
+  export WANDB_PROJECT="lexide-pronunciation"
+  export WANDB_API_KEY=${WANDB_API_KEY}
+  export HF_TOKEN=${HF_TOKEN}
+
+  # Idempotent: no-op if already installed (e.g., when sky exec'd on a warm cluster).
+  pip install --quiet panphon
+
+  hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
+
+  # Articulatory feature decomposition: phoneme head replaced with 24
+  # ternary feature heads (panphon Hayes schema). Each phoneme's log-prob
+  # derived by summing feature log-probs at lookup-table indices. Forces
+  # explicit articulatory feature learning (esp. nasality).
+  # Pairs with the VAD anchor (weight 0.05) since that's the winning config.
+  python -m src.train_unified \
+    --data-dir ~/data \
+    --model-name facebook/wav2vec2-xls-r-2b \
+    --processor-source facebook/wav2vec2-xlsr-53-espeak-cv-ft \
+    --gradient-checkpointing \
+    --epochs 7 \
+    --batch-size 16 \
+    --backbone-lr 1e-5 \
+    --head-lr 1e-3 \
+    --stress-weight 0.3 \
+    --stress-warmup-steps 400 \
+    --vad-weight 0.05 \
+    --use-features \
+    --invalid-mass-weight 0.05 \
+    --num-workers 16 \
+    --bf16 \
+    --save-dir checkpoints-unified-articulatory \
+    --hf-repo anchpop/lexide-pronunciation-unified-articulatory
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null

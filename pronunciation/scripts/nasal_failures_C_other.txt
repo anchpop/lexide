@@ -1,0 +1,20 @@
+# Group C: not really nasal-recognition failures — caught the nasal bin
+# because they contain a nasal vowel, but the actual error is something else.
+# Don't audit these for nasal; they need separate treatment.
+# 8 clips.
+
+# ---- nasal vowel split into oral + nasal consonant (English/Portuguese-style) ----
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/23c_ton.wav  exp=[t ɔ̃]  pred=[t o ŋ]
+
+# ---- vowel-quality error, nasal preserved ----
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b053_comment.wav  exp=[k ɔ m ɑ̃]  pred=[k o m ɑ̃]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b114_c_est_un.wav  exp=[s ɛ t œ̃]  pred=[s e t ɛ̃]
+
+# ---- schwa error, nasal preserved ----
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b167_de_son.wav  exp=[d ə s ɔ̃]  pred=[d ø s ɔ̃]
+
+# ---- multi-word phrases, primary error is a missing/added phoneme that isn't the nasal ----
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/41_je_voudrais_un_cafe_sil_vous_plait.wav  exp=[ʒ ə v u d ʁ ɛ z œ̃ k a f e s i l v u p l ɛ]  pred=[ʒ ə v u d ʁ ɛ œ̃ k a f e s i l v u p l ɛ]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/43_tu_habites_ou_exactement.wav  exp=[t y a b i t z u ɛ ɡ z a k t ə m ɑ̃]  pred=[t y a b i t u ɛ ɡ z a k t ə m ɑ̃]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/45_je_ne_te_le_redemanderai_pas.wav  exp=[ʒ ə n ə t ə l ə ʁ ə d ə m ɑ̃ d ʁ e p a]  pred=[ʒ ə n ə t ə l ə ʁ ə d ə m ɑ̃ d ə ʁ e p a]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/48_on_se_retrouve_devant_le_cafe_a_huit_heures.wav  exp=[ɔ̃ s ə ʁ ə t ʁ u v d ə v ɑ̃ l ə k a f e a y i t œ ʁ]  pred=[ɔ̃ s ə ʁ ə t ʁ u v d ə v ɑ̃ l ə k a f e a y i t œ ʁ]

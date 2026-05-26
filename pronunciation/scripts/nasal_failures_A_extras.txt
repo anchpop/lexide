@@ -1,0 +1,11 @@
+# Group A: model got the nasal vowel right, added a stray consonant after it.
+# Audit question: "do you actually hear a final /n/, /ŋ/, or /m/ at the end?"
+# If no — it's a clean over-emission failure (VAD reg should fix).
+# If yes — the speaker really did produce a slight nasal coda and the model is faithful.
+# 5 clips.
+
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/19b_poison.wav  exp=[p w a z ɔ̃]  pred=[p w a z ɔ̃ n]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/21c_pont.wav  exp=[p ɔ̃]  pred=[p ɔ̃ ŋ]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b072_sont.wav  exp=[s ɔ̃]  pred=[s ɔ̃ m]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b115_tout_le_monde.wav  exp=[t u l ə m ɔ̃ d]  pred=[t u l ə m ɔ̃ ŋ d]
+/Users/andrepopovitch/coding/yap/generate-data/data/fra/audio/Jean-Cavard/b131_ton.wav  exp=[t ɔ̃]  pred=[t ɔ̃ ŋ]
