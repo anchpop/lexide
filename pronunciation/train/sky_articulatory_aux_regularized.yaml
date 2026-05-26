@@ -1,0 +1,70 @@
+resources:
+  cloud: lambda
+  accelerators: GH200:1
+  disk_size: 200
+
+  autostop:
+    idle_minutes: 120
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+
+setup: |
+  cd ~/sky_workdir
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  pip install transformers datasets soundfile tqdm wandb panphon
+
+run: |
+  cd ~/sky_workdir
+  export CUDA_VISIBLE_DEVICES=0
+  export WANDB_PROJECT="lexide-pronunciation"
+  export WANDB_API_KEY=${WANDB_API_KEY}
+  export HF_TOKEN=${HF_TOKEN}
+
+  # Idempotent for sky exec on warm clusters.
+  pip install --quiet panphon
+
+  hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
+
+  # Factorial feature CTC aux mode + regularized heads. On top of the aux baseline,
+  # this run adds three head-regularization tweaks:
+  #   (1) K=5 learned softmax mixtures over the 49 wav2vec2 hidden states,
+  #       concatenated → (B, T, 5*1920). Each mixture is initialized peaked
+  #       at a different evenly-spaced layer (0, 12, 24, 36, 48) so they
+  #       start diverse; the model is free to broaden, sharpen, or shift
+  #       each peak during training. If all 5 collapse to the same
+  #       distribution that's an interesting result on its own.
+  #   (2) log-mel acoustic side-channel concatenated with the encoder output
+  #       (direct access to waveform-derived signal that the encoder may
+  #       have discarded).
+  #   (3) shared Linear(5*1920+64, 768) base feeding all four heads.
+  #       Phoneme + feature heads share a learned projection — they predict
+  #       overlapping information by construction.
+  # Adds ~7.8M new params (vs ~1.4M baseline). A/B target: same factorial
+  # feature CTC aux setup without --regularized-heads.
+  python -m src.train_unified \
+    --data-dir ~/data \
+    --model-name facebook/wav2vec2-xls-r-2b \
+    --processor-source facebook/wav2vec2-xlsr-53-espeak-cv-ft \
+    --gradient-checkpointing \
+    --epochs 7 \
+    --batch-size 16 \
+    --backbone-lr 1e-5 \
+    --head-lr 1e-3 \
+    --stress-weight 0.3 \
+    --stress-warmup-steps 400 \
+    --vad-weight 0.05 \
+    --use-aux-features \
+    --feature-aux-weight 0.1 \
+    --regularized-heads \
+    --num-workers 16 \
+    --bf16 \
+    --save-dir checkpoints-unified-articulatory-aux-regularized \
+    --hf-repo anchpop/lexide-pronunciation-unified-articulatory-aux-regularized
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null

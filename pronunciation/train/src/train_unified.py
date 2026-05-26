@@ -511,6 +511,15 @@ def main():
     parser.add_argument("--feature-aux-weight", type=float, default=0.1,
                         help="Coefficient on the factorial feature CTC loss. Only "
                              "meaningful with --use-aux-features.")
+    parser.add_argument("--regularized-heads", action="store_true",
+                        help="Bundle of head-regularization tweaks: (1) K=5 learned softmax "
+                             "mixtures over ALL encoder hidden states (49 for XLS-R 2B), each "
+                             "concatenated along the feature axis — model picks its own 5 "
+                             "depth views; (2) log-mel acoustic side-channel projected to 64 "
+                             "dims and concatenated, giving heads direct waveform-derived "
+                             "signal; (3) shared Linear(K*H+64, 768)→GELU→Dropout base feeding "
+                             "all four heads, so phoneme and feature heads share a learned "
+                             "projection (they predict overlapping information by construction).")
     parser.add_argument("--stress-warmup-steps", type=int, default=400,
                         help="Disable stress loss for this many steps so phoneme "
                              "model can converge enough for forced alignment to be meaningful. "
@@ -560,6 +569,7 @@ def main():
         feature_table=feature_table,
         aux_feature_table=aux_feature_table,
         special_token_ids=special_token_ids,
+        regularized_heads=args.regularized_heads,
     ).to(device)
 
     if args.gradient_checkpointing:
@@ -606,12 +616,30 @@ def main():
     )
 
     steps_per_epoch = len(train_loader)
+    # Split params into 4 groups: {backbone, head} × {decay, no_decay}.
+    # No decay for: 1D params (biases, LayerNorm weights) and the
+    # layer-selection logits. Decaying tiny selector parameters biases
+    # them toward zero (= uniform softmax), which would confound the
+    # diverse-init / collapse experiment in regularized-heads mode.
+    # Biases and LN params are the standard "no decay" carve-out.
+    backbone_decay, backbone_no_decay = [], []
+    head_decay, head_no_decay = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        is_backbone = name.startswith("backbone.")
+        no_decay = p.dim() < 2 or name.endswith("layer_weights")
+        if is_backbone:
+            (backbone_no_decay if no_decay else backbone_decay).append(p)
+        else:
+            (head_no_decay if no_decay else head_decay).append(p)
     optimizer = torch.optim.AdamW(
         [
-            {"params": model.backbone_parameters(), "lr": args.backbone_lr},
-            {"params": model.head_parameters(), "lr": args.head_lr},
+            {"params": backbone_decay,    "lr": args.backbone_lr, "weight_decay": 0.01},
+            {"params": backbone_no_decay, "lr": args.backbone_lr, "weight_decay": 0.0},
+            {"params": head_decay,        "lr": args.head_lr,     "weight_decay": 0.01},
+            {"params": head_no_decay,     "lr": args.head_lr,     "weight_decay": 0.0},
         ],
-        weight_decay=0.01,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
@@ -668,8 +696,8 @@ def main():
             "val/ctc_loss": val_stats["ctc_loss"],
             "val/stress_loss": val_stats["stress_loss"],
             "val/stress_acc": val_stats["stress_acc"],
-            "lr/backbone": lrs[0],
-            "lr/heads": lrs[1],
+            "lr/backbone": lrs[0],   # backbone_decay (same LR as backbone_no_decay)
+            "lr/heads": lrs[2],      # head_decay (same LR as head_no_decay)
             "stress_active": int(stress_active),
             "perf/epoch_wallclock_sec": train_stats["wallclock_sec"],
             "perf/samples_per_sec": train_stats["samples_per_sec"],

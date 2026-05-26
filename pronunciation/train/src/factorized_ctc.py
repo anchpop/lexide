@@ -37,8 +37,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import Wav2Vec2Model
 
+# torchaudio is imported lazily inside the regularized_heads branch so that
+# inference environments that don't use that feature can skip the dep.
+
 
 NUM_FEATURE_VALUES = 3  # panphon ternary {-1, 0, +1} → encoded as {0, 1, 2}
+NUM_LAYER_MIXTURES = 5  # learned soft selections over encoder hidden states (regularized-heads mode)
 
 
 class FactorizedCTCModel(nn.Module):
@@ -51,6 +55,10 @@ class FactorizedCTCModel(nn.Module):
         feature_table: torch.Tensor | None = None,
         aux_feature_table: torch.Tensor | None = None,
         special_token_ids: list[int] | None = None,
+        regularized_heads: bool = False,
+        head_base_dim: int = 768,
+        acoustic_dim: int = 64,
+        n_mels: int = 80,
     ):
         super().__init__()
         if feature_table is not None and aux_feature_table is not None:
@@ -63,16 +71,100 @@ class FactorizedCTCModel(nn.Module):
         self.vocab_size = vocab_size
         self.blank_id = blank_id
         self.num_stress_labels = num_stress_labels
+        self.regularized_heads = regularized_heads
+        self.head_base_dim = head_base_dim
+        self.acoustic_dim = acoustic_dim
+        self.n_mels = n_mels
 
         hidden_size = self.backbone.config.hidden_size
         self.dropout = nn.Dropout(self.backbone.config.final_dropout)
-        self.nonblank_head = nn.Linear(hidden_size, 1)
-        self.stress_head = nn.Sequential(
-            nn.Linear(hidden_size, 256),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, num_stress_labels),
-        )
+
+        # When regularized_heads is on, all four heads project from a shared
+        # learned base instead of directly from the encoder hidden state. The
+        # base input itself is enriched in two ways:
+        #
+        #   1. Layer-weighted hidden state: instead of just the final encoder
+        #      layer (which has already abstracted away low-level acoustic
+        #      detail), take a learned softmax-weighted sum over ALL encoder
+        #      hidden states. The articulatory feature head benefits most —
+        #      nasality, voicing, place are physically lower-level than the
+        #      phoneme identity the final layer is optimized for.
+        #
+        #   2. Acoustic side-channel: a log-mel projection computed directly
+        #      from the input waveform, concatenated with the layer-weighted
+        #      hidden. Gives heads direct access to raw signal in case the
+        #      encoder discarded something the heads could use.
+        #
+        # All four heads (nonblank, phoneme, feature, stress) consume the same
+        # 768-dim base. The encoder is already the de facto shared base; this
+        # just adds a learned shared projection between encoder and heads,
+        # which empirically helps multi-task setups regularize.
+        if regularized_heads:
+            # 49 hidden states for XLS-R 2B (embedding + 48 transformer layers).
+            num_hidden_states = self.backbone.config.num_hidden_layers + 1
+            # K=5 independent learned softmax mixtures, each over the 49 layers.
+            # Each row of layer_weights is one mixture's logits; row k's softmax
+            # produces a (B,T,1920) weighted sum over the encoder's hidden
+            # states. The K mixtures are concatenated to (B,T,K*1920), so the
+            # downstream projection can route per-dim per-mixture nonlinearly
+            # — strictly more expressive than a single shared mixture.
+            #
+            # Diverse init: each mixture peaked at a different layer evenly
+            # spaced across depth (with softmax temp such that the peak gets
+            # ~75% mass at init, leaving room to broaden or shift). If all 5
+            # collapse to the same distribution during training, that's an
+            # interesting result — but the diverse init prevents collapse from
+            # being the default behavior.
+            init_logits = torch.zeros(NUM_LAYER_MIXTURES, num_hidden_states)
+            peak_layers = torch.linspace(0, num_hidden_states - 1, NUM_LAYER_MIXTURES).round().long()
+            for k in range(NUM_LAYER_MIXTURES):
+                init_logits[k, peak_layers[k]] = 5.0  # softmax(5.0) ≈ 75% on peak
+            self.layer_weights = nn.Parameter(init_logits)
+            # MelSpectrogram with hop=320 gives the same 50fps frame rate as
+            # wav2vec2's conv feature extractor (16000 / 320 = 50). Any
+            # remaining ±1-frame mismatch from edge effects is reconciled in
+            # forward via truncate-or-pad.
+            import torchaudio  # lazy: only train environments need this
+            self.mel_spec = torchaudio.transforms.MelSpectrogram(
+                sample_rate=16000,
+                n_fft=400,
+                win_length=400,
+                hop_length=320,
+                n_mels=n_mels,
+                center=False,
+            )
+            # Normalize log-mel before projecting: utterance-level loudness
+            # and channel/recording variation introduce huge offsets that
+            # would otherwise dominate the projection's early gradient.
+            # LayerNorm over the n_mels axis is the standard choice (per-frame,
+            # per-batch) and avoids needing pre-computed dataset statistics.
+            self.mel_norm = nn.LayerNorm(n_mels)
+            self.mel_proj = nn.Linear(n_mels, acoustic_dim)
+            # Input dim: K mixtures concat'd along feature axis + mel projection.
+            self.shared_base = nn.Sequential(
+                nn.Linear(NUM_LAYER_MIXTURES * hidden_size + acoustic_dim, head_base_dim),
+                nn.GELU(),
+                nn.Dropout(0.1),
+            )
+            head_input_dim = head_base_dim
+        else:
+            self.layer_weights = None
+            self.mel_spec = None
+            self.mel_proj = None
+            self.shared_base = None
+            head_input_dim = hidden_size
+
+        self.nonblank_head = nn.Linear(head_input_dim, 1)
+        if regularized_heads:
+            # Shared base already provides the bottleneck; one Linear suffices.
+            self.stress_head = nn.Linear(head_input_dim, num_stress_labels)
+        else:
+            self.stress_head = nn.Sequential(
+                nn.Linear(head_input_dim, 256),
+                nn.GELU(),
+                nn.Dropout(0.1),
+                nn.Linear(256, num_stress_labels),
+            )
 
         if feature_table is not None or aux_feature_table is not None:
             table = feature_table if feature_table is not None else aux_feature_table
@@ -83,9 +175,18 @@ class FactorizedCTCModel(nn.Module):
             # regularizer sums probability mass *per unique signature* — otherwise
             # tokens that share a feature signature get double-counted, valid_mass
             # can exceed 1, and -log(valid_mass) goes negative (rewards collisions).
+            #
+            # Skip special tokens (blank + sentinels) when picking representatives.
+            # They share an all-unknown signature with each other; if one of them
+            # got picked as the representative for that signature, any real
+            # phoneme panphon couldn't cover (also all-unknown) would be excluded
+            # from the unique-mass sum.
+            masked = set((special_token_ids or []) + [blank_id])
             seen = {}
             first_occurrence = torch.zeros(vocab_size, dtype=torch.bool)
             for v in range(vocab_size):
+                if v in masked:
+                    continue
                 sig = tuple(table[v].tolist())
                 if sig not in seen:
                     seen[sig] = v
@@ -96,7 +197,7 @@ class FactorizedCTCModel(nn.Module):
             # Mode: factorized. No direct phoneme head; phoneme log-probs derived
             # from feature heads via gather+sum against the lookup table.
             self.num_features = int(feature_table.shape[1])
-            self.feature_head = nn.Linear(hidden_size, self.num_features * NUM_FEATURE_VALUES)
+            self.feature_head = nn.Linear(head_input_dim, self.num_features * NUM_FEATURE_VALUES)
             self.phoneme_head = None
             self.register_buffer("feature_table", feature_table.long())
             # Special token ids (e.g. <s>, </s>, <unk>) must be masked to -inf
@@ -116,10 +217,13 @@ class FactorizedCTCModel(nn.Module):
             # whole feature vectors, while comparison stays in feature space.
             assert aux_feature_table.shape[0] == vocab_size
             self.num_features = int(aux_feature_table.shape[1])
-            self.phoneme_head = nn.Linear(hidden_size, vocab_size)
+            self.phoneme_head = nn.Linear(head_input_dim, vocab_size)
             # The feature head predicts only feature values. Blank/nonblank is
-            # shared with the main CTC route via nonblank_head.
-            self.feature_head = nn.Linear(hidden_size, self.num_features * NUM_FEATURE_VALUES)
+            # shared with the main CTC route via nonblank_head — the factorial
+            # feature CTC's "label" is a whole feature vector, and the same
+            # blank/nonblank decision separates emit events from blank frames
+            # for both the main and feature objectives.
+            self.feature_head = nn.Linear(head_input_dim, self.num_features * NUM_FEATURE_VALUES)
             self.register_buffer("feature_table", aux_feature_table.long())
             mask_ids = sorted(set((special_token_ids or []) + [blank_id]))
             self.register_buffer(
@@ -131,7 +235,7 @@ class FactorizedCTCModel(nn.Module):
         else:
             # Mode: off. Direct phoneme head only (original baseline-VAD behavior).
             self.num_features = 0
-            self.phoneme_head = nn.Linear(hidden_size, vocab_size)
+            self.phoneme_head = nn.Linear(head_input_dim, vocab_size)
             self.feature_head = None
             self.feature_table = None
             self._masked_slots = None
@@ -210,9 +314,57 @@ class FactorizedCTCModel(nn.Module):
 
         return l_ph_norm, neg_log_valid_mass_u
 
-    def forward(self, input_values, attention_mask=None, labels=None, label_lengths=None):
+    def _compute_head_input(self, input_values, attention_mask):
+        """Return (B, T, head_input_dim) tensor feeding all heads.
+
+        Flat mode: just the final encoder hidden state. Regularized mode:
+        softmax-weighted sum over all encoder layers, concatenated with a
+        log-mel acoustic side-channel, passed through a shared MLP.
+        """
+        if self.regularized_heads:
+            out = self.backbone(
+                input_values=input_values,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
+            # K independent softmax mixtures over the 49 hidden states.
+            # layer_weights: (K, L). Softmax along L, then for each mixture k
+            # compute its weighted sum (B, T, H) via streaming accumulation
+            # (avoids materializing a (L, B, T, H) intermediate).
+            weights = F.softmax(self.layer_weights, dim=1)        # (K, L)
+            mixtures = []
+            for k in range(NUM_LAYER_MIXTURES):
+                w_k = weights[k]
+                mix_k = sum(w * h for w, h in zip(w_k, out.hidden_states))  # (B, T, H)
+                mixtures.append(mix_k)
+            hidden = self.dropout(torch.cat(mixtures, dim=-1))    # (B, T, K*H)
+
+            # Log-mel side-channel computed from the same input waveform.
+            # MelSpectrogram is BF16-incompatible inside autocast, so cast to
+            # float32 around it then back to hidden's dtype.
+            with torch.autocast(device_type=input_values.device.type, enabled=False):
+                mel = self.mel_spec(input_values.float())             # (B, n_mels, T_mel)
+            mel = mel.transpose(1, 2)                                 # (B, T_mel, n_mels)
+            # Align mel's time axis to wav2vec2's. They share hop=320 so
+            # they match to within ±1 frame from edge handling — truncate
+            # or pad the difference.
+            T_target = hidden.shape[1]
+            if mel.shape[1] > T_target:
+                mel = mel[:, :T_target, :]
+            elif mel.shape[1] < T_target:
+                mel = F.pad(mel, (0, 0, 0, T_target - mel.shape[1]))
+            mel = torch.log(mel + 1e-6).to(hidden.dtype)
+            mel = self.mel_norm(mel)                                  # per-frame LayerNorm
+            mel_proj = self.mel_proj(mel)                             # (B, T, acoustic_dim)
+
+            combined = torch.cat([hidden, mel_proj], dim=-1)
+            return self.shared_base(combined)
+
         out = self.backbone(input_values=input_values, attention_mask=attention_mask)
-        hidden = self.dropout(out.last_hidden_state)
+        return self.dropout(out.last_hidden_state)
+
+    def forward(self, input_values, attention_mask=None, labels=None, label_lengths=None):
+        hidden = self._compute_head_input(input_values, attention_mask)
 
         l_nb = self.nonblank_head(hidden).squeeze(-1)              # (B, T)
 
@@ -317,7 +469,16 @@ class FactorizedCTCModel(nn.Module):
             "feature_mode": mode,
             # Keep `uses_features` for backward compatibility with older ckpts.
             "uses_features": (mode == "factorized"),
+            "regularized_heads": self.regularized_heads,
         }
+        if self.regularized_heads:
+            payload["head_base_dim"] = self.head_base_dim
+            payload["acoustic_dim"] = self.acoustic_dim
+            payload["n_mels"] = self.n_mels
+            payload["layer_weights"] = self.layer_weights.detach().cpu()
+            payload["mel_norm"] = self.mel_norm.state_dict()
+            payload["mel_proj"] = self.mel_proj.state_dict()
+            payload["shared_base"] = self.shared_base.state_dict()
         if mode == "factorized":
             payload["feature_head"] = self.feature_head.state_dict()
             payload["feature_table"] = self.feature_table.cpu()
@@ -354,6 +515,12 @@ class FactorizedCTCModel(nn.Module):
         if mode in ("factorized", "aux"):
             ms = heads.get("masked_slots", [])
             special_ids = [i for i in ms if i != heads["blank_id"]]
+        regularized = heads.get("regularized_heads", False)
+        reg_kwargs = {}
+        if regularized:
+            reg_kwargs["head_base_dim"] = heads["head_base_dim"]
+            reg_kwargs["acoustic_dim"] = heads["acoustic_dim"]
+            reg_kwargs["n_mels"] = heads["n_mels"]
         model = cls(
             model_name=str(load_dir),
             vocab_size=heads["vocab_size"],
@@ -362,7 +529,14 @@ class FactorizedCTCModel(nn.Module):
             feature_table=factorized_table,
             aux_feature_table=aux_table,
             special_token_ids=special_ids,
+            regularized_heads=regularized,
+            **reg_kwargs,
         )
+        if regularized:
+            model.layer_weights.data.copy_(heads["layer_weights"])
+            model.mel_norm.load_state_dict(heads["mel_norm"])
+            model.mel_proj.load_state_dict(heads["mel_proj"])
+            model.shared_base.load_state_dict(heads["shared_base"])
         model.nonblank_head.load_state_dict(heads["nonblank_head"])
         model.stress_head.load_state_dict(heads["stress_head"])
         if mode == "factorized":
@@ -385,6 +559,14 @@ class FactorizedCTCModel(nn.Module):
             yield from self.phoneme_head.parameters()
         if self.feature_head is not None:
             yield from self.feature_head.parameters()
+        # Regularized-heads sub-modules step at head LR — they sit between
+        # encoder and heads, train from scratch, and the layer weights in
+        # particular should adapt fast.
+        if self.regularized_heads:
+            yield self.layer_weights
+            yield from self.mel_norm.parameters()
+            yield from self.mel_proj.parameters()
+            yield from self.shared_base.parameters()
 
     def backbone_parameters(self):
         yield from self.backbone.parameters()
