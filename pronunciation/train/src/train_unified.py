@@ -135,7 +135,8 @@ def vad_loss(nonblank_logit, vad_probs, vad_lens, n_frames):
 
 def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 blank_id, stress_active: bool, stress_weight: float,
-                vad_weight: float, invalid_mass_weight: float):
+                vad_weight: float, invalid_mass_weight: float,
+                feature_aux_weight: float):
     model.train()
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -146,9 +147,11 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
     total_stress = 0.0
     total_vad = 0.0
     total_invalid = 0.0
+    total_aux = 0.0
     n_stress_batches = 0
     n_vad_batches = 0
     n_invalid_batches = 0
+    n_aux_batches = 0
     n_batches = 0
     total_samples = 0
     total_audio_sec = 0.0
@@ -221,20 +224,29 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             n_vad_batches += 1
 
         im_loss = torch.zeros((), device=device)
-        if invalid_mass_weight > 0 and "invalid_mass" in outputs:
-            # Per-frame invalid-feature-mass, masked to valid audio frames.
-            im = outputs["invalid_mass"]                              # (B, T)
+        if invalid_mass_weight > 0 and "off_manifold" in outputs:
+            # `off_manifold[b, t]` is -log P(features land in vocab) for the
+            # unnormalized feature factorization. Minimize → features prefer
+            # combinations that exist as real phonemes. Mask padded frames.
+            om = outputs["off_manifold"]                              # (B, T)
             backbone = model.backbone
             n_frames_im = backbone._get_feat_extract_output_lengths(audio_mask.sum(-1)).to(torch.long)
-            mask_im = (torch.arange(im.shape[1], device=im.device)[None] < n_frames_im[:, None])
-            im_loss = (im * mask_im).sum() / mask_im.sum().clamp(min=1)
+            mask_im = (torch.arange(om.shape[1], device=om.device)[None] < n_frames_im[:, None])
+            im_loss = (om * mask_im).sum() / mask_im.sum().clamp(min=1)
             total_invalid += im_loss.item()
             n_invalid_batches += 1
+
+        aux_loss = torch.zeros((), device=device)
+        if feature_aux_weight > 0 and "aux_loss" in outputs:
+            aux_loss = outputs["aux_loss"]
+            total_aux += aux_loss.item()
+            n_aux_batches += 1
 
         loss = (ctc_loss
                 + stress_weight * stress_loss
                 + vad_weight * vl
-                + invalid_mass_weight * im_loss)
+                + invalid_mass_weight * im_loss
+                + feature_aux_weight * aux_loss)
 
         t_lb = time.perf_counter()
         loss.backward()
@@ -268,7 +280,8 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         "stress_loss": total_stress / max(n_stress_batches, 1) if n_stress_batches else 0.0,
         "stress_acc": stress_correct / stress_total if stress_total else 0.0,
         "vad_loss": total_vad / max(n_vad_batches, 1) if n_vad_batches else 0.0,
-        "invalid_mass": total_invalid / max(n_invalid_batches, 1) if n_invalid_batches else 0.0,
+        "off_manifold": total_invalid / max(n_invalid_batches, 1) if n_invalid_batches else 0.0,
+        "aux_ctc_loss": total_aux / max(n_aux_batches, 1) if n_aux_batches else 0.0,
         "wallclock_sec": epoch_sec,
         "samples_per_sec": total_samples / epoch_sec,
         "audio_realtime_factor": total_audio_sec / epoch_sec,
@@ -378,6 +391,16 @@ def main():
                              "Only meaningful with --use-features. Penalizes probability "
                              "mass that the independent feature distributions place on "
                              "phoneme combinations not present in the vocab.")
+    parser.add_argument("--use-aux-features", action="store_true",
+                        help="Add articulatory features as an *auxiliary* CTC supervision "
+                             "(direct phoneme head handles main CTC; feature head derives a "
+                             "second phoneme distribution via gather+sum and feeds it to a "
+                             "parallel F.ctc_loss with the same targets). Encoder is shaped "
+                             "by both routes; phoneme head dodges the cold-start. Mutually "
+                             "exclusive with --use-features.")
+    parser.add_argument("--feature-aux-weight", type=float, default=0.1,
+                        help="Coefficient on the auxiliary CTC loss (feature-derived phoneme "
+                             "distribution). Only meaningful with --use-aux-features.")
     parser.add_argument("--stress-warmup-steps", type=int, default=400,
                         help="Disable stress loss for this many steps so phoneme "
                              "model can converge enough for forced alignment to be meaningful. "
@@ -398,20 +421,35 @@ def main():
 
     processor = load_processor(args.processor_source)
 
+    if args.use_features and args.use_aux_features:
+        raise SystemExit("--use-features and --use-aux-features are mutually exclusive.")
+
     feature_table = None
-    if args.use_features:
-        from .articulatory import build_feature_table
+    aux_feature_table = None
+    special_token_ids = None
+    if args.use_features or args.use_aux_features:
+        from .articulatory import build_feature_table, detect_special_token_ids
         tokens = [t for t, _ in sorted(processor.tokenizer.get_vocab().items(), key=lambda x: x[1])]
-        feature_table, fstats = build_feature_table(tokens)
-        print(f"Articulatory features: {feature_table.shape[1]}-dim, "
+        table, fstats = build_feature_table(tokens)
+        special_token_ids = detect_special_token_ids(tokens)
+        mode_name = "factorized" if args.use_features else "auxiliary"
+        print(f"Articulatory features ({mode_name}): {table.shape[1]}-dim. "
               f"covered={fstats['covered']} multi={fstats['multi_segment']} "
-              f"empty={fstats['empty_or_special']}")
+              f"empty={fstats['empty']} special={fstats['special']}. "
+              f"unique signatures: {fstats['unique_signatures']}/{len(tokens)}")
+        if args.use_features:
+            feature_table = table
+            print(f"Special token ids (masked from phoneme logits): {special_token_ids}")
+        else:
+            aux_feature_table = table
 
     model = FactorizedCTCModel(
         model_name=args.model_name,
         vocab_size=len(processor.tokenizer),
         blank_id=processor.tokenizer.pad_token_id,
         feature_table=feature_table,
+        aux_feature_table=aux_feature_table,
+        special_token_ids=special_token_ids,
     ).to(device)
 
     if args.gradient_checkpointing:
@@ -490,7 +528,8 @@ def main():
             use_bf16=args.bf16, blank_id=model.blank_id,
             stress_active=stress_active, stress_weight=args.stress_weight,
             vad_weight=args.vad_weight,
-            invalid_mass_weight=args.invalid_mass_weight if args.use_features else 0.0,
+            invalid_mass_weight=args.invalid_mass_weight if (args.use_features or args.use_aux_features) else 0.0,
+            feature_aux_weight=args.feature_aux_weight if args.use_aux_features else 0.0,
         )
         val_stats = eval_epoch(
             model, val_loader, device,
@@ -513,7 +552,8 @@ def main():
             "train/stress_loss": train_stats["stress_loss"],
             "train/stress_acc": train_stats["stress_acc"],
             "train/vad_loss": train_stats["vad_loss"],
-            "train/invalid_mass": train_stats["invalid_mass"],
+            "train/off_manifold": train_stats["off_manifold"],
+            "train/aux_ctc_loss": train_stats["aux_ctc_loss"],
             "train/nonblank_prob_mean": train_stats["nonblank_prob_mean"],
             "val/ctc_loss": val_stats["ctc_loss"],
             "val/stress_loss": val_stats["stress_loss"],
