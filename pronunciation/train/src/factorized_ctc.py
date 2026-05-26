@@ -111,17 +111,22 @@ class FactorizedCTCModel(nn.Module):
             nn.init.zeros_(self.feature_head.bias)
         elif aux_feature_table is not None:
             # Mode: auxiliary. Direct phoneme head handles MAIN CTC; feature
-            # head derives a second set of phoneme log-probs and feeds them
-            # to an AUXILIARY CTC loss with the same targets. Encoder gets
-            # gradient from both paths; phoneme head dodges the cold-start
-            # while the encoder still learns articulatory structure.
+            # head runs PER-FEATURE CTC against feature-encoded targets.
+            # Encoder gets gradient from both paths; phoneme head dodges the
+            # cold-start while the encoder still learns articulatory structure.
             assert aux_feature_table.shape[0] == vocab_size
             self.num_features = int(aux_feature_table.shape[1])
             self.phoneme_head = nn.Linear(hidden_size, vocab_size)
-            self.feature_head = nn.Linear(hidden_size, self.num_features * NUM_FEATURE_VALUES)
+            # Per-feature CTC needs its own blank class per feature: CTC inserts
+            # blanks between consecutive equal target labels, and "consecutive
+            # equal feature values" (e.g. nasal=[-,-,+,+] for /k ɔ m ɑ̃/) does
+            # NOT correspond to "main blank between those positions." Sharing
+            # nonblank_head's blank would force main CTC's blank head to fire
+            # whenever any feature dim needed a CTC separator — fighting the
+            # main objective. Each feature gets its own 4-way head (3 values
+            # + blank).
+            self.feature_head = nn.Linear(hidden_size, self.num_features * (NUM_FEATURE_VALUES + 1))
             self.register_buffer("feature_table", aux_feature_table.long())
-            # Same masking as factorized — the aux phoneme distribution is also
-            # derived from features and shouldn't put mass on special/blank slots.
             mask_ids = sorted(set((special_token_ids or []) + [blank_id]))
             self.register_buffer(
                 "_masked_slots",
@@ -218,20 +223,23 @@ class FactorizedCTCModel(nn.Module):
         l_nb = self.nonblank_head(hidden).squeeze(-1)              # (B, T)
 
         off_manifold = None
-        l_ph_aux = None  # for aux mode: feature-derived phoneme log-probs
         if self.use_features:
+            # Factorized: derive phoneme log-probs from features. Includes the
+            # off_manifold regularizer for the V→U signature dedup.
             l_ph, off_manifold = self._phoneme_log_probs_from_features(hidden)
         else:
             l_ph = self.phoneme_head(hidden)
             neg_inf = torch.finfo(l_ph.dtype).min
             l_ph = l_ph.clone()
-            l_ph[..., self.blank_id] = neg_inf
+            # Mask blank + special tokens (<s>, </s>, <unk>) from the direct
+            # phoneme distribution. In aux mode the feature table treats these
+            # as non-phonemes, and we don't want the direct head emitting them
+            # either — main CTC's blank lives on the separate nonblank_head.
+            if self._masked_slots is not None:
+                l_ph[..., self._masked_slots] = neg_inf
+            else:
+                l_ph[..., self.blank_id] = neg_inf
             l_ph = F.log_softmax(l_ph, dim=-1)
-            if self.use_aux_features:
-                # Also compute the feature-derived phoneme log-probs as a SECOND
-                # CTC target. Encoder gets gradient from both paths; phoneme
-                # head dodges the cold-start.
-                l_ph_aux, off_manifold = self._phoneme_log_probs_from_features(hidden)
 
         log_p_blank = F.logsigmoid(-l_nb).unsqueeze(-1)            # (B, T, 1)
         log_p_nonblank = F.logsigmoid(l_nb).unsqueeze(-1)          # (B, T, 1)
@@ -240,12 +248,17 @@ class FactorizedCTCModel(nn.Module):
         log_probs = log_p_phonemes.clone()
         log_probs[..., self.blank_id] = log_p_blank.squeeze(-1)
 
-        # Aux phoneme log-probs from features (aux mode only).
-        log_probs_aux = None
-        if l_ph_aux is not None:
-            log_p_phonemes_aux = log_p_nonblank + l_ph_aux
-            log_probs_aux = log_p_phonemes_aux.clone()
-            log_probs_aux[..., self.blank_id] = log_p_blank.squeeze(-1)
+        # Per-feature CTC log-probs (aux mode). Each feature dim is its OWN
+        # CTC stream with its OWN blank class — CTC needs blanks to separate
+        # consecutive equal target labels (e.g. nasal=[-,-,+,+] for /k ɔ m ɑ̃/),
+        # and those separator blanks have no relationship to main CTC's blank.
+        # The training loop computes F separate F.ctc_loss calls against the
+        # feature-encoded target sequences.
+        per_feature_log_probs = None
+        if self.use_aux_features:
+            B, T = hidden.shape[0], hidden.shape[1]
+            feat = self.feature_head(hidden).view(B, T, self.num_features, NUM_FEATURE_VALUES + 1)
+            per_feature_log_probs = F.log_softmax(feat, dim=-1)                # (B, T, F, 4)
 
         stress_logits = self.stress_head(hidden)
 
@@ -254,11 +267,9 @@ class FactorizedCTCModel(nn.Module):
             "nonblank_logit": l_nb,
             "stress_logits": stress_logits,
         }
-        if log_probs_aux is not None:
-            result["log_probs_aux"] = log_probs_aux
+        if per_feature_log_probs is not None:
+            result["per_feature_log_probs"] = per_feature_log_probs  # (B, T, F, 4)
         if off_manifold is not None:
-            # In factorized mode: regularizer on the main feature head.
-            # In aux mode: regularizer on the aux feature head (same math).
             result["off_manifold"] = off_manifold  # (B, T), ≥ 0
 
         if labels is not None:
@@ -287,23 +298,10 @@ class FactorizedCTCModel(nn.Module):
                 zero_infinity=True,
             )
             result["loss"] = loss
-
-            # Aux CTC on feature-derived log-probs (aux mode only). Same target
-            # sequence, same CTC math — just a second pass through F.ctc_loss
-            # against the feature-route phoneme distribution. The training loop
-            # weights this and adds to the total.
-            if log_probs_aux is not None:
-                log_probs_aux_tbv = log_probs_aux.transpose(0, 1).float()
-                aux_loss = F.ctc_loss(
-                    log_probs_aux_tbv,
-                    flat_labels,
-                    input_lengths,
-                    label_lengths,
-                    blank=self.blank_id,
-                    reduction="mean",
-                    zero_infinity=True,
-                )
-                result["aux_loss"] = aux_loss
+            # The per-feature CTC losses (aux mode) are computed by the training
+            # loop, not here — they need access to phoneme_ids to encode targets
+            # as feature sequences via the feature_table. The model exposes
+            # `per_feature_log_probs` and `feature_table` for that purpose.
 
         return result
 

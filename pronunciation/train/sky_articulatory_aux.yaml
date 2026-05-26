@@ -29,11 +29,13 @@ run: |
 
   hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
 
-  # Articulatory features as AUXILIARY supervision (not factorized).
-  # Direct phoneme head handles main CTC (no cold start), while feature head
-  # derives a second phoneme distribution that gets its own CTC loss against
-  # the same targets. Encoder is shaped by both paths → learns articulatory
-  # structure without sacrificing fast convergence.
+  # Articulatory features as AUXILIARY supervision via PER-FEATURE CTC.
+  # Direct phoneme head handles main CTC (no cold start). The feature head
+  # emits F=24 independent 4-way distributions per frame (3 ternary values +
+  # per-feature blank); targets are the phoneme sequence re-encoded through
+  # the feature table, giving F separate CTC streams. Comparison happens in
+  # feature space — signature-colliding phonemes share supervision instead
+  # of being penalized for not being distinguishable in feature space.
   python -m src.train_unified \
     --data-dir ~/data \
     --model-name facebook/wav2vec2-xls-r-2b \
@@ -48,7 +50,6 @@ run: |
     --vad-weight 0.05 \
     --use-aux-features \
     --feature-aux-weight 0.1 \
-    --invalid-mass-weight 0.05 \
     --num-workers 16 \
     --bf16 \
     --save-dir checkpoints-unified-articulatory-aux \
