@@ -133,6 +133,99 @@ def vad_loss(nonblank_logit, vad_probs, vad_lens, n_frames):
     return torch.stack(losses).mean()
 
 
+def factorial_feature_ctc_loss(
+    feature_log_probs: torch.Tensor,
+    nonblank_logit: torch.Tensor,
+    feature_targets: torch.Tensor,
+    input_lengths: torch.Tensor,
+    target_lengths: torch.Tensor,
+) -> torch.Tensor:
+    """CTC over vector-valued feature labels with one shared alignment.
+
+    feature_log_probs: (B, T, F, K) log P(feature_f=value | frame)
+    nonblank_logit:    (B, T) shared blank/nonblank logit
+    feature_targets:   (B, P, F) target feature values in {0, 1, 2}
+
+    For target position p at frame t, the emit score is the log probability
+    of the whole target feature vector under independent feature heads:
+        log P(vec_p | t) = sum_f log P(feature_f = vec_p[f] | t)
+
+    Then run the usual CTC forward recursion over interleaved blank / emit
+    states, with skip transitions blocked for repeated feature vectors.
+    """
+    B, _, F_dim, _ = feature_log_probs.shape
+    losses = []
+
+    for b in range(B):
+        T_b = int(input_lengths[b].item())
+        P_b = int(target_lengths[b].item())
+        if T_b <= 0:
+            continue
+
+        blank_lp = F.logsigmoid(-nonblank_logit[b, :T_b]).float()      # (T,)
+        emit_base = F.logsigmoid(nonblank_logit[b, :T_b]).float()      # (T,)
+
+        if P_b == 0:
+            losses.append(-blank_lp.sum())
+            continue
+
+        targets = feature_targets[b, :P_b].long()                      # (P, F)
+
+        # CTC minimum-length check: each repeated-adjacent target vector
+        # requires a separator blank between the two emit states. If T_b
+        # is shorter than P_b + num_repeats, the alignment is impossible
+        # and PyTorch's CTC with zero_infinity=True returns 0; mirror that
+        # here to avoid contributing the DP's finfo-min artifact (~1e38).
+        repeated = torch.zeros(P_b, dtype=torch.bool, device=feature_log_probs.device)
+        if P_b > 1:
+            repeated[1:] = (targets[1:] == targets[:-1]).all(dim=1)
+        min_T = P_b + int(repeated.sum().item())
+        if T_b < min_T:
+            losses.append(feature_log_probs.new_zeros(()))
+            continue
+
+        lp = feature_log_probs[b, :T_b].float()                        # (T, F, K)
+        gather_idx = targets.t().view(1, F_dim, P_b).expand(T_b, F_dim, P_b)
+        emit_scores = torch.gather(lp, dim=2, index=gather_idx).sum(dim=1)
+        emit_scores = emit_scores + emit_base.unsqueeze(1)             # (T, P)
+
+        S = 2 * P_b + 1
+        neg_inf = torch.finfo(emit_scores.dtype).min
+        first = emit_scores.new_full((S,), neg_inf)
+        first[0] = blank_lp[0]
+        first[1] = emit_scores[0, 0]
+        alpha_rows = [first]
+
+        skip_mask = torch.zeros(S, dtype=torch.bool, device=emit_scores.device)
+        if P_b > 1:
+            emit_states = torch.arange(3, S, 2, device=emit_scores.device)
+            skip_mask[emit_states] = ~repeated[1:]
+
+        state_scores = emit_scores.new_empty(S)
+        state_scores[0::2] = blank_lp[0]
+        state_scores[1::2] = emit_scores[0]
+
+        for t in range(1, T_b):
+            prev = alpha_rows[-1]
+            from_prev_state = torch.cat([prev.new_full((1,), neg_inf), prev[:-1]])
+            from_skip = torch.cat([prev.new_full((2,), neg_inf), prev[:-2]])
+            from_skip = torch.where(skip_mask, from_skip, prev.new_full((S,), neg_inf))
+            transitions = torch.logsumexp(
+                torch.stack([prev, from_prev_state, from_skip], dim=0),
+                dim=0,
+            )
+            state_scores[0::2] = blank_lp[t]
+            state_scores[1::2] = emit_scores[t]
+            alpha_rows.append(transitions + state_scores)
+
+        loglik = torch.logsumexp(alpha_rows[-1][-2:], dim=0)
+        losses.append(-loglik / max(P_b, 1))
+
+    if not losses:
+        return feature_log_probs.new_zeros(())
+    return torch.stack(losses).mean()
+
+
 def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 blank_id, stress_active: bool, stress_weight: float,
                 vad_weight: float, invalid_mass_weight: float,
@@ -237,41 +330,22 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             n_invalid_batches += 1
 
         aux_loss = torch.zeros((), device=device)
-        if feature_aux_weight > 0 and "per_feature_log_probs" in outputs:
-            # Per-feature CTC. F=24 separate CTC losses, one per articulatory
-            # feature dim. Targets are derived by looking up each target
-            # phoneme's feature vector via feature_table. Comparison happens
-            # in FEATURE space, so signature collisions don't penalize the
-            # model (tokens that share a signature have identical per-feature
-            # targets anyway).
-            pflp = outputs["per_feature_log_probs"]   # (B, T, F, 4)
-            B, T, F_dim, K = pflp.shape
+        if feature_aux_weight > 0 and "feature_log_probs" in outputs:
+            # Factorial feature CTC. Targets are feature vectors looked up from
+            # the phoneme sequence; the dynamic program keeps one shared CTC
+            # alignment over whole vectors instead of 24 independent alignments.
+            flp = outputs["feature_log_probs"]         # (B, T, F, 3)
             backbone = model.backbone
-            n_frames_pf = backbone._get_feat_extract_output_lengths(
+            n_frames_feat = backbone._get_feat_extract_output_lengths(
                 audio_mask.sum(-1)
             ).to(torch.long)
-            # Convert target phoneme sequence → per-feature target sequences.
-            # phoneme_ids: (B, P) with 0-padding (real ids are 1..V-1; blank=0).
-            # We need actual lengths from phoneme_lens.
             ft = model.feature_table                  # (V, F), values in {0,1,2}
             safe_ids = phoneme_ids.clamp(min=0, max=ft.shape[0] - 1)
             feat_targets = ft[safe_ids]               # (B, P, F), values in {0,1,2}
-            # CTC blank index = 3 (we appended it at the end of the K dim above).
-            aux_losses = []
-            for i in range(F_dim):
-                lp_i = pflp[:, :, i, :].transpose(0, 1).float()  # (T, B, 4)
-                # Flatten valid targets per sample for this feature dim.
-                target_i = feat_targets[:, :, i]                  # (B, P)
-                flat_target_i = torch.cat([
-                    target_i[b, :int(phoneme_lens[b].item())] for b in range(B)
-                ]) if B > 0 else target_i.new_empty(0, dtype=torch.long)
-                loss_i = F.ctc_loss(
-                    lp_i, flat_target_i.long(),
-                    n_frames_pf, phoneme_lens.long(),
-                    blank=3, reduction="mean", zero_infinity=True,
-                )
-                aux_losses.append(loss_i)
-            aux_loss = torch.stack(aux_losses).mean()
+            aux_loss = factorial_feature_ctc_loss(
+                flp, outputs["nonblank_logit"], feat_targets,
+                n_frames_feat, phoneme_lens,
+            )
             total_aux += aux_loss.item()
             n_aux_batches += 1
 
@@ -426,16 +500,16 @@ def main():
                              "phoneme combinations not present in the vocab.")
     parser.add_argument("--use-aux-features", action="store_true",
                         help="Add articulatory features as *auxiliary* supervision via "
-                             "PER-FEATURE CTC. Direct phoneme head handles main CTC; the "
-                             "feature head emits F=24 independent 4-way distributions per "
-                             "frame (3 ternary values + per-feature blank). Targets are "
-                             "the main phoneme sequence re-encoded through the feature "
-                             "table — one CTC stream per feature dim. Comparison happens "
-                             "in feature space, so signature-colliding phonemes share "
-                             "supervision instead of being penalized. Mutually exclusive "
-                             "with --use-features.")
+                             "factorial feature CTC. Direct phoneme head handles main "
+                             "CTC; the feature head emits F=24 independent 3-way feature "
+                             "distributions per frame. Targets are the main phoneme "
+                             "sequence re-encoded through the feature table, and a custom "
+                             "CTC forward pass keeps one shared alignment over whole "
+                             "feature vectors. Comparison happens in feature space, so "
+                             "signature-colliding phonemes share supervision instead of "
+                             "being penalized. Mutually exclusive with --use-features.")
     parser.add_argument("--feature-aux-weight", type=float, default=0.1,
-                        help="Coefficient on the mean per-feature CTC loss. Only "
+                        help="Coefficient on the factorial feature CTC loss. Only "
                              "meaningful with --use-aux-features.")
     parser.add_argument("--stress-warmup-steps", type=int, default=400,
                         help="Disable stress loss for this many steps so phoneme "
