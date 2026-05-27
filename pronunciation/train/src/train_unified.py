@@ -606,17 +606,25 @@ def main():
                              "model can converge enough for forced alignment to be meaningful. "
                              "At ~440 steps/epoch this gives 1 epoch of CTC-only warmup.")
     parser.add_argument("--min-rms", type=float, default=0.005)
-    parser.add_argument("--fleurs-audit-path", type=Path,
-                        default=Path(__file__).resolve().parents[1] / "fleurs_asr_exclusions.jsonl",
-                        help="Optional JSONL of Groq/Whisper FLEURS audit rows. "
-                             "Rows with phoneme error rate (PER) above threshold "
-                             "are excluded from training if the current target text "
-                             "still matches the audited target. Older CER/WER-only "
-                             "audit files fall back to CER/WER thresholds. Set to a "
-                             "missing path to disable.")
-    parser.add_argument("--fleurs-audit-min-per", type=float, default=1e-12)
-    parser.add_argument("--fleurs-audit-min-cer", type=float, default=1e-12)
-    parser.add_argument("--fleurs-audit-min-wer", type=float, default=1e-12)
+    parser.add_argument("--audit-path", type=Path, action="append",
+                        default=None,
+                        help="JSONL audit file(s) from Groq/Whisper transcription. "
+                             "Pass multiple times to merge exclusions from different "
+                             "sources (FLEURS, Tatoeba, etc.). Rows whose current "
+                             "target text still matches the audited expected_sha256 "
+                             "and have CER/WER/PER above the corresponding threshold "
+                             "are excluded from training. If not set, defaults to "
+                             "fleurs_asr_exclusions.jsonl + tatoeba_asr_exclusions.jsonl "
+                             "if those files exist.")
+    parser.add_argument("--audit-min-per", type=float, default=1e-12)
+    parser.add_argument("--audit-min-cer", type=float, default=1e-12)
+    parser.add_argument("--audit-min-wer", type=float, default=1e-12)
+    # Back-compat aliases — older sky yamls pass these.
+    parser.add_argument("--fleurs-audit-path", type=Path, default=None,
+                        help="Back-compat for --audit-path.")
+    parser.add_argument("--fleurs-audit-min-per", type=float, default=None)
+    parser.add_argument("--fleurs-audit-min-cer", type=float, default=None)
+    parser.add_argument("--fleurs-audit-min-wer", type=float, default=None)
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints-unified"))
     parser.add_argument("--wandb-project", type=str, default="lexide-pronunciation")
     parser.add_argument("--num-workers", type=int, default=16)
@@ -696,12 +704,27 @@ def main():
     print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
     print(f"Blank id: {model.blank_id}, vocab size: {model.vocab_size}")
 
-    asr_exclusions = load_asr_audit_exclusions(
-        args.fleurs_audit_path,
-        min_per=args.fleurs_audit_min_per,
-        min_cer=args.fleurs_audit_min_cer,
-        min_wer=args.fleurs_audit_min_wer,
-    )
+    # Resolve audit-path inputs. The old `--fleurs-audit-path` is honored
+    # as an alias; the new `--audit-path` is the canonical multi-file form.
+    # Default: pick up both fleurs and tatoeba files from train/ if they exist.
+    audit_paths = list(args.audit_path or [])
+    if args.fleurs_audit_path is not None:
+        audit_paths.append(args.fleurs_audit_path)
+    if not audit_paths:
+        train_dir = Path(__file__).resolve().parents[1]
+        for fname in ("fleurs_asr_exclusions.jsonl", "tatoeba_asr_exclusions.jsonl"):
+            p = train_dir / fname
+            if p.exists():
+                audit_paths.append(p)
+    min_per = args.fleurs_audit_min_per if args.fleurs_audit_min_per is not None else args.audit_min_per
+    min_cer = args.fleurs_audit_min_cer if args.fleurs_audit_min_cer is not None else args.audit_min_cer
+    min_wer = args.fleurs_audit_min_wer if args.fleurs_audit_min_wer is not None else args.audit_min_wer
+
+    asr_exclusions: dict[str, dict[str, str]] = {}
+    for p in audit_paths:
+        partial = load_asr_audit_exclusions(p, min_per=min_per, min_cer=min_cer, min_wer=min_wer)
+        for lang, files in partial.items():
+            asr_exclusions.setdefault(lang, {}).update(files)
 
     datasets = []
     for lang_dir in sorted(args.data_dir.iterdir()):

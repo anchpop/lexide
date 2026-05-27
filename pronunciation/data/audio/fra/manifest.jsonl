@@ -9073,3 +9073,5 @@
 {"file": "178cfef560b9b6b7.wav", "sentence": "Parfois, les fluides intraveineux lui donnaient un goût bizarre dans la bouche.", "source": "tts", "voice": "fr-FR-Chirp3-HD-Rasalgethi", "lang": "fra"}
 {"file": "41fbf1a1a1b9664c.wav", "sentence": "Si vous marchez sur mes meilleurs joueurs, je vais vous arracher les couilles !", "source": "tts", "voice": "fr-FR-Chirp3-HD-Alnilam", "lang": "fra"}
 {"file": "24c274a14034a8e3.wav", "sentence": "En attendant ta ligne directe dans ta cellule, tous tes appels passent par moi.", "source": "tts", "voice": "fr-FR-Chirp3-HD-Achernar", "lang": "fra"}
+{"file": "tatoeba_33781.wav", "sentence": "Fais-moi voir ça.", "source": "tatoeba", "voice": "Phoenix", "lang": "fra", "license": "CC BY-NC 4.0", "attribution_url": "", "tatoeba_sentence_id": 429017}
+{"file": "tatoeba_472838.wav", "sentence": "Tiens-toi tranquille !", "source": "tatoeba", "voice": "vlecomte", "lang": "fra", "license": "CC BY-SA 4.0", "attribution_url": "", "tatoeba_sentence_id": 2285510}
