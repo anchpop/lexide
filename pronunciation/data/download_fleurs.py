@@ -25,6 +25,18 @@ LANG_CONFIG = {
 }
 
 
+def clean_tsv_field(value: str) -> str:
+    """Normalize literal FLEURS TSV field quoting without CSV quote parsing."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1]
+    elif value.startswith('"') and value.count('"') == 1:
+        value = value[1:]
+    elif value.endswith('"') and value.count('"') == 1:
+        value = value[:-1]
+    return value
+
+
 def sentence_hash(sentence: str) -> str:
     """First 16 hex chars of SHA256."""
     return hashlib.sha256(sentence.encode()).hexdigest()[:16]
@@ -41,9 +53,14 @@ def download_for_language(lang: str, output_root: Path):
 
     # Parse TSV: columns are id, filename, transcription, normalized, chars, num_samples, gender
     sentences_by_filename = {}
-    with open(tsv_path) as f:
-        for row in csv.reader(f, delimiter="\t"):
-            sentences_by_filename[row[1]] = row[2]
+    with open(tsv_path, newline="") as f:
+        for line_no, row in enumerate(csv.reader(f, delimiter="\t", quoting=csv.QUOTE_NONE), start=1):
+            if len(row) != 7:
+                raise ValueError(f"Malformed FLEURS TSV row {line_no}: expected 7 fields, got {len(row)}")
+            sentence = clean_tsv_field(row[2])
+            if "\t" in sentence or "\n" in sentence:
+                raise ValueError(f"Malformed FLEURS sentence at row {line_no}: contains row separators")
+            sentences_by_filename[row[1]] = sentence
 
     out_dir = output_root / lang
     out_dir.mkdir(parents=True, exist_ok=True)

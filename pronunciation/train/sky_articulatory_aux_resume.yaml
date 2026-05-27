@@ -27,27 +27,17 @@ run: |
   # "reserved but unallocated" — fragmentation, not true exhaustion.
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-  # Idempotent for sky exec on warm clusters.
   pip install --quiet panphon
 
   hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
 
-  # Factorial feature CTC aux mode + regularized heads. On top of the aux baseline,
-  # this run adds three head-regularization tweaks:
-  #   (1) K=5 learned softmax mixtures over the 49 wav2vec2 hidden states,
-  #       concatenated → (B, T, 5*1920). Each mixture is initialized peaked
-  #       at a different evenly-spaced layer (0, 12, 24, 36, 48) so they
-  #       start diverse; the model is free to broaden, sharpen, or shift
-  #       each peak during training. If all 5 collapse to the same
-  #       distribution that's an interesting result on its own.
-  #   (2) log-mel acoustic side-channel concatenated with the encoder output
-  #       (direct access to waveform-derived signal that the encoder may
-  #       have discarded).
-  #   (3) shared Linear(5*1920+64, 768) base feeding all four heads.
-  #       Phoneme + feature heads share a learned projection — they predict
-  #       overlapping information by construction.
-  # Adds ~7.8M new params (vs ~1.4M baseline). A/B target: same factorial
-  # feature CTC aux setup without --regularized-heads.
+  # Resume the factorial-feature-CTC aux run from its E2 checkpoint. The
+  # previous run (sky_articulatory_aux.yaml, job 4) was cancelled mid-E3
+  # after we landed a vectorized factorial CTC DP — restart from E3 with
+  # the faster code to avoid re-running E1+E2.
+  hf download anchpop/lexide-pronunciation-unified-articulatory-aux \
+    --local-dir ~/resume-checkpoint
+
   python -m src.train_unified \
     --data-dir ~/data \
     --model-name facebook/wav2vec2-xls-r-2b \
@@ -62,11 +52,12 @@ run: |
     --vad-weight 0.05 \
     --use-aux-features \
     --feature-aux-weight 0.1 \
-    --regularized-heads \
     --num-workers 16 \
     --bf16 \
-    --save-dir checkpoints-unified-articulatory-aux-regularized \
-    --hf-repo anchpop/lexide-pronunciation-unified-articulatory-aux-regularized
+    --resume-from ~/resume-checkpoint \
+    --resume-epoch 5 \
+    --save-dir checkpoints-unified-articulatory-aux \
+    --hf-repo anchpop/lexide-pronunciation-unified-articulatory-aux
 
 secrets:
   HF_TOKEN: null

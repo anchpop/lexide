@@ -1,5 +1,6 @@
 """Dataset: load audio + pre-computed espeak phonemes with stress labels."""
 
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import ConcatDataset, Dataset, Sampler, Subset
 from tqdm import tqdm
 
 STRESS_NONE = 0
@@ -16,6 +17,7 @@ STRESS_SECONDARY = 2
 NUM_STRESS_LABELS = 3
 
 VAD_FRAME_SAMPLES = 256  # earshot's native stride (16 ms @ 16 kHz)
+VAD_TRAILING_SILENCE_RMS = 5e-4
 
 
 class StressDataset(Dataset):
@@ -33,16 +35,26 @@ class StressDataset(Dataset):
         max_audio_sec: float = 16.0,
         min_rms: float = 0.005,
         min_duration_sec: float = 0.3,
+        excluded_target_hashes: dict[str, str] | None = None,
     ):
         self.tokenizer = tokenizer
         self.max_audio_samples = int(max_audio_sec * 16000)
         min_samples = int(min_duration_sec * 16000)
+        excluded_target_hashes = excluded_target_hashes or {}
 
         audio_dir = phonemes_path.parent
         self.samples = []
         unk_id = tokenizer.unk_token_id
 
-        skipped = {"missing_file": 0, "no_phonemes": 0, "silent": 0, "too_short": 0, "unreadable": 0}
+        skipped = {
+            "missing_file": 0,
+            "no_phonemes": 0,
+            "silent": 0,
+            "too_short": 0,
+            "unreadable": 0,
+            "asr_audit": 0,
+            "stale_asr_audit": 0,
+        }
 
         # Optional: per-clip VAD probabilities at 16ms stride from earshot.
         # See vad_compare/. Used as a soft regularizer on the nonblank head
@@ -59,6 +71,16 @@ class StressDataset(Dataset):
             records = [json.loads(line) for line in f]
 
         for rec in tqdm(records, desc=f"Scanning {phonemes_path.parent.name}", leave=False):
+            audited_target_hash = excluded_target_hashes.get(rec["file"])
+            if audited_target_hash is not None:
+                current_hash = hashlib.sha256(rec.get("sentence", "").encode()).hexdigest()
+                if audited_target_hash == current_hash:
+                    skipped["asr_audit"] += 1
+                    continue
+                # The target changed since the audit, so don't exclude based on
+                # stale CER/WER from a now-repaired label.
+                skipped["stale_asr_audit"] += 1
+
             wav_path = audio_dir / rec["file"]
             if not wav_path.exists():
                 skipped["missing_file"] += 1
@@ -94,6 +116,9 @@ class StressDataset(Dataset):
                 skipped["no_phonemes"] += 1
                 continue
 
+            n_audio_samples = info.frames
+            if n_audio_samples > self.max_audio_samples:
+                n_audio_samples = self.max_audio_samples
             self.samples.append({
                 "wav_path": str(wav_path),
                 "phoneme_ids": phoneme_ids,
@@ -102,6 +127,10 @@ class StressDataset(Dataset):
                 # May be empty list if vad.jsonl wasn't present — training loop
                 # treats empty as "no VAD signal, skip VAD loss for this clip".
                 "vad_probs": vad_by_file.get(rec["file"], []),
+                # Stored so the length-bucketed BatchSampler can query without
+                # re-statting the file. Capped at max_audio_samples since
+                # __getitem__ truncates above that.
+                "n_audio_samples": n_audio_samples,
             })
 
         total_skipped = sum(skipped.values())
@@ -151,27 +180,75 @@ def collate_fn_augment(batch):
     return _collate(batch, augment=True)
 
 
+def _match_vad_length(vad: torch.Tensor, target_len: int) -> torch.Tensor:
+    """Trim/pad VAD to the number of complete 16 ms frames in the audio."""
+    if vad.shape[0] > target_len:
+        return vad[:target_len]
+    if vad.shape[0] < target_len:
+        return torch.cat([vad, vad.new_zeros(target_len - vad.shape[0])])
+    return vad
+
+
+def _zero_vad_after_trailing_silence(
+    audio: torch.Tensor,
+    vad: torch.Tensor,
+    *,
+    threshold: float = VAD_TRAILING_SILENCE_RMS,
+) -> torch.Tensor:
+    """Suppress VAD after the last frame with meaningful audio energy.
+
+    This is trailing-only: internal low-energy pauses are preserved, but once
+    the waveform has dropped below the threshold and never comes back up, VAD
+    should not keep encouraging nonblank predictions.
+    """
+    n_frames = min(vad.shape[0], audio.shape[0] // VAD_FRAME_SAMPLES)
+    if n_frames <= 0:
+        return vad
+
+    framed = audio[:n_frames * VAD_FRAME_SAMPLES].view(n_frames, VAD_FRAME_SAMPLES)
+    rms = torch.sqrt(torch.mean(framed.float() ** 2, dim=1))
+    active = torch.nonzero(rms > threshold, as_tuple=False).flatten()
+    if active.numel() == 0:
+        vad[:n_frames] = 0
+        return vad
+
+    first_trailing_silence = int(active[-1].item()) + 1
+    if first_trailing_silence < n_frames:
+        vad[first_trailing_silence:n_frames] = 0
+    return vad
+
+
 def _collate(batch, *, augment: bool):
     sr = 16000
     augmented = []
     for item in batch:
         audio = item["audio"]
         vad = item["vad_probs"]
-        head = tail = 0
         if augment:
-            head = int(random.uniform(0.1, 0.2) * sr)
-            tail = int(random.uniform(0.3, 0.5) * sr)
+            # Quantize synthetic silence to VAD frames so the precomputed VAD
+            # grid remains aligned after prepending silence.
+            head_frames = random.randint(
+                round(0.1 * sr / VAD_FRAME_SAMPLES),
+                round(0.2 * sr / VAD_FRAME_SAMPLES),
+            )
+            tail_frames = random.randint(
+                round(0.3 * sr / VAD_FRAME_SAMPLES),
+                round(0.5 * sr / VAD_FRAME_SAMPLES),
+            )
+            head = head_frames * VAD_FRAME_SAMPLES
+            tail = tail_frames * VAD_FRAME_SAMPLES
             audio = torch.cat([torch.zeros(head), audio, torch.zeros(tail)])
             noise = torch.randn_like(audio) * 1e-4
             audio = audio + noise
             # Pad VAD with zeros for the silence head/tail (silence = no speech).
-            # Use VAD_FRAME_SAMPLES = 256 to convert sample counts to VAD frames.
             if vad.numel() > 0:
                 vad = torch.cat([
-                    torch.zeros(head // VAD_FRAME_SAMPLES),
+                    vad.new_zeros(head_frames),
                     vad,
-                    torch.zeros(tail // VAD_FRAME_SAMPLES),
+                    vad.new_zeros(tail_frames),
                 ])
+                vad = _match_vad_length(vad, audio.shape[0] // VAD_FRAME_SAMPLES)
+                vad = _zero_vad_after_trailing_silence(audio, vad)
         augmented.append({**item, "audio": audio, "vad_probs": vad})
 
     max_audio = max(item["audio"].shape[0] for item in augmented)
@@ -212,3 +289,81 @@ def _collate(batch, *, augment: bool):
         "vad_lens": vad_lens,
         "langs": [item["lang"] for item in augmented],
     }
+
+
+def get_audio_lengths(dataset) -> list[int]:
+    """Walk a (possibly nested Subset of ConcatDataset of StressDataset) and
+    return each sample's audio frame count without loading audio. Used by
+    LengthBucketedBatchSampler to group same-length clips into batches.
+    """
+    def base(ds):
+        if isinstance(ds, Subset):
+            return [base(ds.dataset)[i] for i in ds.indices]
+        if isinstance(ds, ConcatDataset):
+            out = []
+            for d in ds.datasets:
+                out.extend(base(d))
+            return out
+        if isinstance(ds, StressDataset):
+            return [s["n_audio_samples"] for s in ds.samples]
+        raise TypeError(f"get_audio_lengths doesn't know how to walk {type(ds)}")
+    return base(dataset)
+
+
+class LengthBucketedBatchSampler(Sampler):
+    """Group dataset indices into batches by similar audio length.
+
+    Why: the vectorized factorial-CTC DP allocates (B, T, P, F, K) tensors
+    that scale with the longest sample in each batch. A single 6-minute clip
+    in an otherwise-short batch can OOM a 96 GB GH200. Grouping similar
+    lengths together bounds peak per-batch memory close to the average,
+    and as a side benefit reduces padding waste.
+
+    Procedure (standard speech-ML approach):
+      1. Sort indices by length.
+      2. Chunk into mega-buckets of `bucket_size_mul * batch_size` indices.
+         Within each mega-bucket lengths are still similar but the
+         within-bucket ordering is randomized to keep batches diverse.
+      3. Chunk each mega-bucket into batch_size-sized batches.
+      4. Shuffle the order of all batches across the epoch (kills any
+         short→long curriculum effect from sorting).
+      5. Drop the final incomplete batch (matches DataLoader drop_last=True).
+
+    With B=16 and bucket_size_mul=100, lengths within a batch come from a
+    1600-sample window of the sorted list — tight enough to bound memory,
+    loose enough that within-batch correlation stays small.
+    """
+
+    def __init__(self, lengths: list[int], batch_size: int,
+                 bucket_size_mul: int = 100, seed: int = 0):
+        self.lengths = list(lengths)
+        self.batch_size = batch_size
+        self.bucket_size = batch_size * bucket_size_mul
+        self.seed = seed
+        self.epoch = 0
+        self._sorted = sorted(range(len(self.lengths)), key=lambda i: self.lengths[i])
+
+    def set_epoch(self, epoch: int) -> None:
+        """Re-seed the per-epoch shuffles. Callers should invoke before each epoch."""
+        self.epoch = epoch
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+
+        batches = []
+        for start in range(0, len(self._sorted), self.bucket_size):
+            bucket = self._sorted[start:start + self.bucket_size]
+            perm = torch.randperm(len(bucket), generator=g).tolist()
+            shuffled = [bucket[i] for i in perm]
+            for i in range(0, len(shuffled), self.batch_size):
+                batch = shuffled[i:i + self.batch_size]
+                if len(batch) == self.batch_size:
+                    batches.append(batch)
+
+        order = torch.randperm(len(batches), generator=g).tolist()
+        for i in order:
+            yield batches[i]
+
+    def __len__(self):
+        return len(self.lengths) // self.batch_size

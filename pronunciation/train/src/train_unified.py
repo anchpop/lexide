@@ -16,6 +16,8 @@ warm-start from earlier phoneme model.
 
 import argparse
 import contextlib
+import hashlib
+import json
 import time
 from pathlib import Path
 
@@ -29,7 +31,10 @@ import wandb
 
 from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec2Processor
 
-from .dataset import StressDataset, collate_fn, collate_fn_augment, NUM_STRESS_LABELS
+from .dataset import (
+    StressDataset, collate_fn, collate_fn_augment, NUM_STRESS_LABELS,
+    LengthBucketedBatchSampler, get_audio_lengths,
+)
 from .factorized_ctc import FactorizedCTCModel
 
 
@@ -37,6 +42,52 @@ def load_processor(model_name: str):
     feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
     tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_name)
     return Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
+
+
+def load_asr_audit_exclusions(
+    path: Path | None,
+    *,
+    min_per: float,
+    min_cer: float,
+    min_wer: float,
+) -> dict[str, dict[str, str]]:
+    """Load FLEURS clips whose Whisper audit disagreed with labels.
+
+    The value is lang -> file -> audited expected-text SHA256. StressDataset
+    only excludes a row if the current target still matches that hash, so
+    repaired labels are not punished by stale audit results.
+    """
+    if path is None or not path.exists():
+        return {}
+
+    exclusions: dict[str, dict[str, str]] = {}
+    with path.open() as f:
+        for line in f:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if not rec.get("ok", True):
+                continue
+            if "per" in rec:
+                if float(rec["per"]) < min_per:
+                    continue
+            else:
+                if float(rec.get("cer", 0.0)) < min_cer:
+                    continue
+                if float(rec.get("wer", 0.0)) < min_wer:
+                    continue
+            lang = rec.get("lang")
+            file = rec.get("file")
+            expected_hash = rec.get("expected_sha256")
+            if expected_hash is None and rec.get("expected") is not None:
+                expected_hash = hashlib.sha256(rec["expected"].encode()).hexdigest()
+            if lang and file and expected_hash is not None:
+                exclusions.setdefault(lang, {})[file] = expected_hash
+
+    total = sum(len(v) for v in exclusions.values())
+    by_lang = ", ".join(f"{lang}={len(exclusions[lang])}" for lang in sorted(exclusions))
+    print(f"Loaded ASR-audit exclusions: {total}" + (f" ({by_lang})" if by_lang else ""))
+    return exclusions
 
 
 WAV2VEC2_CONV_RATIO = 320  # 16kHz / 320 = 50 fps frames
@@ -108,12 +159,22 @@ def compute_frame_stress_labels(log_probs, phoneme_ids, stress_seq, phoneme_lens
 
 
 def vad_loss(nonblank_logit, vad_probs, vad_lens, n_frames):
-    """BCE between sigmoid(nonblank_logit) and VAD probabilities.
+    """Confidence-weighted BCE between sigmoid(nonblank_logit) and VAD probabilities.
 
     VAD is at 16 ms stride (62.5 fps); wav2vec2 nonblank_logit is at 20 ms
     stride (50 fps). Interpolate per-sample with F.interpolate(mode='linear')
-    from the clip's valid VAD length to its valid wav2vec2 length, then
-    BCE on the masked region only. Padded frames contribute nothing.
+    from the clip's valid VAD length to its valid wav2vec2 length.
+
+    Per-frame loss is weighted by the VAD model's confidence — frames where
+    the VAD probability is near 0.5 (the model is unsure whether speech is
+    present) contribute less to the loss than frames it's confident about
+    (probability near 0 or 1). Weight = |p - 0.5| * 2, so a clear-signal
+    frame gets full weight and an ambiguous frame gets ~0.
+
+    Per-clip normalization divides by frame count rather than confidence
+    sum, so a clip whose VAD signal is mostly uncertain naturally
+    contributes less to the total loss (instead of having its few confident
+    frames amplified to represent the whole clip).
     """
     B = nonblank_logit.shape[0]
     losses = []
@@ -127,7 +188,9 @@ def vad_loss(nonblank_logit, vad_probs, vad_lens, n_frames):
         target = F.interpolate(src, size=n_f, mode="linear", align_corners=False).squeeze()
         target = target.clamp(0.0, 1.0)
         logit = nonblank_logit[i, :n_f].float()
-        losses.append(F.binary_cross_entropy_with_logits(logit, target))
+        confidence = (target - 0.5).abs() * 2  # in [0, 1], 0 at p=0.5
+        ce = F.binary_cross_entropy_with_logits(logit, target, reduction="none")
+        losses.append((ce * confidence).sum() / n_f)
     if not losses:
         return torch.zeros((), device=nonblank_logit.device)
     return torch.stack(losses).mean()
@@ -146,84 +209,102 @@ def factorial_feature_ctc_loss(
     nonblank_logit:    (B, T) shared blank/nonblank logit
     feature_targets:   (B, P, F) target feature values in {0, 1, 2}
 
-    For target position p at frame t, the emit score is the log probability
-    of the whole target feature vector under independent feature heads:
-        log P(vec_p | t) = sum_f log P(feature_f = vec_p[f] | t)
+    For target position p at frame t, the emit score uses the mean feature
+    log-probability for that whole target vector:
+        score(vec_p | t) = mean_f log P(feature_f = vec_p[f] | t)
+    This is the log geometric mean of per-feature probabilities. It keeps the
+    "all features should match" product-style signal while keeping the aux loss
+    scale comparable to a single categorical head instead of growing with F.
 
     Then run the usual CTC forward recursion over interleaved blank / emit
     states, with skip transitions blocked for repeated feature vectors.
     """
-    B, _, F_dim, _ = feature_log_probs.shape
-    losses = []
-
-    for b in range(B):
-        T_b = int(input_lengths[b].item())
-        P_b = int(target_lengths[b].item())
-        if T_b <= 0:
-            continue
-
-        blank_lp = F.logsigmoid(-nonblank_logit[b, :T_b]).float()      # (T,)
-        emit_base = F.logsigmoid(nonblank_logit[b, :T_b]).float()      # (T,)
-
-        if P_b == 0:
-            losses.append(-blank_lp.sum())
-            continue
-
-        targets = feature_targets[b, :P_b].long()                      # (P, F)
-
-        # CTC minimum-length check: each repeated-adjacent target vector
-        # requires a separator blank between the two emit states. If T_b
-        # is shorter than P_b + num_repeats, the alignment is impossible
-        # and PyTorch's CTC with zero_infinity=True returns 0; mirror that
-        # here to avoid contributing the DP's finfo-min artifact (~1e38).
-        repeated = torch.zeros(P_b, dtype=torch.bool, device=feature_log_probs.device)
-        if P_b > 1:
-            repeated[1:] = (targets[1:] == targets[:-1]).all(dim=1)
-        min_T = P_b + int(repeated.sum().item())
-        if T_b < min_T:
-            losses.append(feature_log_probs.new_zeros(()))
-            continue
-
-        lp = feature_log_probs[b, :T_b].float()                        # (T, F, K)
-        gather_idx = targets.t().view(1, F_dim, P_b).expand(T_b, F_dim, P_b)
-        emit_scores = torch.gather(lp, dim=2, index=gather_idx).sum(dim=1)
-        emit_scores = emit_scores + emit_base.unsqueeze(1)             # (T, P)
-
-        S = 2 * P_b + 1
-        neg_inf = torch.finfo(emit_scores.dtype).min
-        first = emit_scores.new_full((S,), neg_inf)
-        first[0] = blank_lp[0]
-        first[1] = emit_scores[0, 0]
-        alpha_rows = [first]
-
-        skip_mask = torch.zeros(S, dtype=torch.bool, device=emit_scores.device)
-        if P_b > 1:
-            emit_states = torch.arange(3, S, 2, device=emit_scores.device)
-            skip_mask[emit_states] = ~repeated[1:]
-
-        state_scores = emit_scores.new_empty(S)
-        state_scores[0::2] = blank_lp[0]
-        state_scores[1::2] = emit_scores[0]
-
-        for t in range(1, T_b):
-            prev = alpha_rows[-1]
-            from_prev_state = torch.cat([prev.new_full((1,), neg_inf), prev[:-1]])
-            from_skip = torch.cat([prev.new_full((2,), neg_inf), prev[:-2]])
-            from_skip = torch.where(skip_mask, from_skip, prev.new_full((S,), neg_inf))
-            transitions = torch.logsumexp(
-                torch.stack([prev, from_prev_state, from_skip], dim=0),
-                dim=0,
-            )
-            state_scores[0::2] = blank_lp[t]
-            state_scores[1::2] = emit_scores[t]
-            alpha_rows.append(transitions + state_scores)
-
-        loglik = torch.logsumexp(alpha_rows[-1][-2:], dim=0)
-        losses.append(-loglik / max(P_b, 1))
-
-    if not losses:
+    B, T_max, F_dim, K = feature_log_probs.shape
+    P_max = feature_targets.shape[1]
+    active = input_lengths > 0
+    if not active.any():
         return feature_log_probs.new_zeros(())
-    return torch.stack(losses).mean()
+
+    lp = feature_log_probs.float()
+    blank_lp = F.logsigmoid(-nonblank_logit).float()                  # (B, T)
+    emit_base = F.logsigmoid(nonblank_logit).float()                  # (B, T)
+    neg_inf = torch.finfo(lp.dtype).min
+
+    if P_max == 0:
+        blank_mask = torch.arange(T_max, device=lp.device)[None, :] < input_lengths[:, None]
+        losses = -(blank_lp * blank_mask).sum(dim=1)
+        return losses[active].mean()
+
+    targets = feature_targets.long().clamp(min=0, max=K - 1)           # (B, P, F)
+
+    # emit_scores[b,t,p] = log P(nonblank_t) + mean_f log P(feature_f=target[p,f] | t)
+    gather_idx = targets.unsqueeze(1).unsqueeze(-1).expand(B, T_max, P_max, F_dim, 1)
+    lp_expanded = lp.unsqueeze(2).expand(B, T_max, P_max, F_dim, K)
+    emit_scores = torch.gather(lp_expanded, dim=4, index=gather_idx).squeeze(-1).mean(dim=-1)
+    emit_scores = emit_scores + emit_base.unsqueeze(-1)                # (B, T, P)
+
+    p_idx = torch.arange(P_max, device=lp.device)
+    p_valid = p_idx.unsqueeze(0) < target_lengths.unsqueeze(1)          # (B, P)
+
+    repeated = torch.zeros(B, P_max, dtype=torch.bool, device=lp.device)
+    if P_max > 1:
+        repeated[:, 1:] = (targets[:, 1:] == targets[:, :-1]).all(dim=2)
+        repeated &= p_valid
+    min_input_lengths = target_lengths + repeated.sum(dim=1)
+    possible = input_lengths >= min_input_lengths
+
+    S_max = 2 * P_max + 1
+    s_idx = torch.arange(S_max, device=lp.device)
+    is_emit_state = s_idx % 2 == 1
+    emit_pos = s_idx // 2
+    state_valid = s_idx.unsqueeze(0) < (2 * target_lengths + 1).unsqueeze(1)
+
+    state_scores = lp.new_full((B, T_max, S_max), neg_inf)
+    state_scores[:, :, 0::2] = blank_lp.unsqueeze(-1)
+    if P_max > 0:
+        state_scores[:, :, 1::2] = emit_scores
+    state_scores = torch.where(state_valid.unsqueeze(1), state_scores, state_scores.new_full((), neg_inf))
+
+    skip_mask = torch.zeros(B, S_max, dtype=torch.bool, device=lp.device)
+    if P_max > 1:
+        emit_positions_for_state = emit_pos.unsqueeze(0).expand(B, S_max)
+        emit_positions_safe = emit_positions_for_state.clamp(max=P_max - 1)
+        repeated_for_state = torch.gather(repeated, dim=1, index=emit_positions_safe)
+        skip_mask = (
+            is_emit_state.unsqueeze(0)
+            & (s_idx.unsqueeze(0) >= 3)
+            & state_valid
+            & ~repeated_for_state
+        )
+
+    alpha = lp.new_full((B, S_max), neg_inf)
+    alpha[:, 0] = state_scores[:, 0, 0]
+    if P_max > 0:
+        alpha[:, 1] = torch.where(target_lengths > 0, state_scores[:, 0, 1], alpha[:, 1])
+    alpha = torch.where(state_valid, alpha, alpha.new_full((), neg_inf))
+
+    for t in range(1, T_max):
+        from_prev_state = torch.cat([alpha.new_full((B, 1), neg_inf), alpha[:, :-1]], dim=1)
+        from_skip = torch.cat([alpha.new_full((B, 2), neg_inf), alpha[:, :-2]], dim=1)
+        from_skip = torch.where(skip_mask, from_skip, alpha.new_full((B, S_max), neg_inf))
+        transitions = torch.logsumexp(
+            torch.stack([alpha, from_prev_state, from_skip], dim=0),
+            dim=0,
+        )
+        next_alpha = transitions + state_scores[:, t]
+        next_alpha = torch.where(state_valid, next_alpha, next_alpha.new_full((), neg_inf))
+        frame_active = t < input_lengths
+        alpha = torch.where(frame_active.unsqueeze(1), next_alpha, alpha)
+
+    last_emit_state = (2 * target_lengths - 1).clamp(min=0)
+    last_blank_state = 2 * target_lengths
+    final_emit = torch.gather(alpha, dim=1, index=last_emit_state.unsqueeze(1)).squeeze(1)
+    final_blank = torch.gather(alpha, dim=1, index=last_blank_state.unsqueeze(1)).squeeze(1)
+    loglik = torch.logsumexp(torch.stack([final_emit, final_blank], dim=0), dim=0)
+
+    losses = -loglik / target_lengths.clamp(min=1).float()
+    losses = torch.where(possible, losses, losses.new_zeros(()))
+    return losses[active].mean()
 
 
 def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
@@ -525,6 +606,17 @@ def main():
                              "model can converge enough for forced alignment to be meaningful. "
                              "At ~440 steps/epoch this gives 1 epoch of CTC-only warmup.")
     parser.add_argument("--min-rms", type=float, default=0.005)
+    parser.add_argument("--fleurs-audit-path", type=Path,
+                        default=Path(__file__).resolve().parents[1] / "fleurs_asr_exclusions.jsonl",
+                        help="Optional JSONL of Groq/Whisper FLEURS audit rows. "
+                             "Rows with phoneme error rate (PER) above threshold "
+                             "are excluded from training if the current target text "
+                             "still matches the audited target. Older CER/WER-only "
+                             "audit files fall back to CER/WER thresholds. Set to a "
+                             "missing path to disable.")
+    parser.add_argument("--fleurs-audit-min-per", type=float, default=1e-12)
+    parser.add_argument("--fleurs-audit-min-cer", type=float, default=1e-12)
+    parser.add_argument("--fleurs-audit-min-wer", type=float, default=1e-12)
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints-unified"))
     parser.add_argument("--wandb-project", type=str, default="lexide-pronunciation")
     parser.add_argument("--num-workers", type=int, default=16)
@@ -532,7 +624,24 @@ def main():
     parser.add_argument("--langs", nargs="*", default=None)
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument("--resume-from", type=Path, default=None,
+                        help="Local path to a checkpoint dir (saved by save_to_dir) to resume "
+                             "training from. Must be paired with --resume-epoch. Loads model "
+                             "weights only (optimizer/scheduler are reinitialized fresh). "
+                             "Use this to continue an in-flight run after a code change.")
+    parser.add_argument("--resume-epoch", type=int, default=None,
+                        help="Epoch number to start at when --resume-from is given. The "
+                             "training loop runs epochs [resume_epoch, epochs] inclusive. "
+                             "Both flags must be set together — there's no default, so this "
+                             "path can't trigger by accident.")
     args = parser.parse_args()
+
+    if (args.resume_from is None) != (args.resume_epoch is None):
+        raise SystemExit("--resume-from and --resume-epoch must be provided together.")
+    if args.resume_epoch is not None and args.resume_epoch > args.epochs:
+        raise SystemExit(
+            f"--resume-epoch {args.resume_epoch} > --epochs {args.epochs}; nothing to do."
+        )
 
     assert torch.cuda.is_available(), "CUDA not available"
     device = torch.device("cuda")
@@ -562,15 +671,22 @@ def main():
         else:
             aux_feature_table = table
 
-    model = FactorizedCTCModel(
-        model_name=args.model_name,
-        vocab_size=len(processor.tokenizer),
-        blank_id=processor.tokenizer.pad_token_id,
-        feature_table=feature_table,
-        aux_feature_table=aux_feature_table,
-        special_token_ids=special_token_ids,
-        regularized_heads=args.regularized_heads,
-    ).to(device)
+    if args.resume_from is not None:
+        # Resume: load model with backbone + heads + feature_table + regularized
+        # config restored from the checkpoint dir. CLI feature/regularized flags
+        # are ignored (the checkpoint is the source of truth for arch).
+        print(f"Resuming from {args.resume_from}, starting at epoch {args.resume_epoch}")
+        model = FactorizedCTCModel.load_from_dir(args.resume_from).to(device)
+    else:
+        model = FactorizedCTCModel(
+            model_name=args.model_name,
+            vocab_size=len(processor.tokenizer),
+            blank_id=processor.tokenizer.pad_token_id,
+            feature_table=feature_table,
+            aux_feature_table=aux_feature_table,
+            special_token_ids=special_token_ids,
+            regularized_heads=args.regularized_heads,
+        ).to(device)
 
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -580,6 +696,13 @@ def main():
     print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
     print(f"Blank id: {model.blank_id}, vocab size: {model.vocab_size}")
 
+    asr_exclusions = load_asr_audit_exclusions(
+        args.fleurs_audit_path,
+        min_per=args.fleurs_audit_min_per,
+        min_cer=args.fleurs_audit_min_cer,
+        min_wer=args.fleurs_audit_min_wer,
+    )
+
     datasets = []
     for lang_dir in sorted(args.data_dir.iterdir()):
         if args.langs is not None and lang_dir.name not in args.langs:
@@ -588,7 +711,8 @@ def main():
         if phonemes_file.exists():
             ds = StressDataset(phonemes_file, processor.tokenizer,
                                max_audio_sec=args.max_audio_sec,
-                               min_rms=args.min_rms)
+                               min_rms=args.min_rms,
+                               excluded_target_hashes=asr_exclusions.get(lang_dir.name))
             print(f"Loaded {lang_dir.name}: {len(ds)} samples")
             datasets.append(ds)
     if not datasets:
@@ -603,8 +727,18 @@ def main():
     )
     print(f"Train: {train_size}, Val: {val_size}")
 
+    # Length-bucketed batch sampler — pre-compute audio lengths for train_ds
+    # (cheap: reads cached `n_audio_samples` from each sample dict, no audio
+    # I/O). Groups same-length clips into batches so the factorial CTC DP
+    # doesn't OOM on a worst-case (long clip × long target) batch.
+    train_lengths = get_audio_lengths(train_ds)
+    print(f"Audio length stats: min={min(train_lengths)}, max={max(train_lengths)}, "
+          f"median={sorted(train_lengths)[len(train_lengths)//2]}")
+    train_batch_sampler = LengthBucketedBatchSampler(
+        train_lengths, batch_size=args.batch_size, bucket_size_mul=100, seed=42,
+    )
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
+        train_ds, batch_sampler=train_batch_sampler,
         collate_fn=collate_fn_augment, num_workers=args.num_workers, pin_memory=True,
         persistent_workers=args.num_workers > 0,
         prefetch_factor=4 if args.num_workers > 0 else None,
@@ -642,10 +776,16 @@ def main():
         ],
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # When resuming, advance the cosine schedule to its value at the start of
+    # the resume epoch (epoch numbering is 1-based, so step() runs (resume_epoch-1) times).
+    if args.resume_epoch is not None:
+        for _ in range(args.resume_epoch - 1):
+            scheduler.step()
 
     wandb.init(project=args.wandb_project, name="unified-xls-r-2b", config=vars(args))
     args.save_dir.mkdir(parents=True, exist_ok=True)
     best_val_loss = float("inf")
+    start_epoch = args.resume_epoch if args.resume_epoch is not None else 1
 
     hf_api = None
     if args.hf_repo:
@@ -653,7 +793,11 @@ def main():
         hf_api = HfApi()
         hf_api.create_repo(args.hf_repo, exist_ok=True)
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
+        # Re-randomize the per-epoch shuffle inside each length-bucket and
+        # across batches. Without this the sampler would yield the same order
+        # every epoch (deterministic from the seeded generator).
+        train_batch_sampler.set_epoch(epoch)
         # Stress loss enabled when (epoch-1)*steps_per_epoch >= warmup. The first
         # epoch has noisy alignment from random init — wait for CTC to find phonemes.
         steps_so_far = (epoch - 1) * steps_per_epoch
