@@ -33,12 +33,14 @@ from urllib3.util.retry import Retry
 
 LANGS = ["deu", "eng", "fra", "ita", "por", "rus", "spa"]
 
-# Each thread gets its own requests.Session for HTTP/1.1 keep-alive
-# (Tatoeba responds in ~4 sec with a warm connection vs ~40 sec cold).
-MAX_WORKERS = 32
+# Each thread gets its own requests.Session for keep-alive. Tatoeba's
+# audio endpoint is slow per-request (~15-30 s observed even with no
+# concurrent load) and rate-limits aggressively; 4 workers + long timeouts
+# avoid the catastrophic 99% 429 rate we saw at 32 workers.
+MAX_WORKERS = 4
 
-TIMEOUT = 30
-RETRIES = 3
+TIMEOUT = 90
+RETRIES = 4
 USER_AGENT = "lexide-pronunciation-trainer/0.1 (research, contact: anchpop)"
 
 # Thread-local sessions keep connection-pool state per worker.
