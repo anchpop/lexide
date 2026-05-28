@@ -34,24 +34,38 @@ if [ -z "${HF_TOKEN:-}" ]; then
   exit 1
 fi
 
-echo "=== Step 1/4: Tatoeba audit ==="
+echo "=== Step 1/5: Tatoeba audit ==="
 python3 scripts/audit_tatoeba_groq.py
 
 echo
-echo "=== Step 2/4: Pimsleur extraction (whatever's available on T7) ==="
+echo "=== Step 2/5: Backfill Pimsleur resume markers ==="
+python3 scripts/backfill_pimsleur_markers.py
+
+echo
+echo "=== Step 3/5: Pimsleur extraction (whatever's available on T7) ==="
+# Use full whisper-large-v3 for Pimsleur because clips are very short
+# (1-5 sec) — Whisper's short-audio regime is where turbo's accuracy
+# gap widens. Pimsleur transcripts BECOME the training labels here,
+# so transcript quality matters more than throughput.
 if [ -d "/Volumes/T7/p_rty/Pimsleur Complete Collection" ]; then
-  python3 data/download_pimsleur.py
+  python3 data/download_pimsleur.py --model whisper-large-v3
 else
   echo "  T7 not mounted; skipping Pimsleur step"
 fi
 
 echo
-echo "=== Step 3/4: Regenerate per-lang phonemes.jsonl ==="
+echo "=== Step 4/5: Regenerate per-lang phonemes.jsonl ==="
 python3 train/scripts/preprocess.py
 
 echo
-echo "=== Step 4/4: Upload to HF dataset ==="
+echo "=== Step 5/5: Upload to HF dataset ==="
 python3 scripts/upload_audio_to_hf.py
+
+echo
+echo "=== Optional: Pimsleur mixing audit ==="
+echo "  Not run automatically (it's a sanity check, not blocking)."
+echo "  To check for VAD-mixed English/target clips:"
+echo "    python3 scripts/audit_pimsleur_mixing.py"
 
 echo
 echo "=== DONE ==="

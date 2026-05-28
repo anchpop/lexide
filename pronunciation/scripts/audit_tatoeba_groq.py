@@ -200,6 +200,21 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
                 actual_phonemes = []
 
             expected_sha = hashlib.sha256(record["expected"].encode()).hexdigest()
+
+            # Aggregate per-segment Whisper signals so they're easy to
+            # filter at training time without parsing the full payload.
+            segs = payload.get("segments") or []
+            avg_logprob = None
+            no_speech_prob = None
+            compression_ratio = None
+            if segs:
+                lps = [s.get("avg_logprob") for s in segs if s.get("avg_logprob") is not None]
+                nps = [s.get("no_speech_prob") for s in segs if s.get("no_speech_prob") is not None]
+                cps = [s.get("compression_ratio") for s in segs if s.get("compression_ratio") is not None]
+                avg_logprob = sum(lps) / len(lps) if lps else None
+                no_speech_prob = max(nps) if nps else None
+                compression_ratio = max(cps) if cps else None
+
             return {
                 **record,
                 "ok": True,
@@ -208,6 +223,9 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
                 "model": args.model,
                 "whisper_text": text,
                 "whisper_language": payload.get("language"),
+                "whisper_avg_logprob": avg_logprob,
+                "whisper_no_speech_prob": no_speech_prob,
+                "whisper_compression_ratio": compression_ratio,
                 "expected_sha256": expected_sha,
                 "expected_phonemes": expected_phonemes,
                 "actual_phonemes": actual_phonemes,
@@ -216,6 +234,9 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
                 "per": phoneme_cer(expected_phonemes, actual_phonemes),
                 "cer": text_cer(record["expected"], text),
                 "wer": text_wer(record["expected"], text),
+                # Full verbose_json — keep for future re-analysis without
+                # paying Groq again.
+                "whisper": payload,
             }
         except requests.HTTPError as e:
             last_error = (

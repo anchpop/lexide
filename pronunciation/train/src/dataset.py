@@ -36,7 +36,16 @@ class StressDataset(Dataset):
         min_rms: float = 0.005,
         min_duration_sec: float = 0.3,
         excluded_target_hashes: dict[str, str] | None = None,
+        min_whisper_logprob: float | None = None,
     ):
+        """
+        min_whisper_logprob: if set, exclude rows whose `whisper_avg_logprob`
+            (recorded by download_pimsleur.py) is below this threshold. A
+            value of -0.7 catches the bulk of Pimsleur mistranscriptions
+            (manual audit: ~17% wrong-rate in <-0.7, ~0% wrong-rate above).
+            Rows lacking this field (FLEURS, Tatoeba) always pass — they
+            went through their own audit pipeline.
+        """
         self.tokenizer = tokenizer
         self.max_audio_samples = int(max_audio_sec * 16000)
         min_samples = int(min_duration_sec * 16000)
@@ -54,6 +63,7 @@ class StressDataset(Dataset):
             "unreadable": 0,
             "asr_audit": 0,
             "stale_asr_audit": 0,
+            "whisper_logprob": 0,
         }
 
         # Optional: per-clip VAD probabilities at 16ms stride from earshot.
@@ -71,6 +81,32 @@ class StressDataset(Dataset):
             records = [json.loads(line) for line in f]
 
         for rec in tqdm(records, desc=f"Scanning {phonemes_path.parent.name}", leave=False):
+            # Whisper confidence filter (Pimsleur clips only — FLEURS/Tatoeba
+            # rows lack this field). Manual audit on eng Pimsleur showed
+            # ~17% wrong-rate below logprob -0.7, ~0% above. Defaults to
+            # None (no filter) at the constructor level; train_unified.py
+            # plumbs through a CLI value.
+            #
+            # Pimsleur rows that lack the field are stale (preprocessed
+            # before the field was wired through preprocess.py). Drop them
+            # rather than silently bypassing the filter — re-run preprocess
+            # to get them back. Pimsleur is detected by either the `source`
+            # field (added in this PR) OR the `pimsleur_` filename prefix
+            # (a stable contract from download_pimsleur.py), so very old
+            # preprocessed rows that predate the `source` field are still
+            # caught.
+            if min_whisper_logprob is not None:
+                lp = rec.get("whisper_avg_logprob")
+                is_pimsleur = (rec.get("source") == "pimsleur"
+                               or rec["file"].startswith("pimsleur_"))
+                if lp is None:
+                    if is_pimsleur:
+                        skipped["whisper_logprob"] += 1
+                        continue
+                elif lp < min_whisper_logprob:
+                    skipped["whisper_logprob"] += 1
+                    continue
+
             audited_target_hash = excluded_target_hashes.get(rec["file"])
             if audited_target_hash is not None:
                 current_hash = hashlib.sha256(rec.get("sentence", "").encode()).hexdigest()

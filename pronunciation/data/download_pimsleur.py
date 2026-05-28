@@ -54,16 +54,32 @@ from preprocess import phonemize, LANG_TO_ESPEAK  # noqa: E402
 
 GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
-LANG_TO_ISO639_1 = {
-    "deu": "de", "eng": "en", "fra": "fr", "ita": "it",
-    "por": "pt", "rus": "ru", "spa": "es",
-}
 # Whisper's verbose_json returns the detected language as a lowercase full
-# English name ("english", "french") rather than an ISO code. We accept either
-# form on input and normalize for the equality check.
+# English name ("english", "french") rather than an ISO code.
 LANG_TO_WHISPER_NAME = {
     "deu": "german", "eng": "english", "fra": "french", "ita": "italian",
     "por": "portuguese", "rus": "russian", "spa": "spanish",
+    "sqi": "albanian", "ara": "arabic", "hye": "armenian", "yue": "cantonese",
+    "hrv": "croatian", "ces": "czech", "dan": "danish", "fas": "persian",
+    "nld": "dutch", "fin": "finnish", "hat": "haitian creole", "heb": "hebrew",
+    "hin": "hindi", "hun": "hungarian", "isl": "icelandic", "ind": "indonesian",
+    "gle": "irish", "jpn": "japanese", "kor": "korean", "ell": "greek",
+    "nor": "norwegian", "oji": "ojibwe", "pus": "pashto", "pol": "polish",
+    "pan": "punjabi", "ron": "romanian", "swa": "swahili", "swe": "swedish",
+    "tgl": "tagalog", "tha": "thai", "tur": "turkish", "twi": "twi",
+    "ukr": "ukrainian", "urd": "urdu", "vie": "vietnamese",
+}
+
+LANG_TO_ISO639_1 = {
+    "deu": "de", "eng": "en", "fra": "fr", "ita": "it",
+    "por": "pt", "rus": "ru", "spa": "es",
+    "sqi": "sq", "ara": "ar", "hye": "hy", "yue": "yue", "hrv": "hr",
+    "ces": "cs", "dan": "da", "fas": "fa", "nld": "nl", "fin": "fi",
+    "hat": "ht", "heb": "he", "hin": "hi", "hun": "hu", "isl": "is",
+    "ind": "id", "gle": "ga", "jpn": "ja", "kor": "ko", "ell": "el",
+    "nor": "no", "pus": "ps", "pol": "pl", "pan": "pa", "ron": "ro",
+    "swa": "sw", "swe": "sv", "tgl": "tl", "tha": "th", "tur": "tr",
+    "ukr": "uk", "urd": "ur", "vie": "vi",
 }
 
 
@@ -74,21 +90,89 @@ def whisper_lang_matches(detected: str, target_lang: str) -> bool:
     d = detected.strip().lower()
     return d == LANG_TO_ISO639_1.get(target_lang) or d == LANG_TO_WHISPER_NAME.get(target_lang)
 
-# Map Pimsleur folder names to our 3-letter target language codes.
-# Only languages we train on are listed; anything else is skipped.
+
+def lesson_id_from_path(mp3_path: Path, pimsleur_root: Path) -> str:
+    """Stable, filesystem-safe identifier derived from an mp3's location.
+
+    Pimsleur ships multiple courses per training language: Brazilian + European
+    Portuguese (both lang="por"), Castilian + Latin American + plain Spanish
+    (all lang="spa"), Arabic Eastern + Egyptian + MSA, Eastern + Western
+    Armenian, Dari + Farsi Persian, German + Swiss German. Their lesson files
+    are often named identically (e.g. "Unit 01.mp3"). Using bare `mp3_path.stem`
+    as the lesson id collides across courses: the second course overwrites the
+    first course's WAVs but the manifest still points at the first course's
+    transcripts, corrupting audio/label alignment.
+
+    Including the course folder makes the identifier unique per source MP3.
+    """
+    rel = mp3_path.relative_to(pimsleur_root).with_suffix("")
+    parts = [re.sub(r"[^A-Za-z0-9._-]+", "-", str(p)).strip("-") for p in rel.parts]
+    return "__".join(p for p in parts if p)
+
+# Languages we currently train on. We process these FIRST so the user
+# can start a training run as soon as their lessons are extracted,
+# without waiting for the non-target languages to finish.
+TARGET_LANGS = ("deu", "eng", "fra", "ita", "por", "rus", "spa")
+
+# Pimsleur folder name → (3-letter lang code, espeak voice code).
+# Comprehensive coverage of the Pimsleur Complete Collection — process
+# every language the archive has. Languages without an espeak voice are
+# included with espeak=None: audio + transcript still get saved to
+# manifest.jsonl so downstream code can decide what to do with them,
+# but they won't get a phonemes.jsonl entry (preprocess.py will skip).
 PIMSLEUR_FOLDER_TO_LANG = {
-    "French": "fra",
-    "German": "deu",
-    "Italian": "ita",
-    "Brazilian Portuguese": "por",
-    "European Portuguese": "por",
-    "Portuguese": "por",
-    "Russian": "rus",
-    "Spanish": "spa",
-    "Castilian Spanish": "spa",
-    "Latin American Spanish": "spa",
-    "English": "eng",
-    "ESL": "eng",
+    "Albanian": ("sqi", "sq"),
+    "Arabic Eastern": ("ara", "ar"),
+    "Armenian Eastern": ("hye", "hy"),
+    "Brazilian Portuguese": ("por", "pt-br"),
+    "Cantonese Chinese": ("yue", "yue"),
+    "Castilian Spanish": ("spa", "es"),
+    "Croatian": ("hrv", "hr"),
+    "Czech": ("ces", "cs"),
+    "Danish": ("dan", "da"),
+    "Dari Persian": ("fas", "fa"),
+    "Dutch": ("nld", "nl"),
+    "Egyptian Arabic": ("ara", "ar"),
+    "ESL (English as a Second Language)": ("eng", "en-us"),
+    "European Portuguese": ("por", "pt"),
+    "Farsi Persian": ("fas", "fa"),
+    "Finnish": ("fin", "fi"),
+    "French": ("fra", "fr-fr"),
+    "German": ("deu", "de"),
+    "Haitian Creole": ("hat", "ht"),
+    "Hebrew": ("heb", "he"),
+    "Hindi": ("hin", "hi"),
+    "Hungarian": ("hun", "hu"),
+    "Icelandic": ("isl", "is"),
+    "Indonesian": ("ind", "id"),
+    "Irish": ("gle", "ga"),
+    "Italian": ("ita", "it"),
+    "Japanese": ("jpn", "ja"),
+    "Korean": ("kor", "ko"),
+    "Modern Greek": ("ell", "el"),
+    "Modern Standard Arabic": ("ara", "ar"),
+    "Norwegian": ("nor", "nb"),
+    "Ojibwe": ("oji", None),         # no espeak support
+    "Pashto": ("pus", None),          # no espeak support
+    "Polsih": ("pol", "pl"),          # typo in archive
+    "Polish": ("pol", "pl"),          # in case archive ever fixes the typo
+    "Punjabi": ("pan", "pa"),
+    "Romanian": ("ron", "ro"),
+    "Russian": ("rus", "ru"),
+    "Spanish": ("spa", "es-419"),     # Latin American Spanish
+    "Latin American Spanish": ("spa", "es-419"),
+    "Swahili": ("swa", "sw"),
+    "Swedish": ("swe", "sv"),
+    "Swiss German": ("deu", "de"),    # Whisper has no dedicated Swiss variant
+    "Tagalog": ("tgl", None),         # no espeak support
+    "Thai": ("tha", "th"),
+    "Turkish": ("tur", "tr"),
+    "Twi": ("twi", None),             # no espeak support
+    "Ukranian": ("ukr", "uk"),        # archive typo
+    "Ukrainian": ("ukr", "uk"),       # in case archive fixes it
+    "Urdu": ("urd", "ur"),
+    "Vietnamese": ("vie", "vi"),
+    "Western Armenian": ("hye", "hyw"),
 }
 
 # Tatoeba defaults: short, clear native-language utterances. Pimsleur native
@@ -129,19 +213,30 @@ def decode_mp3(mp3_path: Path) -> np.ndarray:
 
 
 def vad_segments(audio: np.ndarray, vad_model, get_speech_timestamps) -> list[dict]:
-    """Return list of {'start': int, 'end': int} sample-index pairs."""
+    """Return list of {'start': int, 'end': int} sample-index pairs.
+
+    `min_silence_duration_ms=800` is conservative for Pimsleur audio
+    specifically: lessons alternate between English instructor and target-
+    language native, and short handoff pauses (~300-500ms) would merge
+    those into one mixed-language VAD segment. The audit script
+    (audit_pimsleur_mixing.py) catches survivors.
+    """
     t = torch.from_numpy(audio)
     return get_speech_timestamps(t, vad_model, sampling_rate=16000,
                                  min_speech_duration_ms=400,
                                  max_speech_duration_s=MAX_DURATION_SEC,
-                                 min_silence_duration_ms=300)
+                                 min_silence_duration_ms=800)
 
 
 def transcribe_clip(wav_bytes: bytes, api_key: str, model: str,
                     retries: int = 3, timeout: float = 60.0) -> dict[str, Any]:
     """Send a single WAV clip to Groq Whisper with no language hint.
 
-    Returns {"ok": bool, "text": str, "language": str, "error": str|None}.
+    Returns the full verbose_json payload alongside an "ok" flag so the
+    caller can store every Whisper signal in the manifest (segments,
+    avg_logprob, no_speech_prob, compression_ratio, etc). Throwing away
+    those signals at extraction time means later filtering needs another
+    Groq call per clip; storing them is free.
     """
     fields = [
         ("model", model),
@@ -169,49 +264,102 @@ def transcribe_clip(wav_bytes: bytes, api_key: str, model: str,
                 "ok": True,
                 "text": (payload.get("text") or "").strip(),
                 "language": payload.get("language") or "",
+                "payload": payload,  # Full verbose_json — keep everything
                 "error": None,
             }
         except Exception as e:
             last_error = repr(e)
             time.sleep(min(15.0, 2 ** attempt))
-    return {"ok": False, "text": "", "language": "", "error": last_error}
+    return {"ok": False, "text": "", "language": "", "payload": None,
+            "error": last_error}
 
 
-def process_lesson(mp3_path: Path, target_lang: str, vad_model,
-                   get_speech_timestamps, save_audio,
-                   audio_dir: Path, api_key: str, model: str) -> list[dict]:
-    """Process one Pimsleur lesson, return list of saved manifest entries."""
+def process_lesson(mp3_path: Path, lesson_id: str,
+                   target_lang: str, espeak_lang: str | None,
+                   vad_fn, save_audio,
+                   audio_dir: Path, api_key: str, model: str,
+                   workers: int = 8) -> tuple[list[dict], bool]:
+    """Process one Pimsleur lesson.
+
+    Returns (entries, ok). `ok=False` means the lesson hit a transient
+    failure (decode error, or every Whisper call exhausted its retries)
+    and the caller should NOT mark it as processed — the next run should
+    retry. `ok=True` with `entries=[]` is the normal "lesson processed
+    cleanly, just had no target-language clips worth keeping" case.
+
+    `vad_fn(audio_np) -> list[{'start': int, 'end': int}]` is injected so
+    the caller can wrap it with a lock for thread-safety across lessons.
+
+    Whisper calls within the lesson are dispatched in parallel — each
+    segment is independent so we don't need ordering. With ~80 segments
+    per 30-min lesson and ~1 s per Whisper call, sequential would take
+    ~80 s/lesson; parallelizing across 8 workers gets it to ~10 s/lesson.
+
+    If espeak_lang is None, the lesson is still extracted (audio +
+    Whisper text saved to manifest), but no phonemization happens.
+    preprocess.py also skips those languages.
+    """
     try:
         audio = decode_mp3(mp3_path)
     except Exception as e:
         print(f"  decode failed: {mp3_path.name}: {e}")
-        return []
+        return [], False
 
-    segments = vad_segments(audio, vad_model, get_speech_timestamps)
-    iso_target = LANG_TO_ISO639_1[target_lang]
-    espeak_lang = LANG_TO_ESPEAK[target_lang]
-    lesson_id = mp3_path.stem
+    segments = vad_fn(audio)
+    audio_total = audio.shape[0]
 
-    entries: list[dict] = []
+    # First pass: filter to viable segments and pre-encode WAV bytes.
+    candidates: list[tuple[int, int, int, "np.ndarray", bytes]] = []
     for seg_idx, seg in enumerate(segments):
         start, end = int(seg["start"]), int(seg["end"])
         clip = audio[start:end]
         dur = clip.shape[0] / 16000.0
         if dur < MIN_DURATION_SEC or dur > MAX_DURATION_SEC:
             continue
-
-        # Skip the lesson's leading 60 sec — that's almost always the
-        # English program intro. Same with the trailing 30 sec.
-        if start < 60 * 16000 or end > (audio.shape[0] - 30 * 16000):
+        # Skip the lesson's leading 60 s and trailing 30 s — typically the
+        # English program intro/outro.
+        if start < 60 * 16000 or end > (audio_total - 30 * 16000):
             continue
-
-        # Serialize clip to WAV bytes (in-memory).
         import io
         buf = io.BytesIO()
         sf.write(buf, clip, 16000, format="WAV")
-        wav_bytes = buf.getvalue()
+        candidates.append((seg_idx, start, end, clip, buf.getvalue()))
 
-        whisper = transcribe_clip(wav_bytes, api_key, model)
+    if not candidates:
+        # VAD ran and found nothing usable — this is a clean outcome, not a
+        # transient failure. Mark processed so we don't re-VAD the same lesson.
+        return [], True
+
+    # Second pass: parallel Whisper. Each call is one segment.
+    def whisper_one(item):
+        seg_idx, start, end, clip, wav_bytes = item
+        w = transcribe_clip(wav_bytes, api_key, model)
+        return seg_idx, start, end, clip, w
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results: list[tuple[int, int, int, "np.ndarray", dict]] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(whisper_one, c) for c in candidates]
+        for fut in as_completed(futs):
+            results.append(fut.result())
+
+    # If ANY Whisper call failed after retries, treat as a transient
+    # failure and refuse to mark the lesson processed. With 32 in-flight
+    # Groq calls, partial rate-limit drops are realistic and would
+    # otherwise permanently skip the failed segments. Resume is cheap:
+    # existing_files dedupe in main() prevents duplicate manifest rows
+    # when the lesson is re-processed.
+    n_failed = sum(1 for r in results if not r[4]["ok"])
+    if n_failed > 0:
+        print(f"  {n_failed}/{len(results)} Whisper calls failed: "
+              f"{mp3_path.name} — not marking processed")
+        return [], False
+
+    # Third pass: filter by language match, optionally phonemize, save WAV,
+    # build manifest entries. Sorted by seg_idx so filenames are stable.
+    results.sort(key=lambda r: r[0])
+    entries: list[dict] = []
+    for seg_idx, start, end, clip, whisper in results:
         if not whisper["ok"]:
             continue
         if not whisper_lang_matches(whisper["language"], target_lang):
@@ -219,37 +367,80 @@ def process_lesson(mp3_path: Path, target_lang: str, vad_model,
         text = whisper["text"]
         if not text or len(text) < 2:
             continue
-
-        try:
-            phonemes, stress = phonemize(text, espeak_lang)
-        except Exception:
-            continue
-        if not phonemes:
-            continue
+        if espeak_lang is not None:
+            try:
+                phonemes, _ = phonemize(text, espeak_lang)
+            except Exception:
+                continue
+            if not phonemes:
+                continue
 
         fname = f"pimsleur_{lesson_id}_{seg_idx:04d}.wav"
         dest = audio_dir / fname
         sf.write(dest, clip, 16000)
+
+        # Extract the highest-signal Whisper fields into the manifest
+        # alongside the full payload. The flat fields (avg_logprob,
+        # no_speech_prob, etc.) are convenient for filtering at load
+        # time; `whisper` carries the rest for future re-analysis.
+        payload = whisper.get("payload") or {}
+        segs = payload.get("segments") or []
+        # Aggregate per-segment metrics; for short clips Whisper often
+        # returns a single segment, in which case avg == min == max.
+        avg_logprob = None
+        no_speech_prob = None
+        compression_ratio = None
+        if segs:
+            logprobs = [s.get("avg_logprob") for s in segs if s.get("avg_logprob") is not None]
+            no_speeches = [s.get("no_speech_prob") for s in segs if s.get("no_speech_prob") is not None]
+            comps = [s.get("compression_ratio") for s in segs if s.get("compression_ratio") is not None]
+            avg_logprob = sum(logprobs) / len(logprobs) if logprobs else None
+            # Worst-case (most likely "no speech") across the clip
+            no_speech_prob = max(no_speeches) if no_speeches else None
+            compression_ratio = max(comps) if comps else None
+
         entries.append({
             "file": fname,
             "sentence": text,
             "source": "pimsleur",
-            "voice": None,
+            # The espeak voice this clip's text was phonemized with at
+            # extraction time. Preserved per-row so preprocess.py can
+            # match phoneme labels to dialect (e.g. Brazilian vs European
+            # Portuguese, both stored under lang="por" but with different
+            # espeak voices "pt-br" vs "pt"). Separate field from `voice`
+            # because download_tatoeba.py stores the human uploader name
+            # in `voice`, which is not an espeak voice code.
+            "espeak_voice": espeak_lang,
             "lang": target_lang,
+            "duration_sec": clip.shape[0] / 16000.0,
+            "whisper_language": whisper.get("language"),
+            "whisper_avg_logprob": avg_logprob,
+            "whisper_no_speech_prob": no_speech_prob,
+            "whisper_compression_ratio": compression_ratio,
+            # Full Whisper verbose_json — segments, tokens, etc.
+            # Re-analyzing later (confidence filters, fragment detection,
+            # token-level inspection) is free if we keep this.
+            "whisper": payload,
         })
-    return entries
+    return entries, True
 
 
 def discover_lessons(pimsleur_root: Path,
-                     wanted_langs: set[str] | None) -> list[tuple[Path, str]]:
-    """Walk Pimsleur folders, return [(mp3_path, target_lang_code), ...]."""
-    out: list[tuple[Path, str]] = []
+                     wanted_langs: set[str] | None) -> list[tuple[Path, str, str | None]]:
+    """Walk Pimsleur folders, return [(mp3_path, lang_code, espeak_lang), ...].
+
+    espeak_lang is None for Pimsleur languages without espeak voice
+    support (Ojibwe, Pashto, Tagalog, Twi). Audio + transcript still get
+    extracted; phonemization is skipped.
+    """
+    out: list[tuple[Path, str, str | None]] = []
     for folder in sorted(pimsleur_root.iterdir()):
         if not folder.is_dir():
             continue
-        lang = PIMSLEUR_FOLDER_TO_LANG.get(folder.name)
-        if lang is None:
+        mapping = PIMSLEUR_FOLDER_TO_LANG.get(folder.name)
+        if mapping is None:
             continue
+        lang, espeak_lang = mapping
         if wanted_langs and lang not in wanted_langs:
             continue
         # MP3s may be nested under Level N/ subdirs or directly under the lang folder.
@@ -266,7 +457,7 @@ def discover_lessons(pimsleur_root: Path,
                 continue
             if "readings" in path_parts or "reading" in path_parts:
                 continue
-            out.append((mp3, lang))
+            out.append((mp3, lang, espeak_lang))
     return out
 
 
@@ -282,6 +473,10 @@ def main() -> None:
     parser.add_argument("--model", default="whisper-large-v3-turbo")
     parser.add_argument("--workers", type=int, default=8,
                         help="Concurrent Whisper requests per lesson.")
+    parser.add_argument("--lesson-workers", type=int, default=4,
+                        help="How many lessons to process concurrently. Total "
+                             "Whisper calls in flight = workers * lesson-workers. "
+                             "4*8=32 is a comfortable load for Groq.")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -293,18 +488,24 @@ def main() -> None:
     wanted = set(args.lang) if args.lang else None
     lessons = discover_lessons(args.pimsleur_root, wanted)
     print(f"Discovered {len(lessons)} Pimsleur lessons across "
-          f"{len({lang for _, lang in lessons})} language(s).")
+          f"{len({lang for _, lang, _ in lessons})} language(s).")
     if args.dry_run:
-        for path, lang in lessons[:20]:
-            print(f"  [{lang}] {path}")
+        for path, lang, espeak_lang in lessons[:20]:
+            print(f"  [{lang}, espeak={espeak_lang}] {path}")
         if len(lessons) > 20:
             print(f"  ... and {len(lessons) - 20} more")
         return
 
-    # Group by lang so we respect --max-lessons-per-lang.
-    by_lang: dict[str, list[Path]] = {}
-    for path, lang in lessons:
-        by_lang.setdefault(lang, []).append(path)
+    # Group by lang so we respect --max-lessons-per-lang. Each lesson
+    # carries (path, lesson_id, espeak_lang); lesson_id is computed once
+    # from the mp3's path-relative-to-archive-root so it stays unique
+    # across courses that share the same target lang (e.g. Brazilian +
+    # European Portuguese both map to "por", and their Unit-01.mp3 files
+    # would otherwise collide on disk).
+    by_lang: dict[str, list[tuple[Path, str, str | None]]] = {}
+    for path, lang, espeak_lang in lessons:
+        lid = lesson_id_from_path(path, args.pimsleur_root)
+        by_lang.setdefault(lang, []).append((path, lid, espeak_lang))
     if args.max_lessons_per_lang is not None:
         for lang in by_lang:
             by_lang[lang] = by_lang[lang][: args.max_lessons_per_lang]
@@ -319,7 +520,13 @@ def main() -> None:
     )
     get_speech_timestamps, save_audio, *_ = vad_utils
 
-    for lang, mp3_paths in sorted(by_lang.items()):
+    # Sort: target training languages first (so the user can start
+    # training as soon as those are extracted), then everything else
+    # alphabetical. TARGET_LANGS order itself is alphabetical, doesn't
+    # matter — all targets get processed before any non-target.
+    def _order(lang: str) -> tuple[int, str]:
+        return (0 if lang in TARGET_LANGS else 1, lang)
+    for lang, lessons_for_lang in sorted(by_lang.items(), key=lambda kv: _order(kv[0])):
         audio_dir = args.audio_root / lang
         audio_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = audio_dir / "manifest.jsonl"
@@ -331,26 +538,104 @@ def main() -> None:
                     rec = json.loads(line)
                     existing_files.add(rec["file"])
 
-        print(f"\n=== {lang}: {len(mp3_paths)} lessons ===")
-        for i, mp3 in enumerate(mp3_paths):
-            print(f"  [{lang}] {i+1}/{len(mp3_paths)}: {mp3.name}")
-            try:
-                entries = process_lesson(
-                    mp3, lang, vad_model, get_speech_timestamps, save_audio,
-                    audio_dir, api_key, args.model,
-                )
-            except KeyboardInterrupt:
-                raise
-            except Exception as e:
-                print(f"    SKIP — {e}")
-                continue
+        # Per-lesson marker file. Each completed lesson (even if it
+        # yielded zero target-language segments) gets its lesson_id
+        # appended here, so re-running the orchestrator after more data
+        # arrives skips lessons we've already paid Whisper for.
+        processed_path = audio_dir / "pimsleur_processed.txt"
+        processed_lessons: set[str] = set()
+        if processed_path.exists():
+            processed_lessons = {
+                line.strip() for line in processed_path.read_text().splitlines()
+                if line.strip()
+            }
 
-            kept = [e for e in entries if e["file"] not in existing_files]
-            with manifest_path.open("a") as out:
-                for e in kept:
-                    out.write(json.dumps(e, ensure_ascii=False) + "\n")
-                    existing_files.add(e["file"])
-            print(f"    kept {len(kept)} target-language clips")
+        # Filter out already-processed lessons up-front. Lesson_id is the
+        # path-derived stable identifier from lesson_id_from_path. Also
+        # honor `mp3.stem` to stay compatible with markers written by the
+        # earlier bare-stem id scheme — without that, switching to path-
+        # derived ids would force re-Whispering every lesson processed
+        # before this change.
+        todo = [(mp3, lid, e) for (mp3, lid, e) in lessons_for_lang
+                if lid not in processed_lessons
+                and mp3.stem not in processed_lessons]
+        # Voices may differ across courses for the same lang (Brazilian
+        # Portuguese pt-br vs European Portuguese pt, etc.) — log the set.
+        voices = sorted({e for (_, _, e) in lessons_for_lang if e})
+        print(f"\n=== {lang} (voices={voices or [None]}): "
+              f"{len(lessons_for_lang)} lessons total, "
+              f"{len(processed_lessons)} already done, "
+              f"{len(todo)} to do ===")
+        if not todo:
+            continue
+
+        # Lesson-level parallelism: process N lessons concurrently. Each
+        # lesson internally still runs Whisper in 8-way parallel, so
+        # total in-flight Groq calls = lesson_workers * args.workers.
+        # Shared mutable state (manifest write, processed-marker write,
+        # existing_files / processed_lessons sets) is serialized with a lock.
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        state_lock = threading.Lock()
+        # silero-vad is a small TorchScript model; sharing across threads
+        # is fine for eval-mode CPU inference, but we use a lock to avoid
+        # contention on the model's internal hidden state buffers.
+        vad_lock = threading.Lock()
+
+        def vad_fn(audio):
+            with vad_lock:
+                return vad_segments(audio, vad_model, get_speech_timestamps)
+
+        def run_one(idx_mp3_lid_espeak):
+            idx, (mp3, lid, lesson_espeak) = idx_mp3_lid_espeak
+            try:
+                entries, ok = process_lesson(
+                    mp3, lid, lang, lesson_espeak,
+                    vad_fn, save_audio,
+                    audio_dir, api_key, args.model,
+                    workers=args.workers,
+                )
+            except Exception as e:
+                return idx, mp3, lid, None, False, repr(e)
+            return idx, mp3, lid, entries, ok, None
+
+        kept_total = 0
+        empty_count = 0
+        fail_count = 0
+        with ThreadPoolExecutor(max_workers=args.lesson_workers) as pool:
+            futs = [pool.submit(run_one, (i, x)) for i, x in enumerate(todo)]
+            for fut in as_completed(futs):
+                idx, mp3, lid, entries, ok, err = fut.result()
+                if err is not None:
+                    fail_count += 1
+                    print(f"  [{lang}] {idx+1}/{len(todo)} FAIL {mp3.name}: {err}")
+                    continue
+                if entries is None:
+                    entries = []
+                with state_lock:
+                    kept = [e for e in entries if e["file"] not in existing_files]
+                    with manifest_path.open("a") as out:
+                        for e in kept:
+                            out.write(json.dumps(e, ensure_ascii=False) + "\n")
+                            existing_files.add(e["file"])
+                    # Only mark processed when the lesson completed cleanly.
+                    # Transient failures (decode error, all Whisper calls
+                    # exhausted retries) return ok=False so the next run
+                    # retries them instead of permanently skipping.
+                    if ok:
+                        with processed_path.open("a") as out:
+                            out.write(f"{lid}\n")
+                        processed_lessons.add(lid)
+                    else:
+                        fail_count += 1
+                kept_total += len(kept)
+                if ok and not kept:
+                    empty_count += 1
+                status = "ok" if ok else "transient-fail"
+                print(f"  [{lang}] {idx+1}/{len(todo)} {mp3.name}: "
+                      f"kept {len(kept)} [{status}]")
+        print(f"  [{lang}] DONE. kept_total={kept_total} "
+              f"empty_lessons={empty_count} failed={fail_count}")
 
 
 if __name__ == "__main__":

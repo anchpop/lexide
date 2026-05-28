@@ -18,6 +18,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 LANG_TO_ESPEAK = {
+    # Languages we currently train on:
     "eng": "en-us",
     "deu": "de",
     "fra": "fr-fr",
@@ -25,6 +26,44 @@ LANG_TO_ESPEAK = {
     "por": "pt-br",
     "spa": "es",
     "rus": "ru",
+    # Languages added via Pimsleur — phonemes.jsonl gets regenerated for
+    # these too so future training runs can opt into them just by adding
+    # to --langs. espeak voice picked per language.
+    "sqi": "sq",     # Albanian
+    "ara": "ar",     # Arabic (Eastern + Egyptian + MSA all share)
+    "hye": "hy",     # Armenian (also Western)
+    "yue": "yue",    # Cantonese
+    "hrv": "hr",     # Croatian
+    "ces": "cs",     # Czech
+    "dan": "da",     # Danish
+    "fas": "fa",     # Persian (Dari + Farsi)
+    "nld": "nl",     # Dutch
+    "fin": "fi",     # Finnish
+    "hat": "ht",     # Haitian Creole
+    "heb": "he",     # Hebrew
+    "hin": "hi",     # Hindi
+    "hun": "hu",     # Hungarian
+    "isl": "is",     # Icelandic
+    "ind": "id",     # Indonesian
+    "gle": "ga",     # Irish
+    "jpn": "ja",     # Japanese
+    "kor": "ko",     # Korean
+    "ell": "el",     # Modern Greek
+    "nor": "nb",     # Norwegian (Bokmål)
+    "pol": "pl",     # Polish
+    "pan": "pa",     # Punjabi
+    "ron": "ro",     # Romanian
+    "swa": "sw",     # Swahili
+    "swe": "sv",     # Swedish
+    "tha": "th",     # Thai
+    "tur": "tr",     # Turkish
+    "ukr": "uk",     # Ukrainian
+    "urd": "ur",     # Urdu
+    "vie": "vi",     # Vietnamese
+    # No espeak voice (oji=Ojibwe, pus=Pashto, tgl=Tagalog, twi=Twi):
+    # preprocess.py skips these (lang not in LANG_TO_ESPEAK so the loop
+    # in main() filters them out). Audio + transcripts are still on disk
+    # in their manifest.jsonl.
 }
 
 STRESS_NONE = 0
@@ -119,6 +158,13 @@ def main():
         manifest_path = lang_dir / "manifest.jsonl"
         phonemes_path = lang_dir / "phonemes.jsonl"
 
+        # download_pimsleur.py creates the lang dir before it knows whether
+        # any clips will match the target language; some dirs may end up
+        # holding only `pimsleur_processed.txt` and no manifest.
+        if not manifest_path.exists():
+            print(f"Skipping {lang} (no manifest.jsonl)")
+            continue
+
         records = []
         with open(manifest_path) as f:
             for line in f:
@@ -126,14 +172,32 @@ def main():
 
         with open(phonemes_path, "w") as out:
             for rec in tqdm(records, desc=lang):
-                phonemes, stress = phonemize(rec["sentence"], LANG_TO_ESPEAK[lang])
+                # Prefer the per-record espeak voice if the manifest stored
+                # one (Pimsleur does, since "por" covers both Brazilian and
+                # European Portuguese, "spa" covers Castilian + Latin
+                # American, etc — these dialects share a lang code but
+                # need different espeak voices for faithful phoneme labels).
+                # Fall back to the canonical voice for FLEURS / Tatoeba rows.
+                # Note: Tatoeba uses `voice` for the uploader's display
+                # name (a human, not an espeak voice), so we deliberately
+                # read `espeak_voice` only.
+                espeak_voice = rec.get("espeak_voice") or LANG_TO_ESPEAK[lang]
+                phonemes, stress = phonemize(rec["sentence"], espeak_voice)
                 entry = {
                     "file": rec["file"],
                     "lang": lang,
                     "sentence": rec["sentence"],
                     "phonemes": phonemes,
                     "stress": stress,
+                    "source": rec.get("source"),
                 }
+                # Propagate Whisper signal fields from the manifest. Only
+                # present for Pimsleur (extracted with download_pimsleur.py).
+                # FLEURS / Tatoeba rows lack these and pass them through as None.
+                for k in ("whisper_avg_logprob", "whisper_no_speech_prob",
+                         "whisper_compression_ratio", "duration_sec"):
+                    if k in rec:
+                        entry[k] = rec[k]
                 out.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         print(f"{lang}: wrote {len(records)} entries to {phonemes_path}")

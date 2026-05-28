@@ -606,6 +606,11 @@ def main():
                              "model can converge enough for forced alignment to be meaningful. "
                              "At ~440 steps/epoch this gives 1 epoch of CTC-only warmup.")
     parser.add_argument("--min-rms", type=float, default=0.005)
+    parser.add_argument("--min-whisper-logprob", type=float, default=-0.7,
+                        help="Drop Pimsleur clips whose Whisper avg_logprob is "
+                             "below this. Manual audit on eng Pimsleur (153 clips) "
+                             "showed ~17%% wrong-rate below -0.7 and ~0%% above. "
+                             "FLEURS/Tatoeba rows lack this field and always pass.")
     parser.add_argument("--audit-path", type=Path, action="append",
                         default=None,
                         help="JSONL audit file(s) from Groq/Whisper transcription. "
@@ -735,7 +740,8 @@ def main():
             ds = StressDataset(phonemes_file, processor.tokenizer,
                                max_audio_sec=args.max_audio_sec,
                                min_rms=args.min_rms,
-                               excluded_target_hashes=asr_exclusions.get(lang_dir.name))
+                               excluded_target_hashes=asr_exclusions.get(lang_dir.name),
+                               min_whisper_logprob=args.min_whisper_logprob)
             print(f"Loaded {lang_dir.name}: {len(ds)} samples")
             datasets.append(ds)
     if not datasets:
