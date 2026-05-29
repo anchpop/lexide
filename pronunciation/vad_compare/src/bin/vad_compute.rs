@@ -113,5 +113,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         f,
         start.elapsed().as_secs_f64()
     );
+    if f > 0 {
+        // Exit nonzero so callers (preprocess.py) treat partial VAD as an
+        // error rather than silently shipping incomplete vad.jsonl.
+        return Err(format!("{} files failed", f).into());
+    }
     Ok(())
 }

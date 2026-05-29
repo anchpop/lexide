@@ -8,8 +8,10 @@
 #   1. Tatoeba audit (Groq Whisper, phoneme-level CER) → train/tatoeba_asr_exclusions.jsonl
 #   2. Pimsleur extraction (VAD + Whisper) — for whatever languages the
 #      `ia download p_rty` task has finished by now.
-#   3. preprocess.py to regenerate per-lang phonemes.jsonl from the
-#      now-bigger manifest.jsonl files.
+#   3. preprocess.py to regenerate per-lang phonemes.jsonl + vad.jsonl
+#      from the now-bigger manifest.jsonl files. (preprocess.py itself
+#      keeps vad in lockstep with phonemes via earshot vad_compute, so
+#      downstream callers can't accidentally ship stale vad.)
 #   4. upload_audio_to_hf.py to push to the HF dataset repo.
 #
 # Required env vars:
@@ -48,13 +50,25 @@ echo "=== Step 3/5: Pimsleur extraction (whatever's available on T7) ==="
 # gap widens. Pimsleur transcripts BECOME the training labels here,
 # so transcript quality matters more than throughput.
 if [ -d "/Volumes/T7/p_rty/Pimsleur Complete Collection" ]; then
-  python3 data/download_pimsleur.py --model whisper-large-v3
+  # 4×2 = 8 in-flight Groq calls. Original 8×4=32 worked yesterday but
+  # today's Groq tier is rate-limiting ~70% of the bursty 32-way load.
+  # 8 in-flight is well within typical free-tier RPM and lets nearly
+  # every call succeed first try.
+  python3 data/download_pimsleur.py \
+    --model whisper-large-v3 \
+    --workers 4 \
+    --lesson-workers 2
 else
   echo "  T7 not mounted; skipping Pimsleur step"
 fi
 
 echo
-echo "=== Step 4/5: Regenerate per-lang phonemes.jsonl ==="
+echo "=== Step 4/5: Regenerate per-lang phonemes.jsonl + vad.jsonl ==="
+# preprocess.py rebuilds vad.jsonl via vad_compute as it goes, so vad
+# coverage always matches the just-written phonemes.jsonl. Pass
+# --skip-vad if you really want to skip earshot recomputation (e.g.
+# you regenerated phonemes for a label-only fix that didn't change
+# which audio files are referenced).
 python3 train/scripts/preprocess.py
 
 echo

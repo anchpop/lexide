@@ -1,16 +1,19 @@
-//! Re-label French stress using an LLM to identify rhythmic group endings.
+//! Identify rhythmic-group-final words in each French sentence (LLM call only).
 //!
 //! French has no lexical stress; stress falls on the last syllable of each
 //! rhythmic group (groupe rythmique). espeak marks stress on every word's
 //! final syllable, which is systematically wrong for French.
 //!
 //! This binary:
-//! 1. Reads pronunciation/data/audio/fra/phonemes.jsonl
-//! 2. Calls GPT-5.4-nano (with tysm's prompt-aware caching) to get
-//!    rhythmic-group-final word indices for each sentence
-//! 3. Phonemizes each word with espeak-ng to determine phoneme boundaries
-//! 4. Writes updated phonemes.jsonl where only the last vowel of each
-//!    group-final word carries primary stress
+//! 1. Reads pronunciation/data/audio/fra/manifest.jsonl
+//! 2. Calls GPT-5.4-nano (with tysm's prompt-aware caching) to get the
+//!    rhythmic-group-final words (verbatim) for each sentence
+//! 3. Writes pronunciation/data/audio/fra/stress_overrides.jsonl
+//!
+//! `train/scripts/preprocess.py` consumes the sidecar: when phonemizing
+//! French it phonemizes the whole sentence with espeak (preserving liaison),
+//! tracks word boundaries in the IPA output, then marks the last vowel of
+//! each LLM-flagged word as primary stress and zeroes everything else.
 
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
@@ -18,22 +21,20 @@ use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::LazyLock;
 use tokio::fs;
 use tysm::chat_completions::ChatClient;
 
-const ESPEAK_VOWELS: &str = "iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaɶɑɒɚɝᵻ";
-const VOWEL_CONTINUATIONS: &str = "ːˑ̠̞̯̥̃̊̈";
-const WORD_BOUNDARIES: &str = " \t\n|_-";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PhonemeRecord {
+#[derive(Debug, Clone, Deserialize)]
+struct ManifestRecord {
     file: String,
-    lang: String,
     sentence: String,
-    phonemes: Vec<String>,
-    stress: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StressOverride {
+    file: String,
+    stressed_words: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -113,151 +114,18 @@ Output: stressed_words = ["marais"]
 Input: "peine de mort"
 Output: stressed_words = ["mort"]"#;
 
-/// Strip leading/trailing punctuation for matching purposes.
-fn strip_punct(s: &str) -> String {
-    s.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-' && c != '’')
-        .to_lowercase()
-}
-
-async fn get_stressed_indices(sentence: &str) -> Result<Vec<usize>> {
+async fn get_stressed_words(sentence: &str) -> Result<Vec<String>> {
     let response: RhythmicGroupResponse = CHAT_CLIENT
         .chat_with_system_prompt(SYSTEM_PROMPT.to_string(), sentence.to_string())
         .await?;
-
-    // Match each returned word string to its index in the sentence.
-    let sentence_words: Vec<&str> = sentence.split_whitespace().collect();
-    let normalized: Vec<String> = sentence_words.iter().map(|w| strip_punct(w)).collect();
-
-    let mut indices = Vec::new();
-    // Track which sentence positions we've already consumed, so repeated words
-    // get matched to successive occurrences (left-to-right).
-    let mut used = vec![false; sentence_words.len()];
-    for word in &response.stressed_words {
-        let target = strip_punct(word);
-        if target.is_empty() {
-            continue;
-        }
-        if let Some(i) = normalized
-            .iter()
-            .enumerate()
-            .find(|(i, w)| !used[*i] && **w == target)
-            .map(|(i, _)| i)
-        {
-            indices.push(i);
-            used[i] = true;
-        }
-    }
-    Ok(indices)
+    Ok(response.stressed_words)
 }
 
-/// Phonemize a single token with espeak-ng, using the same vowel-only stress
-/// rule as the Python preprocess script. Returns (phonemes, stress_per_phoneme).
-fn phonemize_word(word: &str) -> Result<(Vec<String>, Vec<u8>)> {
-    let output = Command::new("espeak-ng")
-        .args(["-v", "fr-fr", "-q", "--ipa", "-x", word])
-        .output()
-        .context("espeak-ng failed")?;
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    let mut phonemes = Vec::new();
-    let mut stress = Vec::new();
-    let mut pending_stress: Option<u8> = None;
-    let mut current_stress: u8 = 0;
-    let mut in_vowel = false;
-
-    for ch in raw.chars() {
-        if ch == 'ˈ' {
-            pending_stress = Some(1);
-            in_vowel = false;
-        } else if ch == 'ˌ' {
-            pending_stress = Some(2);
-            in_vowel = false;
-        } else if WORD_BOUNDARIES.contains(ch) {
-            pending_stress = None;
-            current_stress = 0;
-            in_vowel = false;
-        } else if ESPEAK_VOWELS.contains(ch) {
-            if let Some(s) = pending_stress.take() {
-                current_stress = s;
-            } else if !in_vowel {
-                current_stress = 0;
-            }
-            in_vowel = true;
-            phonemes.push(ch.to_string());
-            stress.push(current_stress);
-        } else if VOWEL_CONTINUATIONS.contains(ch) {
-            // Combining diacritic (nasalization, length, etc) — append to the
-            // previous phoneme so the combined string matches the tokenizer's
-            // precomposed vocab (e.g. "ɛ̃"). Mirror of the fix in preprocess.py.
-            if let Some(last) = phonemes.last_mut() {
-                last.push(ch);
-            } else {
-                phonemes.push(ch.to_string());
-                stress.push(0);
-            }
-        } else {
-            in_vowel = false;
-            current_stress = 0;
-            phonemes.push(ch.to_string());
-            stress.push(0);
-        }
-    }
-
-    Ok((phonemes, stress))
-}
-
-/// Given a sentence, phonemize word-by-word and return phonemes + word spans.
-/// word_spans[i] = (start, end) in the phonemes vec (end exclusive).
-fn phonemize_sentence_with_spans(
-    sentence: &str,
-) -> Result<(Vec<String>, Vec<(usize, usize)>)> {
-    let words: Vec<&str> = sentence.split_whitespace().collect();
-    let mut all_phonemes = Vec::new();
-    let mut spans = Vec::new();
-    for word in &words {
-        let (ph, _) = phonemize_word(word)?;
-        let start = all_phonemes.len();
-        all_phonemes.extend(ph);
-        spans.push((start, all_phonemes.len()));
-    }
-    Ok((all_phonemes, spans))
-}
-
-fn apply_stress(
-    phonemes: &[String],
-    spans: &[(usize, usize)],
-    stressed_word_indices: &[usize],
-) -> Vec<u8> {
-    let mut stress = vec![0u8; phonemes.len()];
-    for &widx in stressed_word_indices {
-        if widx >= spans.len() {
-            continue;
-        }
-        let (start, end) = spans[widx];
-        // Mark the LAST vowel in this word's phoneme span as primary stress
-        for i in (start..end).rev() {
-            let first = phonemes[i].chars().next();
-            if let Some(c) = first {
-                if ESPEAK_VOWELS.contains(c) {
-                    stress[i] = 1;
-                    break;
-                }
-            }
-        }
-    }
-    stress
-}
-
-async fn process_record(record: PhonemeRecord) -> Result<PhonemeRecord> {
-    let indices = get_stressed_indices(&record.sentence).await?;
-    let (phonemes, spans) = phonemize_sentence_with_spans(&record.sentence)?;
-    let stress = apply_stress(&phonemes, &spans, &indices);
-    Ok(PhonemeRecord {
+async fn process_record(record: ManifestRecord) -> Result<StressOverride> {
+    let stressed_words = get_stressed_words(&record.sentence).await?;
+    Ok(StressOverride {
         file: record.file,
-        lang: record.lang,
-        sentence: record.sentence,
-        phonemes,
-        stress,
+        stressed_words,
     })
 }
 
@@ -268,20 +136,20 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("../../data/audio"));
 
-    let input = data_dir.join("fra/phonemes.jsonl");
-    let output = data_dir.join("fra/phonemes.jsonl.new");
+    let input = data_dir.join("fra/manifest.jsonl");
+    let output = data_dir.join("fra/stress_overrides.jsonl");
 
     let text = fs::read_to_string(&input)
         .await
         .with_context(|| format!("Failed to read {}", input.display()))?;
 
-    let records: Vec<PhonemeRecord> = text
+    let records: Vec<ManifestRecord> = text
         .lines()
         .filter(|l| !l.is_empty())
         .map(serde_json::from_str)
         .collect::<Result<_, _>>()?;
 
-    println!("Loaded {} French records", records.len());
+    println!("Loaded {} French manifest records", records.len());
 
     let pb = ProgressBar::new(records.len() as u64);
     pb.set_style(
@@ -290,7 +158,7 @@ async fn main() -> Result<()> {
             .unwrap(),
     );
 
-    let results: Vec<Result<PhonemeRecord>> = stream::iter(records.into_iter())
+    let results: Vec<Result<StressOverride>> = stream::iter(records.into_iter())
         .map(|rec| {
             let pb = pb.clone();
             async move {
@@ -322,7 +190,6 @@ async fn main() -> Result<()> {
     }
 
     fs::write(&output, output_text).await?;
-    println!("Wrote {ok} records ({errs} errors) to {}", output.display());
-    println!("To replace: mv {} {}", output.display(), input.display());
+    println!("Wrote {ok} overrides ({errs} errors) to {}", output.display());
     Ok(())
 }

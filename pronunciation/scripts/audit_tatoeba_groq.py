@@ -190,9 +190,9 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
             text = payload.get("text", "")
 
             espeak_lang = LANG_TO_ESPEAK.get(record["lang"])
-            expected_phonemes, _ = phonemize(record["expected"], espeak_lang) if espeak_lang else ([], [])
+            expected_phonemes, _, _ = phonemize(record["expected"], espeak_lang) if espeak_lang else ([], [], [])
             try:
-                actual_phonemes, _ = phonemize(text, espeak_lang) if espeak_lang else ([], [])
+                actual_phonemes, _, _ = phonemize(text, espeak_lang) if espeak_lang else ([], [], [])
             except Exception:
                 # If espeak chokes on the Whisper output (rare; usually
                 # non-target-language transliterations), the audit just falls

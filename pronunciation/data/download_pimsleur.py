@@ -278,7 +278,8 @@ def process_lesson(mp3_path: Path, lesson_id: str,
                    target_lang: str, espeak_lang: str | None,
                    vad_fn, save_audio,
                    audio_dir: Path, api_key: str, model: str,
-                   workers: int = 8) -> tuple[list[dict], bool]:
+                   workers: int = 8,
+                   skip_seg_idxs: set[int] | None = None) -> tuple[list[dict], bool]:
     """Process one Pimsleur lesson.
 
     Returns (entries, ok). `ok=False` means the lesson hit a transient
@@ -307,10 +308,16 @@ def process_lesson(mp3_path: Path, lesson_id: str,
 
     segments = vad_fn(audio)
     audio_total = audio.shape[0]
+    skip_seg_idxs = skip_seg_idxs or set()
 
-    # First pass: filter to viable segments and pre-encode WAV bytes.
+    # First pass: filter to viable segments and pre-encode WAV bytes. Also
+    # skip seg_idxs the caller has marked already-done (recovery mode:
+    # existing pimsleur_<lid>_<seg:04d>.wav files on disk). silero-vad is
+    # deterministic, so seg_idx numbering matches across runs.
     candidates: list[tuple[int, int, int, "np.ndarray", bytes]] = []
     for seg_idx, seg in enumerate(segments):
+        if seg_idx in skip_seg_idxs:
+            continue
         start, end = int(seg["start"]), int(seg["end"])
         clip = audio[start:end]
         dur = clip.shape[0] / 16000.0
@@ -343,17 +350,18 @@ def process_lesson(mp3_path: Path, lesson_id: str,
         for fut in as_completed(futs):
             results.append(fut.result())
 
-    # If ANY Whisper call failed after retries, treat as a transient
-    # failure and refuse to mark the lesson processed. With 32 in-flight
-    # Groq calls, partial rate-limit drops are realistic and would
-    # otherwise permanently skip the failed segments. Resume is cheap:
-    # existing_files dedupe in main() prevents duplicate manifest rows
-    # when the lesson is re-processed.
+    # Track whether any Whisper call failed after retries. When some did,
+    # we still persist the successes (manifest write + WAVs); we just
+    # don't mark the lesson processed, so the next run can retry the
+    # missing segments. existing_files dedupe in main() prevents duplicate
+    # manifest rows when those successes show up again.
     n_failed = sum(1 for r in results if not r[4]["ok"])
+    n_ok = len(results) - n_failed
+    lesson_ok = (n_failed == 0)
     if n_failed > 0:
         print(f"  {n_failed}/{len(results)} Whisper calls failed: "
-              f"{mp3_path.name} — not marking processed")
-        return [], False
+              f"{mp3_path.name} — keeping {n_ok} successes, will retry "
+              f"failed segments on next run")
 
     # Third pass: filter by language match, optionally phonemize, save WAV,
     # build manifest entries. Sorted by seg_idx so filenames are stable.
@@ -369,7 +377,7 @@ def process_lesson(mp3_path: Path, lesson_id: str,
             continue
         if espeak_lang is not None:
             try:
-                phonemes, _ = phonemize(text, espeak_lang)
+                phonemes, _, _ = phonemize(text, espeak_lang)
             except Exception:
                 continue
             if not phonemes:
@@ -422,7 +430,7 @@ def process_lesson(mp3_path: Path, lesson_id: str,
             # token-level inspection) is free if we keep this.
             "whisper": payload,
         })
-    return entries, True
+    return entries, lesson_ok
 
 
 def discover_lessons(pimsleur_root: Path,
@@ -479,6 +487,14 @@ def main() -> None:
                              "4*8=32 is a comfortable load for Groq.")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--recover-partials", action="store_true",
+                        help="Reprocess already-marker'd lessons to fill in "
+                             "segments missing from earlier transient Whisper "
+                             "failures. Re-decodes + re-VADs each lesson and "
+                             "only Whispers seg_idxs whose WAVs aren't on disk. "
+                             "silero-vad is deterministic so seg_idx numbering "
+                             "matches across runs. Existing manifest rows are "
+                             "preserved via filename dedupe.")
     args = parser.parse_args()
     load_env_file(args.env_file)
 
@@ -550,24 +566,66 @@ def main() -> None:
                 if line.strip()
             }
 
-        # Filter out already-processed lessons up-front. Lesson_id is the
-        # path-derived stable identifier from lesson_id_from_path. Also
-        # honor `mp3.stem` to stay compatible with markers written by the
-        # earlier bare-stem id scheme — without that, switching to path-
-        # derived ids would force re-Whispering every lesson processed
-        # before this change.
-        todo = [(mp3, lid, e) for (mp3, lid, e) in lessons_for_lang
-                if lid not in processed_lessons
-                and mp3.stem not in processed_lessons]
+        # Recovery mode: process EVERY lesson, regardless of marker state.
+        # process_lesson will see existing pimsleur_<lid>_<seg:04d>.wav files
+        # on disk and skip Whisper for those seg_idxs. Use this to backfill
+        # segments that were lost to transient Whisper failures in older
+        # runs (when failures used to silently mark the lesson done).
+        #
+        # Normal mode: filter out already-processed lessons up-front.
+        # Lesson_id is the path-derived stable identifier from
+        # lesson_id_from_path. Also honor `mp3.stem` to stay compatible with
+        # markers written by the earlier bare-stem id scheme.
+        if args.recover_partials:
+            todo = list(lessons_for_lang)
+        else:
+            todo = [(mp3, lid, e) for (mp3, lid, e) in lessons_for_lang
+                    if lid not in processed_lessons
+                    and mp3.stem not in processed_lessons]
         # Voices may differ across courses for the same lang (Brazilian
         # Portuguese pt-br vs European Portuguese pt, etc.) — log the set.
         voices = sorted({e for (_, _, e) in lessons_for_lang if e})
-        print(f"\n=== {lang} (voices={voices or [None]}): "
+        mode_note = " [RECOVERY]" if args.recover_partials else ""
+        print(f"\n=== {lang} (voices={voices or [None]}){mode_note}: "
               f"{len(lessons_for_lang)} lessons total, "
               f"{len(processed_lessons)} already done, "
               f"{len(todo)} to do ===")
         if not todo:
             continue
+
+        # Pre-compute the set of existing seg_idxs per lesson from
+        # MANIFEST filenames (not on-disk WAVs). Manifest is the source of
+        # truth: a row only lands there under state_lock after the WAV is
+        # written and the segment is committed. An on-disk WAV without a
+        # manifest row is an orphan (process killed between sf.write and
+        # the manifest append), and we WANT to re-Whisper its seg_idx
+        # rather than silently skip it.
+        #
+        # Applied in both modes:
+        #   - Recovery mode (--recover-partials): backfills gap segments
+        #     in marker'd lessons.
+        #   - Normal mode: when a lesson is unmarked from a previous
+        #     partial-failure run, this skips the segments that already
+        #     succeeded so re-runs only Whisper the actual failed calls.
+        existing_segs_by_lid: dict[str, set[int]] = {}
+        seg_pat = re.compile(r"^pimsleur_(.+)_(\d{4})\.wav$")
+        for fname in existing_files:
+            m = seg_pat.match(fname)
+            if not m:
+                continue
+            wav_lid, seg = m.group(1), int(m.group(2))
+            existing_segs_by_lid.setdefault(wav_lid, set()).add(seg)
+
+        # Legacy bare-stem skip is only safe when the stem is unique within
+        # the lang's todo. Pimsleur's per-course ISBN prefixes usually make
+        # stems unique, but two courses can in principle share a stem (e.g.
+        # both having a `Unit 01.mp3`). If they do, an old WAV's bare-stem
+        # key matches both lessons, and using the skip set would falsely
+        # skip the other course's seg_idx — exactly the collision case that
+        # lesson_id_from_path was introduced to prevent.
+        from collections import Counter as _Counter
+        stem_counts = _Counter(mp3.stem for (mp3, _, _) in lessons_for_lang)
+        unique_stems = {stem for stem, n in stem_counts.items() if n == 1}
 
         # Lesson-level parallelism: process N lessons concurrently. Each
         # lesson internally still runs Whisper in 8-way parallel, so
@@ -588,12 +646,21 @@ def main() -> None:
 
         def run_one(idx_mp3_lid_espeak):
             idx, (mp3, lid, lesson_espeak) = idx_mp3_lid_espeak
+            # Skip-set from the manifest: don't re-Whisper segments already
+            # committed. Honor the legacy bare-stem id too — manifests written
+            # before lesson_id_from_path() landed use the old filename scheme —
+            # but only when the stem is unique within this lang to avoid
+            # cross-lesson collisions.
+            skip = set(existing_segs_by_lid.get(lid, set()))
+            if mp3.stem in unique_stems:
+                skip |= existing_segs_by_lid.get(mp3.stem, set())
             try:
                 entries, ok = process_lesson(
                     mp3, lid, lang, lesson_espeak,
                     vad_fn, save_audio,
                     audio_dir, api_key, args.model,
                     workers=args.workers,
+                    skip_seg_idxs=skip,
                 )
             except Exception as e:
                 return idx, mp3, lid, None, False, repr(e)
