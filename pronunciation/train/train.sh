@@ -15,7 +15,7 @@
 #
 # Run-specific flags expected to come in via "$@":
 #   --vad-weight {0 | 0.05}
-#   --use-features / --use-aux-features / --feature-aux-weight / ...
+#   --use-features / --use-aux-features / --feature-emission-weight / ...
 #   --regularized-heads
 #   --save-dir checkpoints-...
 #   --hf-repo anchpop/lexide-pronunciation-unified-...
@@ -38,8 +38,16 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Idempotent: no-op if already installed (sky exec on warm cluster).
 pip install --quiet panphon
 
-# Pull (or refresh) audio + phoneme labels from the private HF dataset.
-hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
+# Pull (or refresh) audio + phoneme labels from the private HF dataset —
+# UNLESS data was pre-mounted via sky's file_mounts (rsync from local). The
+# HF↔Lambda link is slow (an hour-plus for our ~19 GB); rsync from local
+# usually drains the same payload in 15-30 min. If any lang's phonemes.jsonl
+# is already present we trust the mount and skip the download.
+if compgen -G "$HOME/data/*/phonemes.jsonl" > /dev/null; then
+  echo "Using pre-mounted dataset at ~/data (skipping HF download)"
+else
+  hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
+fi
 
 # Common train_unified knobs. Variant-specific flags come in via "$@" and
 # argparse's last-wins behavior lets variants override any of these if needed.

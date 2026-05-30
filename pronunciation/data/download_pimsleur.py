@@ -557,18 +557,27 @@ def main() -> None:
     )
     get_speech_timestamps, save_audio, *_ = vad_utils
 
-    # Sort: target training languages first (so the user can start
-    # training as soon as those are extracted), then everything else
-    # alphabetical. TARGET_LANGS order itself is alphabetical, doesn't
-    # matter — all targets get processed before any non-target.
-    def _order(lang: str) -> tuple[int, str]:
+    # Per-lang setup: pre-flight write probe, manifest load, marker load,
+    # todo compute, skip-set build. Hoisted out of the processing loop so
+    # we can interleave lessons across langs in the executor (round-robin
+    # treats the 7 target langs equally — none has to wait for another to
+    # fully complete).
+    import threading
+    from collections import Counter as _Counter
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    seg_pat = re.compile(r"^pimsleur_(.+)_(\d{4})\.wav$")
+    lang_states: dict[str, dict[str, Any]] = {}
+
+    # Iterate in target-first alphabetical order so write probes fail fast
+    # on the cores if anything's wrong.
+    def _setup_order(lang: str) -> tuple[int, str]:
         return (0 if lang in TARGET_LANGS else 1, lang)
-    for lang, lessons_for_lang in sorted(by_lang.items(), key=lambda kv: _order(kv[0])):
+    for lang in sorted(by_lang, key=_setup_order):
+        lessons_for_lang = by_lang[lang]
         audio_dir = args.audio_root / lang
         audio_dir.mkdir(parents=True, exist_ok=True)
-        # Pre-flight write probe. If audio_dir is on a read-only or
-        # otherwise wedged volume, fail loudly NOW instead of burning
-        # Groq quota on lessons whose WAVs can never persist.
+        # Pre-flight write probe — fail loud if the volume is read-only.
         probe = audio_dir / ".write_probe"
         try:
             probe.write_bytes(b"ok")
@@ -576,20 +585,16 @@ def main() -> None:
         except OSError as e:
             sys.exit(f"FATAL: cannot write to {audio_dir}: {e}. "
                      f"Check the disk (e.g. T7 mount) and re-run.")
+
         manifest_path = audio_dir / "manifest.jsonl"
+        processed_path = audio_dir / "pimsleur_processed.txt"
 
         existing_files: set[str] = set()
         if manifest_path.exists():
             with manifest_path.open() as f:
                 for line in f:
-                    rec = json.loads(line)
-                    existing_files.add(rec["file"])
+                    existing_files.add(json.loads(line)["file"])
 
-        # Per-lesson marker file. Each completed lesson (even if it
-        # yielded zero target-language segments) gets its lesson_id
-        # appended here, so re-running the orchestrator after more data
-        # arrives skips lessons we've already paid Whisper for.
-        processed_path = audio_dir / "pimsleur_processed.txt"
         processed_lessons: set[str] = set()
         if processed_path.exists():
             processed_lessons = {
@@ -597,163 +602,149 @@ def main() -> None:
                 if line.strip()
             }
 
-        # Recovery mode: process EVERY lesson, regardless of marker state.
-        # process_lesson will see existing pimsleur_<lid>_<seg:04d>.wav files
-        # on disk and skip Whisper for those seg_idxs. Use this to backfill
-        # segments that were lost to transient Whisper failures in older
-        # runs (when failures used to silently mark the lesson done).
-        #
-        # Normal mode: filter out already-processed lessons up-front.
-        # Lesson_id is the path-derived stable identifier from
-        # lesson_id_from_path. Also honor `mp3.stem` to stay compatible with
-        # markers written by the earlier bare-stem id scheme.
+        # Recovery mode processes every lesson (skip-set still gates Whisper
+        # at the segment level). Normal mode skips marker'd lessons up-front.
         if args.recover_partials:
             todo = list(lessons_for_lang)
         else:
             todo = [(mp3, lid, e) for (mp3, lid, e) in lessons_for_lang
                     if lid not in processed_lessons
                     and mp3.stem not in processed_lessons]
-        # Voices may differ across courses for the same lang (Brazilian
-        # Portuguese pt-br vs European Portuguese pt, etc.) — log the set.
-        voices = sorted({e for (_, _, e) in lessons_for_lang if e})
-        mode_note = " [RECOVERY]" if args.recover_partials else ""
-        print(f"\n=== {lang} (voices={voices or [None]}){mode_note}: "
-              f"{len(lessons_for_lang)} lessons total, "
-              f"{len(processed_lessons)} already done, "
-              f"{len(todo)} to do ===")
-        if not todo:
-            continue
 
-        # Pre-compute the set of existing seg_idxs per lesson from
-        # MANIFEST filenames (not on-disk WAVs). Manifest is the source of
-        # truth: a row only lands there under state_lock after the WAV is
-        # written and the segment is committed. An on-disk WAV without a
-        # manifest row is an orphan (process killed between sf.write and
-        # the manifest append), and we WANT to re-Whisper its seg_idx
-        # rather than silently skip it.
-        #
-        # Applied in both modes:
-        #   - Recovery mode (--recover-partials): backfills gap segments
-        #     in marker'd lessons.
-        #   - Normal mode: when a lesson is unmarked from a previous
-        #     partial-failure run, this skips the segments that already
-        #     succeeded so re-runs only Whisper the actual failed calls.
+        # Build the per-lesson skip-set from manifest filenames (source of
+        # truth). Orphan WAVs without a manifest row will be re-Whispered.
         existing_segs_by_lid: dict[str, set[int]] = {}
-        seg_pat = re.compile(r"^pimsleur_(.+)_(\d{4})\.wav$")
         for fname in existing_files:
             m = seg_pat.match(fname)
-            if not m:
-                continue
-            wav_lid, seg = m.group(1), int(m.group(2))
-            existing_segs_by_lid.setdefault(wav_lid, set()).add(seg)
+            if m:
+                existing_segs_by_lid.setdefault(m.group(1), set()).add(int(m.group(2)))
 
-        # Legacy bare-stem skip is only safe when the stem is unique within
-        # the lang's todo. Pimsleur's per-course ISBN prefixes usually make
-        # stems unique, but two courses can in principle share a stem (e.g.
-        # both having a `Unit 01.mp3`). If they do, an old WAV's bare-stem
-        # key matches both lessons, and using the skip set would falsely
-        # skip the other course's seg_idx — exactly the collision case that
-        # lesson_id_from_path was introduced to prevent.
-        from collections import Counter as _Counter
+        # Legacy bare-stem skip only when the stem is unique within the lang.
         stem_counts = _Counter(mp3.stem for (mp3, _, _) in lessons_for_lang)
         unique_stems = {stem for stem, n in stem_counts.items() if n == 1}
 
-        # Lesson-level parallelism: process N lessons concurrently. Each
-        # lesson internally still runs Whisper in 8-way parallel, so
-        # total in-flight Groq calls = lesson_workers * args.workers.
-        # Shared mutable state (manifest write, processed-marker write,
-        # existing_files / processed_lessons sets) is serialized with a lock.
-        import threading
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        state_lock = threading.Lock()
-        # silero-vad is a small TorchScript model; sharing across threads
-        # is fine for eval-mode CPU inference, but we use a lock to avoid
-        # contention on the model's internal hidden state buffers.
-        vad_lock = threading.Lock()
+        voices = sorted({e for (_, _, e) in lessons_for_lang if e})
+        mode_note = " [RECOVERY]" if args.recover_partials else ""
+        print(f"=== {lang} (voices={voices or [None]}){mode_note}: "
+              f"{len(lessons_for_lang)} lessons total, "
+              f"{len(processed_lessons)} already done, "
+              f"{len(todo)} to do ===")
 
-        def vad_fn(audio):
-            with vad_lock:
-                return vad_segments(audio, vad_model, get_speech_timestamps)
+        lang_states[lang] = {
+            "lang": lang,
+            "audio_dir": audio_dir,
+            "manifest_path": manifest_path,
+            "processed_path": processed_path,
+            "existing_files": existing_files,
+            "processed_lessons": processed_lessons,
+            "existing_segs_by_lid": existing_segs_by_lid,
+            "unique_stems": unique_stems,
+            "todo": todo,
+            "lock": threading.Lock(),
+            "kept_total": 0,
+            "empty_count": 0,
+            "fail_count": 0,
+        }
 
-        def run_one(idx_mp3_lid_espeak):
-            idx, (mp3, lid, lesson_espeak) = idx_mp3_lid_espeak
-            # Skip-set from the manifest: don't re-Whisper segments already
-            # committed. Honor the legacy bare-stem id too — manifests written
-            # before lesson_id_from_path() landed use the old filename scheme —
-            # but only when the stem is unique within this lang to avoid
-            # cross-lesson collisions.
-            skip = set(existing_segs_by_lid.get(lid, set()))
-            if mp3.stem in unique_stems:
-                skip |= existing_segs_by_lid.get(mp3.stem, set())
+    # silero-vad is a small TorchScript model; sharing across threads is
+    # fine for eval-mode CPU inference, but we serialize via a lock to
+    # avoid contention on the model's internal hidden state buffers.
+    vad_lock = threading.Lock()
+    def vad_fn(audio):
+        with vad_lock:
+            return vad_segments(audio, vad_model, get_speech_timestamps)
+
+    # Build a flat round-robin task list across the target langs first
+    # (so all 7 cores progress at equal rates and no lang is starved by
+    # waiting for another to finish), then non-target langs.
+    def _round_robin(lang_order: list[str]) -> list[tuple[str, int, tuple]]:
+        max_len = max((len(lang_states[l]["todo"]) for l in lang_order), default=0)
+        tasks: list[tuple[str, int, tuple]] = []
+        for i in range(max_len):
+            for lang in lang_order:
+                td = lang_states[lang]["todo"]
+                if i < len(td):
+                    tasks.append((lang, i, td[i]))
+        return tasks
+
+    target_order = sorted(l for l in lang_states if l in TARGET_LANGS)
+    nontarget_order = sorted(l for l in lang_states if l not in TARGET_LANGS)
+    all_tasks = _round_robin(target_order) + _round_robin(nontarget_order)
+    print(f"\nTotal tasks queued: {len(all_tasks)} "
+          f"(target round-robin: {sum(len(lang_states[l]['todo']) for l in target_order)}; "
+          f"non-target round-robin: {sum(len(lang_states[l]['todo']) for l in nontarget_order)})")
+    if not all_tasks:
+        return
+
+    def run_one(task):
+        lang, idx_within_lang, (mp3, lid, lesson_espeak) = task
+        st = lang_states[lang]
+        skip = set(st["existing_segs_by_lid"].get(lid, set()))
+        if mp3.stem in st["unique_stems"]:
+            skip |= st["existing_segs_by_lid"].get(mp3.stem, set())
+        try:
+            entries, ok = process_lesson(
+                mp3, lid, lang, lesson_espeak,
+                vad_fn, save_audio,
+                st["audio_dir"], api_key, args.model,
+                workers=args.workers,
+                skip_seg_idxs=skip,
+            )
+        except DiskWriteError:
+            raise
+        except Exception as e:
+            return lang, idx_within_lang, mp3, lid, None, False, repr(e)
+        return lang, idx_within_lang, mp3, lid, entries, ok, None
+
+    # Single executor processes all tasks; round-robin ordering means each
+    # lang's lesson N is queued before any lang's lesson N+1, so completion
+    # progress walks across langs roughly in lockstep.
+    with ThreadPoolExecutor(max_workers=args.lesson_workers) as pool:
+        futs = [pool.submit(run_one, t) for t in all_tasks]
+        for fut in as_completed(futs):
             try:
-                entries, ok = process_lesson(
-                    mp3, lid, lang, lesson_espeak,
-                    vad_fn, save_audio,
-                    audio_dir, api_key, args.model,
-                    workers=args.workers,
-                    skip_seg_idxs=skip,
-                )
-            except DiskWriteError:
-                # Fatal: propagate so the main as_completed loop can abort.
-                # Continuing would burn quota on lessons we can't persist.
-                raise
-            except Exception as e:
-                return idx, mp3, lid, None, False, repr(e)
-            return idx, mp3, lid, entries, ok, None
+                lang, idx_within_lang, mp3, lid, entries, ok, err = fut.result()
+            except DiskWriteError as e:
+                print(f"\nFATAL: {e}", flush=True)
+                print("Cancelling outstanding lessons and exiting. "
+                      "Fix the disk, then re-run — the manifest-based "
+                      "skip-set will pick up where we left off.",
+                      flush=True)
+                for f in futs:
+                    f.cancel()
+                raise SystemExit(2)
+            st = lang_states[lang]
+            todo_n = len(st["todo"])
+            if err is not None:
+                st["fail_count"] += 1
+                print(f"  [{lang}] {idx_within_lang+1}/{todo_n} FAIL {mp3.name}: {err}")
+                continue
+            if entries is None:
+                entries = []
+            with st["lock"]:
+                kept = [e for e in entries if e["file"] not in st["existing_files"]]
+                with st["manifest_path"].open("a") as out:
+                    for e in kept:
+                        out.write(json.dumps(e, ensure_ascii=False) + "\n")
+                        st["existing_files"].add(e["file"])
+                if ok:
+                    with st["processed_path"].open("a") as out:
+                        out.write(f"{lid}\n")
+                    st["processed_lessons"].add(lid)
+                else:
+                    st["fail_count"] += 1
+            st["kept_total"] += len(kept)
+            if ok and not kept:
+                st["empty_count"] += 1
+            status = "ok" if ok else "transient-fail"
+            print(f"  [{lang}] {idx_within_lang+1}/{todo_n} {mp3.name}: "
+                  f"kept {len(kept)} [{status}]")
 
-        kept_total = 0
-        empty_count = 0
-        fail_count = 0
-        with ThreadPoolExecutor(max_workers=args.lesson_workers) as pool:
-            futs = [pool.submit(run_one, (i, x)) for i, x in enumerate(todo)]
-            try:
-                completed_iter = as_completed(futs)
-            except KeyboardInterrupt:
-                raise
-            for fut in completed_iter:
-                try:
-                    idx, mp3, lid, entries, ok, err = fut.result()
-                except DiskWriteError as e:
-                    # Filesystem went sideways mid-run (read-only mount,
-                    # disk full, etc). Cancel pending lessons and exit.
-                    print(f"\nFATAL: {e}", flush=True)
-                    print("Cancelling outstanding lessons and exiting. "
-                          "Fix the disk, then re-run — the manifest-based "
-                          "skip-set will pick up where we left off.",
-                          flush=True)
-                    for f in futs:
-                        f.cancel()
-                    raise SystemExit(2)
-                if err is not None:
-                    fail_count += 1
-                    print(f"  [{lang}] {idx+1}/{len(todo)} FAIL {mp3.name}: {err}")
-                    continue
-                if entries is None:
-                    entries = []
-                with state_lock:
-                    kept = [e for e in entries if e["file"] not in existing_files]
-                    with manifest_path.open("a") as out:
-                        for e in kept:
-                            out.write(json.dumps(e, ensure_ascii=False) + "\n")
-                            existing_files.add(e["file"])
-                    # Only mark processed when the lesson completed cleanly.
-                    # Transient failures (decode error, all Whisper calls
-                    # exhausted retries) return ok=False so the next run
-                    # retries them instead of permanently skipping.
-                    if ok:
-                        with processed_path.open("a") as out:
-                            out.write(f"{lid}\n")
-                        processed_lessons.add(lid)
-                    else:
-                        fail_count += 1
-                kept_total += len(kept)
-                if ok and not kept:
-                    empty_count += 1
-                status = "ok" if ok else "transient-fail"
-                print(f"  [{lang}] {idx+1}/{len(todo)} {mp3.name}: "
-                      f"kept {len(kept)} [{status}]")
-        print(f"  [{lang}] DONE. kept_total={kept_total} "
-              f"empty_lessons={empty_count} failed={fail_count}")
+    print()
+    for lang in sorted(lang_states):
+        st = lang_states[lang]
+        print(f"  [{lang}] DONE. kept_total={st['kept_total']} "
+              f"empty_lessons={st['empty_count']} failed={st['fail_count']}")
 
 
 if __name__ == "__main__":

@@ -18,18 +18,15 @@ setup: |
   pip install transformers datasets soundfile tqdm wandb panphon
 
 run: |
-  # Articulatory features as AUXILIARY supervision via factorial feature CTC.
-  # Direct phoneme head handles main CTC (no cold start). The feature head
-  # emits F=24 independent 3-way feature distributions per frame; targets are
-  # the phoneme sequence re-encoded through the feature table. A custom CTC
-  # forward pass keeps one shared alignment over whole feature vectors, so
-  # comparison happens in feature space — signature-colliding phonemes share
-  # supervision instead of being penalized for not being distinguishable in
-  # feature space.
+  # Unified articulatory factors: direct phoneme identity and articulatory
+  # features score the same CTC emission. Phoneme factor weight is 1.0;
+  # feature-vector factor weight is 0.3. The older separate factorial aux
+  # CTC is disabled for this run.
   bash train/train.sh \
     --vad-weight 0.05 \
     --use-aux-features \
-    --feature-aux-weight 0.1 \
+    --feature-emission-weight 0.3 \
+    --feature-aux-weight 0.0 \
     --save-dir checkpoints-unified-articulatory-aux \
     --hf-repo anchpop/lexide-pronunciation-unified-articulatory-aux
 

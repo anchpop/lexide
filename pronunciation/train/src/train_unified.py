@@ -41,6 +41,22 @@ from .factorized_ctc import FactorizedCTCModel
 def load_processor(model_name: str):
     feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
     tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_name)
+    # Extend the borrowed vocab with phonemes the patched espeak emits that
+    # the xlsr-53 vocab didn't have (e.g. German ʏ, Danish ɐ̯ / ʌː). The
+    # xls-r-2b backbone has no pretrained phoneme embeddings, so the CTC
+    # head's output dim is sized to len(tokenizer) AFTER this add and the
+    # new logits are learned from scratch.
+    #
+    # Imported here (not at module load) so train_unified can run from any
+    # CWD without forcing the preprocess script's sys.path tweaks.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "scripts"))
+    from preprocess import VOCAB_EXTENSIONS
+    added = tokenizer.add_tokens(sorted(VOCAB_EXTENSIONS))
+    if added:
+        print(f"Tokenizer vocab extended with {added} new tokens: "
+              f"{sorted(VOCAB_EXTENSIONS)}")
     return Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
 
 
@@ -580,18 +596,24 @@ def main():
                              "mass that the independent feature distributions place on "
                              "phoneme combinations not present in the vocab.")
     parser.add_argument("--use-aux-features", action="store_true",
-                        help="Add articulatory features as *auxiliary* supervision via "
-                             "factorial feature CTC. Direct phoneme head handles main "
-                             "CTC; the feature head emits F=24 independent 3-way feature "
-                             "distributions per frame. Targets are the main phoneme "
-                             "sequence re-encoded through the feature table, and a custom "
-                             "CTC forward pass keeps one shared alignment over whole "
-                             "feature vectors. Comparison happens in feature space, so "
-                             "signature-colliding phonemes share supervision instead of "
-                             "being penalized. Mutually exclusive with --use-features.")
-    parser.add_argument("--feature-aux-weight", type=float, default=0.1,
+                        help="Enable articulatory feature heads alongside the direct "
+                             "phoneme head. By default, features participate as "
+                             "weighted factors inside the main phoneme CTC emission "
+                             "score via --feature-emission-weight. A legacy separate "
+                             "factorial feature CTC can additionally be enabled with "
+                             "--feature-aux-weight. Mutually exclusive with "
+                             "--use-features.")
+    parser.add_argument("--feature-aux-weight", type=float, default=0.0,
                         help="Coefficient on the factorial feature CTC loss. Only "
-                             "meaningful with --use-aux-features.")
+                             "meaningful with --use-aux-features. Normally 0 when "
+                             "--feature-emission-weight is active, since features "
+                             "already participate in the main CTC emission score.")
+    parser.add_argument("--feature-emission-weight", type=float, default=0.3,
+                        help="In --use-aux-features mode, include the articulatory "
+                             "feature heads as weighted factors inside the main "
+                             "phoneme CTC emission score. The direct phoneme head "
+                             "has implicit weight 1.0; this weights the mean "
+                             "feature-vector log-prob. 0 disables unified emission.")
     parser.add_argument("--regularized-heads", action="store_true",
                         help="Bundle of head-regularization tweaks: (1) K=5 learned softmax "
                              "mixtures over ALL encoder hidden states (49 for XLS-R 2B), each "
@@ -699,6 +721,7 @@ def main():
             aux_feature_table=aux_feature_table,
             special_token_ids=special_token_ids,
             regularized_heads=args.regularized_heads,
+            feature_emission_weight=args.feature_emission_weight if args.use_aux_features else 0.0,
         ).to(device)
 
     if args.gradient_checkpointing:

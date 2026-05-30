@@ -11,6 +11,11 @@ workdir: .
 
 file_mounts:
   ~/.netrc: ~/.netrc
+  # Upload local data/audio/ directly to the cluster instead of hf-downloading
+  # at run time. Sky uses rsync for local-path mounts which is much faster
+  # than the HF↔Lambda link. train.sh detects ~/data is already populated and
+  # skips its hf download step.
+  ~/data: /Users/andrepopovitch/coding/lexide/pronunciation/data/audio
 
 setup: |
   cd ~/sky_workdir

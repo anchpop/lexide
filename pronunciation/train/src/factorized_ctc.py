@@ -59,6 +59,7 @@ class FactorizedCTCModel(nn.Module):
         head_base_dim: int = 768,
         acoustic_dim: int = 64,
         n_mels: int = 80,
+        feature_emission_weight: float = 0.0,
     ):
         super().__init__()
         if feature_table is not None and aux_feature_table is not None:
@@ -75,6 +76,7 @@ class FactorizedCTCModel(nn.Module):
         self.head_base_dim = head_base_dim
         self.acoustic_dim = acoustic_dim
         self.n_mels = n_mels
+        self.feature_emission_weight = feature_emission_weight
 
         hidden_size = self.backbone.config.hidden_size
         self.dropout = nn.Dropout(self.backbone.config.final_dropout)
@@ -314,6 +316,32 @@ class FactorizedCTCModel(nn.Module):
 
         return l_ph_norm, neg_log_valid_mass_u
 
+    def _feature_scores_for_vocab(
+        self,
+        feature_log_probs: torch.Tensor,
+        *,
+        reduce: str,
+    ) -> torch.Tensor:
+        """Score every vocab token by the feature heads' log-probs.
+
+        Returns (B, T, V). In aux mode this is one factor in the same CTC
+        emission score as the direct phoneme head:
+
+            score(v) = log P_phoneme(v) + w * feature_score(v)
+
+        The mean reduction keeps the feature factor on roughly one-head scale
+        rather than growing with the number of articulatory dimensions.
+        """
+        B, T, F_dim, K = feature_log_probs.shape
+        V = self.vocab_size
+        idx = self.feature_table.t().view(1, 1, F_dim, V).expand(B, T, F_dim, V)
+        scores = torch.gather(feature_log_probs, dim=3, index=idx)  # (B, T, F, V)
+        if reduce == "sum":
+            return scores.sum(dim=2)
+        if reduce == "mean":
+            return scores.mean(dim=2)
+        raise ValueError(f"Unsupported feature score reduction: {reduce}")
+
     def _compute_head_input(self, input_values, attention_mask):
         """Return (B, T, head_input_dim) tensor feeding all heads.
 
@@ -369,6 +397,7 @@ class FactorizedCTCModel(nn.Module):
         l_nb = self.nonblank_head(hidden).squeeze(-1)              # (B, T)
 
         off_manifold = None
+        feature_log_probs = None
         if self.use_features:
             # Factorized: derive phoneme log-probs from features. Includes the
             # off_manifold regularizer for the V→U signature dedup.
@@ -387,22 +416,32 @@ class FactorizedCTCModel(nn.Module):
                 l_ph[..., self.blank_id] = neg_inf
             l_ph = F.log_softmax(l_ph, dim=-1)
 
+            if self.use_aux_features:
+                B, T = hidden.shape[0], hidden.shape[1]
+                feat = self.feature_head(hidden).view(B, T, self.num_features, NUM_FEATURE_VALUES)
+                feature_log_probs = F.log_softmax(feat, dim=-1)  # (B, T, F, 3)
+
+                if self.feature_emission_weight > 0:
+                    # Treat phoneme identity as one CTC emission factor and
+                    # articulatory features as additional factors for that same
+                    # emitted phoneme. Phoneme factor weight is 1.0; feature
+                    # factor gets the configured weight, then the combined
+                    # distribution is renormalized over phoneme slots.
+                    feature_scores = self._feature_scores_for_vocab(
+                        feature_log_probs,
+                        reduce="mean",
+                    )
+                    feature_scores = feature_scores.clone()
+                    feature_scores[..., self._masked_slots] = neg_inf
+                    l_ph = l_ph + self.feature_emission_weight * feature_scores
+                    l_ph = l_ph - torch.logsumexp(l_ph, dim=-1, keepdim=True)
+
         log_p_blank = F.logsigmoid(-l_nb).unsqueeze(-1)            # (B, T, 1)
         log_p_nonblank = F.logsigmoid(l_nb).unsqueeze(-1)          # (B, T, 1)
         log_p_phonemes = log_p_nonblank + l_ph                     # (B, T, V), blank=-inf
 
         log_probs = log_p_phonemes.clone()
         log_probs[..., self.blank_id] = log_p_blank.squeeze(-1)
-
-        # Feature log-probs (aux mode). The training loop runs a custom
-        # factorial/vector-label CTC: for each target phoneme position, it sums
-        # the log-probs of that position's feature vector, then applies the CTC
-        # forward recursion with one shared blank/nonblank head.
-        feature_log_probs = None
-        if self.use_aux_features:
-            B, T = hidden.shape[0], hidden.shape[1]
-            feat = self.feature_head(hidden).view(B, T, self.num_features, NUM_FEATURE_VALUES)
-            feature_log_probs = F.log_softmax(feat, dim=-1)                    # (B, T, F, 3)
 
         stress_logits = self.stress_head(hidden)
 
@@ -442,9 +481,11 @@ class FactorizedCTCModel(nn.Module):
                 zero_infinity=True,
             )
             result["loss"] = loss
-            # The factorial feature CTC loss (aux mode) is computed by the
+            # Optional legacy factorial feature CTC is computed by the
             # training loop, not here — it needs phoneme_ids to encode targets
-            # as feature sequences via the feature_table.
+            # as feature sequences via the feature_table. In the unified
+            # feature-emission setup, this stays disabled and the feature head
+            # is trained through the main CTC score above.
 
         return result
 
@@ -467,6 +508,7 @@ class FactorizedCTCModel(nn.Module):
             "blank_id": self.blank_id,
             "num_stress_labels": self.num_stress_labels,
             "feature_mode": mode,
+            "feature_emission_weight": self.feature_emission_weight,
             # Keep `uses_features` for backward compatibility with older ckpts.
             "uses_features": (mode == "factorized"),
             "regularized_heads": self.regularized_heads,
@@ -530,6 +572,7 @@ class FactorizedCTCModel(nn.Module):
             aux_feature_table=aux_table,
             special_token_ids=special_ids,
             regularized_heads=regularized,
+            feature_emission_weight=heads.get("feature_emission_weight", 0.0),
             **reg_kwargs,
         )
         if regularized:

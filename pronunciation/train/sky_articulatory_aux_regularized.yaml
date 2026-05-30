@@ -31,12 +31,13 @@ run: |
   #   (3) shared Linear(5*1920+64, 768) base feeding all four heads.
   #       Phoneme + feature heads share a learned projection — they predict
   #       overlapping information by construction.
-  # Adds ~7.8M new params (vs ~1.4M baseline). A/B target: same factorial
-  # feature CTC aux setup without --regularized-heads.
+  # Adds ~7.8M new params (vs ~1.4M baseline). A/B target: same unified
+  # feature-emission setup without --regularized-heads.
   bash train/train.sh \
     --vad-weight 0.05 \
     --use-aux-features \
-    --feature-aux-weight 0.1 \
+    --feature-emission-weight 0.3 \
+    --feature-aux-weight 0.0 \
     --regularized-heads \
     --save-dir checkpoints-unified-articulatory-aux-regularized \
     --hf-repo anchpop/lexide-pronunciation-unified-articulatory-aux-regularized

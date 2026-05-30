@@ -59,7 +59,9 @@ echo "=== Step 3/5: French rhythmic-group stress relabel ==="
 # French stress falls on the final syllable of each rhythmic group, not on
 # every word. tysm's prompt-aware caching makes re-runs free if no rows
 # changed; otherwise only new rows hit the LLM.
-cargo run --release --manifest-path train/relabel-french/Cargo.toml --quiet
+# Run from the crate dir because the binary uses paths relative to its own
+# location (../../data/audio/fra/manifest.jsonl).
+(cd train/relabel-french && cargo run --release --quiet)
 
 echo
 echo "=== Step 4/5: Phonemize + recompute VAD ==="

@@ -18,6 +18,7 @@ dataset.py.
 import argparse
 import json
 import re
+import os
 import subprocess
 import sys
 from functools import cache
@@ -81,11 +82,21 @@ STRESS_SECONDARY = 2
 # IPA vowels (monophthongs + near-variants used by espeak-ng across our languages)
 IPA_VOWELS = set("iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaɶɑɒɚɝᵻ")
 
-# Diacritics that continue the preceding vowel (length, nasalization, etc.).
-# Appended to the previous phoneme so the combined string (e.g. "ɛ̃", "iː") matches
-# the tokenizer's precomposed vocab — emitting them standalone made them UNK and
-# silently stripped nasalization/length from training labels.
-VOWEL_CONTINUATIONS = set("ːˑ̠̞̯̥̃̊̈")
+# Combining marks and modifier letters that espeak emits AFTER a base phoneme
+# and that we want folded into the previous token. Misnamed historically — the
+# set also covers consonant-attaching diacritics now (dental subscript, syllabic,
+# raised, pharyngealization). The parser appends each of these to phonemes[-1],
+# so consecutive marks stack (e.g. r̝ then ̊ → r̝̊ for voiceless Czech ř).
+VOWEL_CONTINUATIONS = set(
+    "ːˑ̠̞̯̥̃̊̈"   # vowel modifiers (existing): length, half-length, retracted,
+                  # lowered, non-syllabic, voiceless-below, nasalized, voiceless,
+                  # centralized
+    "̪̩̝"          # consonant modifiers (new): dental subscript U+032A,
+                  # syllabic U+0329, raised U+031D
+    "ˤ"           # pharyngealization modifier letter U+02E4 — espeak emits it as
+                  # a spacing modifier after the consonant; we fold it in too
+                  # so emphatic Arabic consonants (tˤ, sˤ, dˤ, ðˤ) become one token
+)
 
 WORD_BOUNDARIES = set(" \t\n|_-")
 
@@ -103,18 +114,62 @@ OVERRIDE_LANGS = {"fra"}
 TOKENIZER_NAME = "facebook/wav2vec2-xlsr-53-espeak-cv-ft"
 
 
-# Tokens that aren't in the vocab but that we explicitly choose to drop.
-# Every entry is a deliberate decision; anything not in this set AND not in
-# vocab raises a hard error at preprocess time so the choice has to be made
+# Tokens to fix BEFORE the vocab check. Each entry is a deliberate remap from
+# something espeak emits to its correct/intended IPA form. Currently used only
+# for known encoding bugs in espeak voices.
+TOKEN_REMAP: dict[str, str] = {
+    # Danish voice emits Greek epsilon U+03B5 in some contexts where it means
+    # IPA epsilon U+025B (open-mid front unrounded vowel). Definitely a bug
+    # in the espeak data — they're different Unicode codepoints but the same
+    # glyph. Remap to the IPA codepoint so it matches the rest of the vocab.
+    "ε": "ɛ",
+}
+
+
+# Phonemes we add to the borrowed vocab so they're treated as real output
+# classes by training. The xls-r-2b backbone has no pretrained phoneme
+# representations (it was trained on raw audio only), so extending the vocab
+# is free — the CTC head's output dim grows by len(VOCAB_EXTENSIONS) and the
+# new logits are learned from scratch alongside everything else.
+#
+# Every entry is a phoneme the patched espeak (master-232+ relative to
+# 1.52.0) emits that the original xlsr-53-espeak-cv-ft vocab didn't have, and
+# that we want the model to learn rather than collapse into a near-neighbor.
+# Panphon validates all of these with clean feature vectors so the
+# articulatory aux head also gets proper targets.
+VOCAB_EXTENSIONS: set[str] = {
+    # German: patched espeak (commit 9cbfd389 "fr/de/ru: pronunciation fixes
+    # toward modal surface realization") correctly distinguishes short ü
+    # (ʏ, near-close near-front rounded) from long ü (y, close front rounded).
+    # 1.52.0 conflated both as y. ~2k occurrences/lang in deu, only in deu.
+    "ʏ",
+    # Danish: real long ʌ, only 8 occurrences but trivially small to add.
+    "ʌː",
+    # Danish: non-syllabic ɐ — the offglide of falling diphthongs ("air",
+    # "fjord"). ~500 occurrences. Note this combined form is produced by the
+    # parser folding the ̯ U+032F mark into the ɐ.
+    "ɐ̯",
+    # Arabic: long ʒ, only 1 occurrence but treated symmetrically.
+    "ʒː",
+}
+
+
+# Tokens that aren't in the (extended) vocab and that we explicitly choose to
+# drop. Every entry is a deliberate decision; anything not in this set AND not
+# in vocab raises a hard error at preprocess time so the choice has to be made
 # rather than silently lost.
 TOKEN_BLACKLIST: set[str] = {
-    # Punctuation leaking from the source text into espeak's output. These
-    # aren't phonemes — they're stray characters espeak passes through when
-    # the input contained them. Safe to drop.
+    # Punctuation leaking from source text into espeak's output. Stray
+    # characters espeak passes through when the input contained them.
     "(",
     ")",
     '"',
     "^",
+    "?",        # patched espeak's da voice leaks question marks through.
+    # Syllable separators espeak emits in some voices (Arabic). Our vocab is
+    # phoneme-level, not syllable-level; we don't track syllable boundaries.
+    ".",
+    ".ː",       # malformed period-before-length artefact.
 }
 
 
@@ -141,11 +196,15 @@ def validate_phonemes(
     blacklist (intentional drop), extend the phonemize() parser (treat as
     diacritic / boundary / etc.), or change the upstream text.
     """
-    vocab = _tokenizer_vocab()
+    vocab = _tokenizer_vocab() | VOCAB_EXTENSIONS
     out_phonemes: list[str] = []
     out_stress: list[int] = []
     unknowns: set[str] = set()
     for p, s in zip(phonemes, stress):
+        # Apply remaps first (encoding bug fixes etc.) — these aren't
+        # "unknown", they're known-wrong-codepoint and we're correcting them
+        # before the vocab check.
+        p = TOKEN_REMAP.get(p, p)
         if p in vocab:
             out_phonemes.append(p)
             out_stress.append(s)
@@ -278,9 +337,17 @@ def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[t
     characters the parser uses to reset stress state. Empty spans (consecutive
     boundaries) are dropped, so word_spans aligns with non-empty text words.
     """
+    # ESPEAK_NG_BIN / ESPEAK_NG_DATA_PATH let you point at a non-system build
+    # (e.g. a custom patched espeak-ng under ~/coding/tmp/espeak-ng/build).
+    # Defaults fall back to the system `espeak-ng` on PATH.
+    espeak_bin = os.environ.get("ESPEAK_NG_BIN", "espeak-ng")
+    data_path = os.environ.get("ESPEAK_NG_DATA_PATH")
+    cmd = [espeak_bin]
+    if data_path:
+        cmd.append(f"--path={data_path}")
+    cmd.extend(["-v", espeak_lang, "-q", "--ipa", "-x", text])
     result = subprocess.run(
-        ["espeak-ng", "-v", espeak_lang, "-q", "--ipa", "-x", text],
-        capture_output=True, text=True, check=True,
+        cmd, capture_output=True, text=True, check=True,
     )
     raw = result.stdout.strip()
 

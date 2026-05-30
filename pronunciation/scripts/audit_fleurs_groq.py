@@ -210,7 +210,11 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--audio-root", type=Path, default=Path("data/audio"))
-    parser.add_argument("--out", type=Path, default=Path("tmp/fleurs_groq_whisper_audit.jsonl"))
+    parser.add_argument("--out", type=Path,
+                        default=Path("train/fleurs_groq_whisper_audit.jsonl"),
+                        help="Append-only raw audit cache. Lives under train/ so "
+                             "it's tracked in git and a fresh clone inherits the "
+                             "cache instead of re-paying Groq.")
     parser.add_argument("--model", default="whisper-large-v3-turbo")
     parser.add_argument("--lang", action="append", choices=sorted(LANG_TO_ISO639_1),
                         help="Limit to one or more repo language codes, e.g. --lang spa.")
