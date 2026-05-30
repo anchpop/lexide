@@ -18,40 +18,13 @@ setup: |
   pip install transformers datasets soundfile tqdm wandb panphon
 
 run: |
-  cd ~/sky_workdir
-  export CUDA_VISIBLE_DEVICES=0
-  export WANDB_PROJECT="lexide-pronunciation"
-  export WANDB_API_KEY=${WANDB_API_KEY}
-  export HF_TOKEN=${HF_TOKEN}
-  # Combats CUDA allocator fragmentation. Set here for consistency with the
-  # other runs even though baseline-VAD doesn't hit the factorial CTC's
-  # autograd-graph pressure.
-  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-  pip install --quiet panphon
-
-  hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
-
-  # Baseline-VAD on the cleaned dataset — no articulatory aux supervision,
-  # no regularized heads, just the direct phoneme head + nonblank head +
-  # stress head trained against the cleaner audit-filtered data with
-  # confidence-weighted VAD and trailing-silence VAD zeroing. This is the
-  # "what would baseline-VAD do with the same data improvements" reference
-  # point for A/B comparing the articulatory variants.
-  python -m src.train_unified \
-    --data-dir ~/data \
-    --model-name facebook/wav2vec2-xls-r-2b \
-    --processor-source facebook/wav2vec2-xlsr-53-espeak-cv-ft \
-    --gradient-checkpointing \
-    --epochs 7 \
-    --batch-size 16 \
-    --backbone-lr 1e-5 \
-    --head-lr 1e-3 \
-    --stress-weight 0.3 \
-    --stress-warmup-steps 400 \
+  # Baseline + VAD on the cleaned dataset (i.e. with audit exclusions applied
+  # to FLEURS + Tatoeba via the auto-loaded *_asr_exclusions.jsonl sidecars).
+  # No articulatory aux supervision, no regularized heads — just the direct
+  # phoneme head + nonblank + stress trained on cleaner data. Reference point
+  # for A/B comparing the articulatory variants against the same clean data.
+  bash train/train.sh \
     --vad-weight 0.05 \
-    --num-workers 16 \
-    --bf16 \
     --save-dir checkpoints-unified-vad-clean \
     --hf-repo anchpop/lexide-pronunciation-unified-vad-clean
 

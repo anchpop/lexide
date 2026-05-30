@@ -54,6 +54,14 @@ from preprocess import phonemize, LANG_TO_ESPEAK  # noqa: E402
 
 GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
+
+class DiskWriteError(Exception):
+    """Raised when sf.write fails for what looks like a filesystem-level
+    problem (read-only mount, disk full, missing path). These have to abort
+    the whole run — silently continuing turns every Whisper success into a
+    lost segment AND burns Groq quota.
+    """
+
 # Whisper's verbose_json returns the detected language as a lowercase full
 # English name ("english", "french") rather than an ISO code.
 LANG_TO_WHISPER_NAME = {
@@ -229,7 +237,7 @@ def vad_segments(audio: np.ndarray, vad_model, get_speech_timestamps) -> list[di
 
 
 def transcribe_clip(wav_bytes: bytes, api_key: str, model: str,
-                    retries: int = 3, timeout: float = 60.0) -> dict[str, Any]:
+                    retries: int = 1, timeout: float = 60.0) -> dict[str, Any]:
     """Send a single WAV clip to Groq Whisper with no language hint.
 
     Returns the full verbose_json payload alongside an "ok" flag so the
@@ -237,6 +245,13 @@ def transcribe_clip(wav_bytes: bytes, api_key: str, model: str,
     avg_logprob, no_speech_prob, compression_ratio, etc). Throwing away
     those signals at extraction time means later filtering needs another
     Groq call per clip; storing them is free.
+
+    retries=1 is intentional: we'd rather give up early on a failing call
+    and let the segment retry on the next orchestrator pass (manifest-
+    based skip-set + partial-success preservation make that cheap) than
+    burn 3-4x the daily Groq quota on retry-then-fail loops. The sleeps
+    on 429 / transient errors are generous so the one retry actually
+    gets some breathing room.
     """
     fields = [
         ("model", model),
@@ -255,7 +270,7 @@ def transcribe_clip(wav_bytes: bytes, api_key: str, model: str,
             )
             if resp.status_code == 429:
                 retry_after = resp.headers.get("retry-after")
-                time.sleep(float(retry_after) if retry_after else min(10.0, 0.5 * (attempt + 1)))
+                time.sleep(float(retry_after) if retry_after else min(20.0, 2.0 * (attempt + 1)))
                 last_error = "429"
                 continue
             resp.raise_for_status()
@@ -269,7 +284,7 @@ def transcribe_clip(wav_bytes: bytes, api_key: str, model: str,
             }
         except Exception as e:
             last_error = repr(e)
-            time.sleep(min(15.0, 2 ** attempt))
+            time.sleep(min(20.0, 4.0 * (attempt + 1)))
     return {"ok": False, "text": "", "language": "", "payload": None,
             "error": last_error}
 
@@ -385,7 +400,13 @@ def process_lesson(mp3_path: Path, lesson_id: str,
 
         fname = f"pimsleur_{lesson_id}_{seg_idx:04d}.wav"
         dest = audio_dir / fname
-        sf.write(dest, clip, 16000)
+        try:
+            sf.write(dest, clip, 16000)
+        except (OSError, sf.LibsndfileError) as e:
+            # Filesystem failure (read-only mount, disk full, vanished path).
+            # Abort the whole run — continuing would burn Groq quota on
+            # successes that can't be persisted.
+            raise DiskWriteError(f"sf.write failed at {dest}: {e}") from e
 
         # Extract the highest-signal Whisper fields into the manifest
         # alongside the full payload. The flat fields (avg_logprob,
@@ -545,6 +566,16 @@ def main() -> None:
     for lang, lessons_for_lang in sorted(by_lang.items(), key=lambda kv: _order(kv[0])):
         audio_dir = args.audio_root / lang
         audio_dir.mkdir(parents=True, exist_ok=True)
+        # Pre-flight write probe. If audio_dir is on a read-only or
+        # otherwise wedged volume, fail loudly NOW instead of burning
+        # Groq quota on lessons whose WAVs can never persist.
+        probe = audio_dir / ".write_probe"
+        try:
+            probe.write_bytes(b"ok")
+            probe.unlink()
+        except OSError as e:
+            sys.exit(f"FATAL: cannot write to {audio_dir}: {e}. "
+                     f"Check the disk (e.g. T7 mount) and re-run.")
         manifest_path = audio_dir / "manifest.jsonl"
 
         existing_files: set[str] = set()
@@ -662,6 +693,10 @@ def main() -> None:
                     workers=args.workers,
                     skip_seg_idxs=skip,
                 )
+            except DiskWriteError:
+                # Fatal: propagate so the main as_completed loop can abort.
+                # Continuing would burn quota on lessons we can't persist.
+                raise
             except Exception as e:
                 return idx, mp3, lid, None, False, repr(e)
             return idx, mp3, lid, entries, ok, None
@@ -671,8 +706,24 @@ def main() -> None:
         fail_count = 0
         with ThreadPoolExecutor(max_workers=args.lesson_workers) as pool:
             futs = [pool.submit(run_one, (i, x)) for i, x in enumerate(todo)]
-            for fut in as_completed(futs):
-                idx, mp3, lid, entries, ok, err = fut.result()
+            try:
+                completed_iter = as_completed(futs)
+            except KeyboardInterrupt:
+                raise
+            for fut in completed_iter:
+                try:
+                    idx, mp3, lid, entries, ok, err = fut.result()
+                except DiskWriteError as e:
+                    # Filesystem went sideways mid-run (read-only mount,
+                    # disk full, etc). Cancel pending lessons and exit.
+                    print(f"\nFATAL: {e}", flush=True)
+                    print("Cancelling outstanding lessons and exiting. "
+                          "Fix the disk, then re-run — the manifest-based "
+                          "skip-set will pick up where we left off.",
+                          flush=True)
+                    for f in futs:
+                        f.cancel()
+                    raise SystemExit(2)
                 if err is not None:
                     fail_count += 1
                     print(f"  [{lang}] {idx+1}/{len(todo)} FAIL {mp3.name}: {err}")

@@ -18,17 +18,6 @@ setup: |
   pip install transformers datasets soundfile tqdm wandb panphon
 
 run: |
-  cd ~/sky_workdir
-  export CUDA_VISIBLE_DEVICES=0
-  export WANDB_PROJECT="lexide-pronunciation"
-  export WANDB_API_KEY=${WANDB_API_KEY}
-  export HF_TOKEN=${HF_TOKEN}
-
-  # Idempotent for sky exec on warm clusters.
-  pip install --quiet panphon
-
-  hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
-
   # Articulatory features as AUXILIARY supervision via factorial feature CTC.
   # Direct phoneme head handles main CTC (no cold start). The feature head
   # emits F=24 independent 3-way feature distributions per frame; targets are
@@ -37,22 +26,10 @@ run: |
   # comparison happens in feature space — signature-colliding phonemes share
   # supervision instead of being penalized for not being distinguishable in
   # feature space.
-  python -m src.train_unified \
-    --data-dir ~/data \
-    --model-name facebook/wav2vec2-xls-r-2b \
-    --processor-source facebook/wav2vec2-xlsr-53-espeak-cv-ft \
-    --gradient-checkpointing \
-    --epochs 7 \
-    --batch-size 16 \
-    --backbone-lr 1e-5 \
-    --head-lr 1e-3 \
-    --stress-weight 0.3 \
-    --stress-warmup-steps 400 \
+  bash train/train.sh \
     --vad-weight 0.05 \
     --use-aux-features \
     --feature-aux-weight 0.1 \
-    --num-workers 16 \
-    --bf16 \
     --save-dir checkpoints-unified-articulatory-aux \
     --hf-repo anchpop/lexide-pronunciation-unified-articulatory-aux
 
