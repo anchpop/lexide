@@ -97,6 +97,9 @@ VOWEL_CONTINUATIONS = set(
                   # a spacing modifier after the consonant; we fold it in too
                   # so emphatic Arabic consonants (tˤ, sˤ, dˤ, ðˤ) become one token
 )
+# NB: palatalization ʲ (U+02B2) is handled separately in the parser, NOT here —
+# it folds onto a preceding CONSONANT (Russian soft tʲ nʲ …) but stays a
+# standalone token after a vowel (where espeak uses it as a glide, e.g. iʲo).
 
 WORD_BOUNDARIES = set(" \t\n|_-")
 
@@ -123,6 +126,30 @@ TOKEN_REMAP: dict[str, str] = {
     # in the espeak data — they're different Unicode codepoints but the same
     # glyph. Remap to the IPA codepoint so it matches the rest of the vocab.
     "ε": "ɛ",
+}
+
+
+# Per-language phoneme remaps applied BEFORE the vocab check (like TOKEN_REMAP
+# but conditioned on the dataset language, because the SAME espeak symbol is
+# legitimate in one language and a frontend artifact in another). The 4-source
+# audit confirmed these across tatoeba/TTS/FLEURS/Pimsleur: espeak's French
+# voice leaks English/length-marked vowels (loanwords, letter-names) and its
+# Italian voice emits lax high vowels Italian doesn't have. Neither language has
+# phonemic vowel length or (for Italian) lax /ɪ ʊ/, so we map each to the
+# nearest real vowel — the audio nativises, so this is faithful, not smoothing.
+LANG_PHONEME_REMAP: dict[str, dict[str, str]] = {
+    "fra": {
+        # length-marked vowels -> short (French has no phonemic length)
+        "uː": "u", "ɔː": "ɔ", "ɑː": "a", "oː": "o", "aː": "a",
+        "iː": "i", "yː": "y", "eː": "e", "ɜː": "œ",
+        # lax / English-only qualities -> nearest French vowel
+        "ɪ": "i", "ʊ": "u", "ʌ": "a", "ɒ": "ɔ", "ɐ": "a",
+    },
+    "ita": {
+        # Italian has no lax high vowels; espeak emits them spuriously
+        # (ɪ ×1230, ʊ ×804 in the audit corpus).
+        "ɪ": "i", "ʊ": "u",
+    },
 }
 
 
@@ -166,6 +193,13 @@ VOCAB_EXTENSIONS: set[str] = {
     # `ɔ̃` but not these two.
     "ʊ̃",
     "ɪ̃",
+    # Russian soft (palatalized) consonants produced by folding ʲ onto the
+    # consonant (see VOWEL_CONTINUATIONS). Most Cʲ are already vocab tokens;
+    # these two frequent ones are not: soft л /lʲ/ (espeak writes ɫʲ, ~746
+    # occ) and щ (espeak writes ʃʲ, ~554 occ). Palatalization is phonemic in
+    # Russian (/t/ vs /tʲ/), so these must be learnable, not collapsed.
+    "ɫʲ",
+    "ʃʲ",
 }
 
 
@@ -197,7 +231,7 @@ def _tokenizer_vocab() -> set[str]:
 
 
 def validate_phonemes(
-    phonemes: list[str], stress: list[int],
+    phonemes: list[str], stress: list[int], lang: str | None = None,
 ) -> tuple[list[str], list[int], set[str]]:
     """Filter phonemes against the tokenizer vocab + TOKEN_BLACKLIST.
 
@@ -212,13 +246,15 @@ def validate_phonemes(
     diacritic / boundary / etc.), or change the upstream text.
     """
     vocab = _tokenizer_vocab() | VOCAB_EXTENSIONS
+    lang_remap = LANG_PHONEME_REMAP.get(lang or "", {})
     out_phonemes: list[str] = []
     out_stress: list[int] = []
     unknowns: set[str] = set()
     for p, s in zip(phonemes, stress):
-        # Apply remaps first (encoding bug fixes etc.) — these aren't
-        # "unknown", they're known-wrong-codepoint and we're correcting them
-        # before the vocab check.
+        # Apply remaps first (language-conditional frontend fixes, then global
+        # encoding-bug fixes) — these aren't "unknown", they're known-wrong and
+        # we're correcting them before the vocab check.
+        p = lang_remap.get(p, p)
         p = TOKEN_REMAP.get(p, p)
         if p in vocab:
             out_phonemes.append(p)
@@ -370,6 +406,16 @@ def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[t
     )
     raw = result.stdout.strip()
 
+    # espeak switches voice for foreign words (loanwords, names) and brackets
+    # the switch with (lang) markers, e.g. "football" -> "(en)fˈʊtbɔːl(fr)".
+    # The parens are blacklisted but the 2-letter codes are valid phonemes
+    # (e/n/f/r…), so without this they'd silently inject spurious segments into
+    # loanword labels — and the unknown-token safety net can't catch it. Strip
+    # the markers; the switched word body stays and is parsed/remapped normally
+    # (the French vowel remap nativises the English vowels espeak used). ~2.3%
+    # of French sentences carry these.
+    raw = re.sub(r"\([a-z]{2,4}\)", "", raw)
+
     phonemes = []
     stress = []
     word_spans: list[tuple[int, int]] = []
@@ -408,6 +454,20 @@ def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[t
                 phonemes[-1] += char
             else:
                 # Stray diacritic at start of output — no previous token to attach to
+                phonemes.append(char)
+                stress.append(STRESS_NONE)
+        elif char == "ʲ":
+            # Palatalization (U+02B2). Fold onto the preceding phoneme IFF it's a
+            # CONSONANT → Russian soft consonants (tʲ nʲ sʲ …, soft л ɫʲ, щ ʃʲ):
+            # one segment, not a standalone ʲ that the 4-source audit found
+            # aligns to ~0 frames. After a VOWEL, espeak uses ʲ to mark a glide
+            # (hiatus [j], e.g. Italian "io"=iʲo, Spanish "días"=diʲas) — keep it
+            # as its own token (its prior behavior), don't fabricate a vowel+ʲ.
+            if phonemes and phonemes[-1][:1] not in IPA_VOWELS:
+                phonemes[-1] += char
+            else:
+                in_vowel = False
+                current_stress = STRESS_NONE
                 phonemes.append(char)
                 stress.append(STRESS_NONE)
         else:
@@ -469,6 +529,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path,
                         default=Path(__file__).resolve().parent.parent.parent / "data" / "audio")
+    parser.add_argument("--langs", nargs="+", default=None,
+                        help="Restrict to these lang codes (default: all dirs). "
+                             "Lets independent languages run as parallel jobs.")
     parser.add_argument("--skip-vad", action="store_true",
                         help="Don't regenerate vad.jsonl after phonemization. "
                              "Use only when you're certain vad coverage is "
@@ -481,6 +544,8 @@ def main():
         if not lang_dir.is_dir():
             continue
         lang = lang_dir.name
+        if args.langs and lang not in args.langs:
+            continue
         if lang not in LANG_TO_ESPEAK:
             print(f"Skipping {lang} (no espeak mapping)")
             continue
@@ -543,7 +608,7 @@ def main():
                     override_applied += 1
                 else:
                     override_align_failures += 1
-            phonemes, stress, unknowns = validate_phonemes(phonemes, stress)
+            phonemes, stress, unknowns = validate_phonemes(phonemes, stress, lang)
             for u in unknowns:
                 if u in unknown_examples:
                     count, example = unknown_examples[u]

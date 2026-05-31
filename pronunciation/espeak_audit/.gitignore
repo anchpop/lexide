@@ -1,0 +1,7 @@
+# Regenerable bulk — keep code, reports, figs, and small summaries in git.
+__pycache__/
+preprocess_logs/
+out/*.segments.jsonl
+out/*.clips.jsonl
+out/*.allosaurus.jsonl
+out/_log*
