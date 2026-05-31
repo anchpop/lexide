@@ -23,7 +23,9 @@
 
 set -euo pipefail
 
-cd ~/sky_workdir
+# `python -m src.train_unified` resolves src/ relative to CWD, and src/ lives
+# at ~/sky_workdir/train/src/ (workdir is the pronunciation dir).
+cd ~/sky_workdir/train
 
 export CUDA_VISIBLE_DEVICES=0
 export WANDB_PROJECT="lexide-pronunciation"

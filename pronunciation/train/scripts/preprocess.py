@@ -151,6 +151,21 @@ VOCAB_EXTENSIONS: set[str] = {
     "ɐ̯",
     # Arabic: long ʒ, only 1 occurrence but treated symmetrically.
     "ʒː",
+    # Italian geminate consonants (real phonological distinction — pasta/pasta
+    # vs cassa "cash register" / casa "house" minimal pairs). Patched espeak
+    # emits these; 1.52.0 wouldn't have. ~700/600/300 occurrences in ita.
+    "sː",
+    "zː",
+    "ʃː",
+    # Italian dental d (combines with vocab's existing t̪ etc.).
+    "d̪",
+    # Italian dental n (rare in dataset but symmetrical with t̪/d̪).
+    "n̪",
+    # Portuguese nasal vowels — phonemic in Portuguese (e.g. mãe "mother",
+    # bom "good"). 5,642 + 1,606 occurrences in por; the vocab already has
+    # `ɔ̃` but not these two.
+    "ʊ̃",
+    "ɪ̃",
 }
 
 
@@ -346,8 +361,12 @@ def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[t
     if data_path:
         cmd.append(f"--path={data_path}")
     cmd.extend(["-v", espeak_lang, "-q", "--ipa", "-x", text])
+    # errors="replace": patched espeak (master-232) occasionally emits non-UTF8
+    # debug warnings to stderr for certain inputs (e.g. some Russian/Spanish
+    # sentences). text=True with default 'strict' decoding would crash the whole
+    # pipeline on those bytes even though stdout (the IPA we care about) is fine.
     result = subprocess.run(
-        cmd, capture_output=True, text=True, check=True,
+        cmd, capture_output=True, text=True, check=True, errors="replace",
     )
     raw = result.stdout.strip()
 

@@ -11,6 +11,10 @@ workdir: .
 
 file_mounts:
   ~/.netrc: ~/.netrc
+  # See sky_baseline_vad_clean.yaml's note: sky rsyncs local data/audio/ much
+  # faster than the HF↔Lambda link, and train.sh detects the pre-mount and
+  # skips its hf download step.
+  ~/data: /Users/andrepopovitch/coding/lexide/pronunciation/data/audio
 
 setup: |
   cd ~/sky_workdir

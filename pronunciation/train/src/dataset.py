@@ -160,6 +160,11 @@ class StressDataset(Dataset):
                 "phoneme_ids": phoneme_ids,
                 "stress_seq": stress_seq,
                 "lang": rec["lang"],
+                # Source class (fleurs / tatoeba / pimsleur / tts). Used by
+                # --source-cap-second in train_unified.py to balance per-lang
+                # representation within each source so e.g. English (which has
+                # 87k Pimsleur clips) doesn't drown the other langs.
+                "source": rec.get("source"),
                 # May be empty list if vad.jsonl wasn't present — training loop
                 # treats empty as "no VAD signal, skip VAD loss for this clip".
                 "vad_probs": vad_by_file.get(rec["file"], []),
@@ -334,7 +339,13 @@ def get_audio_lengths(dataset) -> list[int]:
     """
     def base(ds):
         if isinstance(ds, Subset):
-            return [base(ds.dataset)[i] for i in ds.indices]
+            # Hoist the recursive call out of the list comprehension; otherwise
+            # base(ds.dataset) is re-evaluated per index → O(n²) for the typical
+            # Subset(ConcatDataset(StressDataset...)) shape from random_split.
+            # That's the difference between seconds and not-completing-overnight
+            # for a 285k-sample dataset.
+            inner = base(ds.dataset)
+            return [inner[i] for i in ds.indices]
         if isinstance(ds, ConcatDataset):
             out = []
             for d in ds.datasets:

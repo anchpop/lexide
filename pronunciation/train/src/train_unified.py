@@ -24,7 +24,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 import torchaudio.functional as AF
-from torch.utils.data import DataLoader, ConcatDataset, random_split
+from torch.utils.data import DataLoader, ConcatDataset, Subset, random_split
 from tqdm import tqdm
 
 import wandb
@@ -657,6 +657,21 @@ def main():
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--hf-repo", type=str, default=None)
     parser.add_argument("--langs", nargs="*", default=None)
+    parser.add_argument("--source-cap-second",
+                        action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Per (lang, source) class balancing (default ON). "
+                             "For each source class (fleurs / tatoeba / "
+                             "pimsleur / tts) find the SECOND-most-populous "
+                             "lang's count and use it as the cap for every "
+                             "lang in that source. The most-populous lang "
+                             "gets random-subsampled down; smaller langs are "
+                             "untouched. Without this, English's 87k Pimsleur "
+                             "clips would dominate (~38% of the corpus) and "
+                             "the model would learn English-pronunciation-"
+                             "mostly. With it on (default), eng pimsleur "
+                             "drops to ~17k (matching the next biggest, fra). "
+                             "Pass --no-source-cap-second to opt out.")
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--gradient-checkpointing", action="store_true")
     parser.add_argument("--resume-from", type=Path, default=None,
@@ -767,6 +782,53 @@ def main():
                                min_whisper_logprob=args.min_whisper_logprob)
             print(f"Loaded {lang_dir.name}: {len(ds)} samples")
             datasets.append(ds)
+
+    if args.source_cap_second and datasets:
+        # Per-source per-lang second-place balancing. For each source class
+        # (pimsleur / fleurs / tatoeba / tts), find the second-most-populous
+        # lang's count C and cap every lang in that source at C. The biggest
+        # lang in each source gets random-downsampled; smaller langs stay.
+        #
+        # Concrete: pimsleur has eng=87k, fra=17k → all langs capped at 17k
+        # for pimsleur, dropping eng pimsleur by 70k. Other sources (fleurs/
+        # tatoeba/tts) are already inherently balanced across langs so this
+        # rarely cuts them.
+        from collections import defaultdict
+        import random as _random
+        # Pass 1: count (source, lang)
+        counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for ds in datasets:
+            for s in ds.samples:
+                counts[s.get("source") or "unknown"][s["lang"]] += 1
+        # Pass 2: per-source caps (= second-highest lang count, or top if
+        # only one lang has that source).
+        caps: dict[str, int] = {}
+        for source, lang_counts in counts.items():
+            top = sorted(lang_counts.values(), reverse=True)
+            caps[source] = top[1] if len(top) >= 2 else top[0]
+        print(f"Source-class caps (second-highest lang count per source): {caps}")
+        # Pass 3: build Subsets, sampling each (lang, source) down to its cap.
+        rng = _random.Random(42)
+        new_datasets = []
+        for ds in datasets:
+            if not isinstance(ds, StressDataset):
+                new_datasets.append(ds)
+                continue
+            by_source: dict[str, list[int]] = defaultdict(list)
+            for i, s in enumerate(ds.samples):
+                by_source[s.get("source") or "unknown"].append(i)
+            kept: list[int] = []
+            for source, idxs in by_source.items():
+                cap = caps.get(source, len(idxs))
+                if len(idxs) > cap:
+                    idxs = rng.sample(idxs, cap)
+                kept.extend(idxs)
+            kept.sort()
+            if len(kept) < len(ds):
+                lang = ds.samples[0]["lang"] if ds.samples else "?"
+                print(f"  {lang}: subsampled to {len(kept)} (from {len(ds)})")
+            new_datasets.append(Subset(ds, kept))
+        datasets = new_datasets
     if not datasets:
         raise RuntimeError(f"No phonemes.jsonl files matched (langs={args.langs}).")
 
@@ -909,18 +971,28 @@ def main():
         }
         wandb.log(log_dict)
 
-        if val_loss < best_val_loss:
+        # Always save and push EVERY epoch's checkpoint. HF git history
+        # preserves each revision, so worse-than-best epochs are still
+        # recoverable by commit hash (`huggingface_hub.snapshot_download(...,
+        # revision=<sha>)`). The commit message tags the new-best epochs so
+        # they're easy to find. Why save them all: an apparent regression at
+        # epoch N can still be the checkpoint we want (e.g. better on a
+        # downstream task, or pre-overfitting on a sub-distribution we care
+        # about). Cheap to keep, expensive to wish you had back.
+        is_new_best = val_loss < best_val_loss
+        if is_new_best:
             best_val_loss = val_loss
-            model.save_to_dir(args.save_dir)
-            processor.save_pretrained(args.save_dir)
-            if hf_api is not None:
-                print(f"Uploading epoch {epoch} (val_loss={val_loss:.4f}) to HF...")
-                hf_api.upload_folder(
-                    folder_path=str(args.save_dir),
-                    repo_id=args.hf_repo,
-                    commit_message=f"epoch {epoch} (val_loss={val_loss:.4f})",
-                )
-                print(f"Uploaded to https://huggingface.co/{args.hf_repo}")
+        model.save_to_dir(args.save_dir)
+        processor.save_pretrained(args.save_dir)
+        if hf_api is not None:
+            tag = " [NEW BEST]" if is_new_best else ""
+            print(f"Uploading epoch {epoch} (val_loss={val_loss:.4f}){tag} to HF...")
+            hf_api.upload_folder(
+                folder_path=str(args.save_dir),
+                repo_id=args.hf_repo,
+                commit_message=f"epoch {epoch} (val_loss={val_loss:.4f}){tag}",
+            )
+            print(f"Uploaded to https://huggingface.co/{args.hf_repo}")
 
     wandb.finish()
 

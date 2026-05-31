@@ -113,10 +113,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         f,
         start.elapsed().as_secs_f64()
     );
-    if f > 0 {
-        // Exit nonzero so callers (preprocess.py) treat partial VAD as an
-        // error rather than silently shipping incomplete vad.jsonl.
-        return Err(format!("{} files failed", f).into());
-    }
+    // Per-file failures are graceful: dataset.py treats a missing vad row as
+    // "no VAD signal for this clip" and skips the aux loss for it. Only
+    // catastrophic errors (e.g. write error on vad.jsonl) bubble up via `?`.
+    // The failed count is reported via stderr above so the caller can decide
+    // whether the coverage gap is acceptable.
     Ok(())
 }
