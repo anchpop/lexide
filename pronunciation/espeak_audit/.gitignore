@@ -4,4 +4,7 @@ preprocess_logs/
 out/*.segments.jsonl
 out/*.clips.jsonl
 out/*.allosaurus.jsonl
+out/*.phonemes_flapped.jsonl
+out/flap_samples/
+out/flap_full/
 out/_log*

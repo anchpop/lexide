@@ -219,6 +219,11 @@ TOKEN_BLACKLIST: set[str] = {
     # phoneme-level, not syllable-level; we don't track syllable boundaries.
     ".",
     ".ː",       # malformed period-before-length artefact.
+    # Palatalized /h/ from the ʲ-fold (see phonemize). Not a phoneme of any of
+    # our languages — the single occurrence is a malformed mixed-language
+    # Pimsleur clip (Korean text + "Listen and repeat" read by the en-us
+    # voice). Deliberate drop rather than fabricate a hʲ vocab class.
+    "hʲ",
 }
 
 
