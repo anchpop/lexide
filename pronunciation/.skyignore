@@ -1,0 +1,14 @@
+data/
+tmp/
+espeak_audit/
+vad_compare/
+.env
+.claude/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.pt
+*.pth
+*.safetensors
+checkpoints*/

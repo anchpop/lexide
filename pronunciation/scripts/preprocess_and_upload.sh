@@ -8,9 +8,12 @@
 #   1. Audit FLEURS audio (Whisper + phoneme-level CER) → train/fleurs_asr_exclusions.jsonl
 #   2. Audit Tatoeba audio (same) → train/tatoeba_asr_exclusions.jsonl
 #   3. relabel-french: LLM-labeled rhythmic-group stress → data/audio/fra/stress_overrides.jsonl
-#   4. preprocess.py: per-lang phonemes.jsonl + vad.jsonl from the manifest
+#   4. lang-filter: flag clips whose transcript isn't entirely the target
+#      language (Pimsleur mixes in foreign example/instruction text that espeak
+#      then mislabels silently) → train/lang_exclusions.jsonl (training excludes)
+#   5. preprocess.py: per-lang phonemes.jsonl + vad.jsonl from the manifest
 #      (phonemize via espeak-ng; framewise VAD via vad_compute Rust binary)
-#   5. upload_audio_to_hf.py: push data/audio/ to anchpop/lexide-pronunciation-audio
+#   6. upload_audio_to_hf.py: push data/audio/ to anchpop/lexide-pronunciation-audio
 #
 # This script does NOT acquire new data. If you have new Pimsleur lessons
 # or Tatoeba records to ingest, run the appropriate downloader first:
@@ -20,7 +23,7 @@
 #
 # Required env vars (loaded from .env at repo root or pronunciation/.env):
 #   GROQ_API_KEY    — Whisper audits (Groq Cloud)
-#   OPENAI_API_KEY  — gpt-5.4-nano calls in relabel-french
+#   OPENAI_API_KEY  — gpt-5.4-nano calls in relabel-french + lang-filter
 #   HF_TOKEN        — HuggingFace dataset upload
 #
 # Run from any directory; the script cd's into pronunciation/.
@@ -46,15 +49,15 @@ require_env GROQ_API_KEY
 require_env OPENAI_API_KEY
 require_env HF_TOKEN
 
-echo "=== Step 1/5: FLEURS audit (Groq Whisper) ==="
+echo "=== Step 1/6: FLEURS audit (Groq Whisper) ==="
 python3 scripts/audit_fleurs_groq.py
 
 echo
-echo "=== Step 2/5: Tatoeba audit (Groq Whisper) ==="
+echo "=== Step 2/6: Tatoeba audit (Groq Whisper) ==="
 python3 scripts/audit_tatoeba_groq.py
 
 echo
-echo "=== Step 3/5: French rhythmic-group stress relabel ==="
+echo "=== Step 3/6: French rhythmic-group stress relabel ==="
 # espeak emits per-word stress for French, which is systematically wrong:
 # French stress falls on the final syllable of each rhythmic group, not on
 # every word. tysm's prompt-aware caching makes re-runs free if no rows
@@ -64,18 +67,32 @@ echo "=== Step 3/5: French rhythmic-group stress relabel ==="
 (cd train/relabel-french && cargo run --release --quiet)
 
 echo
-echo "=== Step 4/5: Phonemize + recompute VAD ==="
+echo "=== Step 4/6: Language-contamination filter (gpt-5.4-nano) ==="
+# Pimsleur courses teach other languages, so some clips' transcripts are
+# foreign / mixed-language; espeak then phonemizes the foreign text as the
+# target language → silently wrong labels. Flag clips whose transcript isn't
+# entirely the target language → train/lang_exclusions.jsonl (asr_exclusions
+# schema, hash-gated on the sentence; training auto-excludes them). tysm's
+# prompt-aware caching makes re-runs free except for new/changed sentences.
+# Run from the crate dir (default paths are relative to it); ensure the tysm
+# cache dir exists (it panics otherwise).
+(cd train/lang-filter && mkdir -p .cache && cargo run --release --quiet)
+
+echo
+echo "=== Step 5/6: Phonemize + recompute VAD ==="
 # preprocess.py rebuilds vad.jsonl via vad_compute as it goes, keeping VAD
 # coverage in lockstep with phonemes. --skip-vad if you regenerated phonemes
 # for a label-only fix that didn't change which audio files are referenced.
 python3 train/scripts/preprocess.py
 
 echo
-echo "=== Step 5/5: Upload to HF dataset ==="
+echo "=== Step 6/6: Upload to HF dataset ==="
 python3 scripts/upload_audio_to_hf.py
 
 echo
 echo "=== DONE ==="
 echo "Optional sanity checks (not run automatically):"
-echo "  python3 scripts/audit_pimsleur_mixing.py  # flag clips with English mixed in"
+echo "  # mixed-language clips are now handled by Step 4 (lang-filter →"
+echo "  #   train/lang_exclusions.jsonl); audit_pimsleur_mixing.py was the"
+echo "  #   heuristic precursor."
 echo "  python3 scripts/audit_nasals.py           # nasal-vowel labeling spot-check"

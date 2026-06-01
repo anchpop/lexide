@@ -212,6 +212,86 @@ def vad_loss(nonblank_logit, vad_probs, vad_lens, n_frames):
     return torch.stack(losses).mean()
 
 
+def check_finite(name: str, value, *, enabled: bool) -> None:
+    """Fail fast with a useful tensor name when debugging NaNs/Infs."""
+    if not enabled or not torch.is_tensor(value):
+        return
+    if torch.isfinite(value).all():
+        return
+    finite = torch.isfinite(value)
+    finite_vals = value.detach()[finite]
+    if finite_vals.numel():
+        detail = (
+            f"finite_min={finite_vals.min().item():.6g} "
+            f"finite_max={finite_vals.max().item():.6g}"
+        )
+    else:
+        detail = "no finite values"
+    raise FloatingPointError(
+        f"Non-finite tensor: {name} shape={tuple(value.shape)} "
+        f"dtype={value.dtype} {detail}"
+    )
+
+
+def check_ctc_log_probs(name: str, log_probs: torch.Tensor, model, *, enabled: bool) -> None:
+    """Validate CTC log-probs while allowing intentionally masked vocab slots.
+
+    Special tokens are not legal CTC emissions. The model may represent those
+    impossible slots as -inf, so the useful debug invariant is: blank + real
+    phoneme slots are finite, and the per-frame distribution normalizes.
+    """
+    if not enabled:
+        return
+
+    V = log_probs.shape[-1]
+    allowed_nonfinite = torch.zeros(V, dtype=torch.bool, device=log_probs.device)
+    masked_slots = getattr(model, "_masked_slots", None)
+    if masked_slots is not None:
+        allowed_nonfinite[masked_slots.to(log_probs.device)] = True
+    allowed_nonfinite[int(model.blank_id)] = False
+
+    bad = ~torch.isfinite(log_probs)
+    unexpected = bad & ~allowed_nonfinite.view(*([1] * (log_probs.ndim - 1)), V)
+    if unexpected.any():
+        idx = unexpected.nonzero()[0].tolist()
+        raise FloatingPointError(
+            f"Non-finite real CTC slot: {name} shape={tuple(log_probs.shape)} "
+            f"dtype={log_probs.dtype} first_bad_index={idx}"
+        )
+
+    row_lse = torch.logsumexp(log_probs.float(), dim=-1)
+    check_finite(f"{name}/logsumexp", row_lse, enabled=enabled)
+    max_err = (row_lse - 0.0).abs().max()
+    if max_err > 1e-2:
+        raise FloatingPointError(
+            f"CTC log-probs not normalized: {name} "
+            f"max_abs_logsumexp={max_err.item():.6g}"
+        )
+
+
+def check_parameter_grads(model, *, enabled: bool) -> None:
+    """Fail with the parameter name when backward creates a NaN/Inf grad."""
+    if not enabled:
+        return
+    for name, param in model.named_parameters():
+        grad = param.grad
+        if grad is None or torch.isfinite(grad).all():
+            continue
+        finite = torch.isfinite(grad)
+        finite_vals = grad.detach()[finite]
+        if finite_vals.numel():
+            detail = (
+                f"finite_min={finite_vals.min().item():.6g} "
+                f"finite_max={finite_vals.max().item():.6g}"
+            )
+        else:
+            detail = "no finite grad values"
+        raise FloatingPointError(
+            f"Non-finite gradient: {name} shape={tuple(grad.shape)} "
+            f"dtype={grad.dtype} {detail}"
+        )
+
+
 def factorial_feature_ctc_loss(
     feature_log_probs: torch.Tensor,
     nonblank_logit: torch.Tensor,
@@ -326,7 +406,8 @@ def factorial_feature_ctc_loss(
 def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 blank_id, stress_active: bool, stress_weight: float,
                 vad_weight: float, invalid_mass_weight: float,
-                feature_aux_weight: float):
+                feature_aux_weight: float, grad_clip_norm: float,
+                debug_finite: bool, max_train_batches: int | None):
     model.train()
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -374,6 +455,12 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             outputs = model(audio, attention_mask=audio_mask, labels=labels,
                             label_lengths=phoneme_lens)
             ctc_loss = outputs["loss"]
+        check_finite("loss/ctc", ctc_loss, enabled=debug_finite)
+        for name, value in outputs.items():
+            if name == "log_probs":
+                check_ctc_log_probs(f"outputs/{name}", value, model, enabled=debug_finite)
+            else:
+                check_finite(f"outputs/{name}", value, enabled=debug_finite)
         torch.cuda.synchronize()
         timings["forward"] += time.perf_counter() - t_fwd
 
@@ -395,6 +482,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 flat_logits = stress_logits.view(-1, NUM_STRESS_LABELS)[valid].float()
                 flat_labels = frame_labels.view(-1)[valid]
                 stress_loss = F.cross_entropy(flat_logits, flat_labels)
+                check_finite("loss/stress", stress_loss, enabled=debug_finite)
                 with torch.no_grad():
                     preds = flat_logits.argmax(dim=-1)
                     stress_correct += (preds == flat_labels).sum().item()
@@ -410,6 +498,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             backbone = model.backbone
             n_frames = backbone._get_feat_extract_output_lengths(audio_mask.sum(-1)).to(torch.long)
             vl = vad_loss(outputs["nonblank_logit"], vad_probs_b, vad_lens_b, n_frames)
+            check_finite("loss/vad", vl, enabled=debug_finite)
             total_vad += vl.item()
             n_vad_batches += 1
 
@@ -423,6 +512,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             n_frames_im = backbone._get_feat_extract_output_lengths(audio_mask.sum(-1)).to(torch.long)
             mask_im = (torch.arange(om.shape[1], device=om.device)[None] < n_frames_im[:, None])
             im_loss = (om * mask_im).sum() / mask_im.sum().clamp(min=1)
+            check_finite("loss/off_manifold", im_loss, enabled=debug_finite)
             total_invalid += im_loss.item()
             n_invalid_batches += 1
 
@@ -443,6 +533,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 flp, outputs["nonblank_logit"], feat_targets,
                 n_frames_feat, phoneme_lens,
             )
+            check_finite("loss/feature_aux", aux_loss, enabled=debug_finite)
             total_aux += aux_loss.item()
             n_aux_batches += 1
 
@@ -451,12 +542,19 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 + vad_weight * vl
                 + invalid_mass_weight * im_loss
                 + feature_aux_weight * aux_loss)
+        check_finite("loss/total", loss, enabled=debug_finite)
 
         t_lb = time.perf_counter()
-        loss.backward()
+        if debug_finite:
+            with torch.autograd.detect_anomaly(check_nan=True):
+                loss.backward()
+        else:
+            loss.backward()
+        check_parameter_grads(model, enabled=debug_finite)
         grad_norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(), max_norm=float("inf"),
+            model.parameters(), max_norm=grad_clip_norm,
         )
+        check_finite("grad/norm", grad_norm, enabled=debug_finite)
         optimizer.step()
         optimizer.zero_grad()
         torch.cuda.synchronize()
@@ -472,8 +570,11 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         postfix = {"ctc": f"{ctc_loss.item():.3f}", "p_nb": f"{nonblank_means[-1]:.2f}"}
         if stress_active and n_stress_batches > 0:
             postfix["stress"] = f"{stress_loss.item():.3f}"
+        postfix["g"] = f"{grad_norm.item():.1f}"
         pbar.set_postfix(**postfix)
         last_end = time.perf_counter()
+        if max_train_batches is not None and n_batches >= max_train_batches:
+            break
 
     epoch_sec = time.perf_counter() - epoch_start
     peak_mem_gb = torch.cuda.max_memory_allocated() / 1e9
@@ -501,7 +602,8 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
 
 
 @torch.no_grad()
-def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool):
+def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool,
+               debug_finite: bool = False, max_eval_batches: int | None = None):
     model.eval()
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -528,6 +630,12 @@ def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool
         with autocast_ctx:
             outputs = model(audio, attention_mask=audio_mask, labels=labels,
                             label_lengths=phoneme_lens)
+        check_finite("eval/loss", outputs["loss"], enabled=debug_finite)
+        for name, value in outputs.items():
+            if name == "log_probs":
+                check_ctc_log_probs(f"eval/outputs/{name}", value, model, enabled=debug_finite)
+            else:
+                check_finite(f"eval/outputs/{name}", value, enabled=debug_finite)
 
         total_ctc += outputs["loss"].item()
         n_batches += 1
@@ -553,6 +661,8 @@ def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool
                     mask_c = flat_labels == c
                     per_class_correct[c] += (preds[mask_c] == c).sum().item()
                     per_class_total[c] += mask_c.sum().item()
+        if max_eval_batches is not None and n_batches >= max_eval_batches:
+            break
 
     per_class_acc = {
         f"val_stress_acc_class_{c}": per_class_correct[c] / per_class_total[c]
@@ -672,8 +782,18 @@ def main():
                              "mostly. With it on (default), eng pimsleur "
                              "drops to ~17k (matching the next biggest, fra). "
                              "Pass --no-source-cap-second to opt out.")
-    parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--gradient-checkpointing",
+                        action=argparse.BooleanOptionalAction,
+                        default=False)
+    parser.add_argument("--grad-clip-norm", type=float, default=float("inf"),
+                        help="Global grad clipping norm. Default preserves legacy no-clip behavior.")
+    parser.add_argument("--debug-finite", action="store_true",
+                        help="Fail fast if key losses/outputs/grad norm contain NaN/Inf.")
+    parser.add_argument("--max-train-batches", type=int, default=None,
+                        help="Diagnostic: stop each training epoch after this many batches.")
+    parser.add_argument("--max-eval-batches", type=int, default=None,
+                        help="Diagnostic: stop validation after this many batches.")
     parser.add_argument("--resume-from", type=Path, default=None,
                         help="Local path to a checkpoint dir (saved by save_to_dir) to resume "
                              "training from. Must be paired with --resume-epoch. Loads model "
@@ -755,7 +875,8 @@ def main():
         audit_paths.append(args.fleurs_audit_path)
     if not audit_paths:
         train_dir = Path(__file__).resolve().parents[1]
-        for fname in ("fleurs_asr_exclusions.jsonl", "tatoeba_asr_exclusions.jsonl"):
+        for fname in ("fleurs_asr_exclusions.jsonl", "tatoeba_asr_exclusions.jsonl",
+                      "lang_exclusions.jsonl"):
             p = train_dir / fname
             if p.exists():
                 audit_paths.append(p)
@@ -926,10 +1047,15 @@ def main():
             vad_weight=args.vad_weight,
             invalid_mass_weight=args.invalid_mass_weight if args.use_features else 0.0,
             feature_aux_weight=args.feature_aux_weight if args.use_aux_features else 0.0,
+            grad_clip_norm=args.grad_clip_norm,
+            debug_finite=args.debug_finite,
+            max_train_batches=args.max_train_batches,
         )
         val_stats = eval_epoch(
             model, val_loader, device,
             use_bf16=args.bf16, blank_id=model.blank_id, stress_active=stress_active,
+            debug_finite=args.debug_finite,
+            max_eval_batches=args.max_eval_batches,
         )
         scheduler.step()
 

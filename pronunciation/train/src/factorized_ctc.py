@@ -43,6 +43,7 @@ from transformers import Wav2Vec2Model
 
 NUM_FEATURE_VALUES = 3  # panphon ternary {-1, 0, +1} → encoded as {0, 1, 2}
 NUM_LAYER_MIXTURES = 5  # learned soft selections over encoder hidden states (regularized-heads mode)
+CTC_MASK_VALUE = -1e4  # finite "impossible" log-prob; avoids NaNs in CTC backward
 
 
 class FactorizedCTCModel(nn.Module):
@@ -404,16 +405,16 @@ class FactorizedCTCModel(nn.Module):
             l_ph, off_manifold = self._phoneme_log_probs_from_features(hidden)
         else:
             l_ph = self.phoneme_head(hidden)
-            neg_inf = torch.finfo(l_ph.dtype).min
+            mask_value = l_ph.new_tensor(CTC_MASK_VALUE)
             l_ph = l_ph.clone()
             # Mask blank + special tokens (<s>, </s>, <unk>) from the direct
             # phoneme distribution. In aux mode the feature table treats these
             # as non-phonemes, and we don't want the direct head emitting them
             # either — main CTC's blank lives on the separate nonblank_head.
             if self._masked_slots is not None:
-                l_ph[..., self._masked_slots] = neg_inf
+                l_ph[..., self._masked_slots] = mask_value
             else:
-                l_ph[..., self.blank_id] = neg_inf
+                l_ph[..., self.blank_id] = mask_value
             l_ph = F.log_softmax(l_ph, dim=-1)
 
             if self.use_aux_features:
@@ -432,9 +433,11 @@ class FactorizedCTCModel(nn.Module):
                         reduce="mean",
                     )
                     feature_scores = feature_scores.clone()
-                    feature_scores[..., self._masked_slots] = neg_inf
+                    feature_scores[..., self._masked_slots] = feature_scores.new_tensor(CTC_MASK_VALUE)
                     l_ph = l_ph + self.feature_emission_weight * feature_scores
                     l_ph = l_ph - torch.logsumexp(l_ph, dim=-1, keepdim=True)
+                    l_ph = l_ph.clone()
+                    l_ph[..., self._masked_slots] = l_ph.new_tensor(CTC_MASK_VALUE)
 
         log_p_blank = F.logsigmoid(-l_nb).unsqueeze(-1)            # (B, T, 1)
         log_p_nonblank = F.logsigmoid(l_nb).unsqueeze(-1)          # (B, T, 1)

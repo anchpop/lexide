@@ -1,0 +1,38 @@
+resources:
+  cloud: lambda
+  accelerators: A100:1
+  disk_size: 200
+  autostop:
+    idle_minutes: 30
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+  ~/data/eng: /Users/andrepopovitch/coding/lexide/pronunciation/tmp/diagnose_eng
+
+setup: |
+  cd ~/sky_workdir
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  pip install transformers datasets soundfile tqdm wandb panphon "huggingface_hub[cli]"
+
+run: |
+  export WANDB_MODE=disabled
+  bash train/train.sh \
+    --langs eng \
+    --epochs 1 \
+    --batch-size 4 \
+    --max-train-batches 20 \
+    --max-eval-batches 5 \
+    --debug-finite \
+    --vad-weight 0.05 \
+    --use-aux-features \
+    --feature-emission-weight 0.3 \
+    --feature-aux-weight 0.0 \
+    --regularized-heads \
+    --save-dir checkpoints-diagnose-unified-regularized
+
+secrets:
+  HF_TOKEN: ""
+  WANDB_API_KEY: ""
