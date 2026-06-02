@@ -24,6 +24,8 @@ import sys
 from functools import cache
 from pathlib import Path
 
+import numpy as np
+import soundfile as sf
 from tqdm import tqdm
 
 LANG_TO_ESPEAK = {
@@ -493,6 +495,27 @@ VAD_COMPUTE_BIN = REPO_ROOT / "vad_compare" / "target" / "release" / "vad_comput
 VAD_COMPUTE_MANIFEST = REPO_ROOT / "vad_compare" / "Cargo.toml"
 
 
+# Some source corpora ship empty/corrupt recordings: Google FLEURS es_419
+# has 490 clips (17.5% of the split) that are digital silence at the source,
+# paired with valid transcripts — pure label noise if they reach training,
+# and they fool speaker clustering into a fake "mega-cluster". We can't fix
+# the upstream tar, so we drop any clip whose peak amplitude is below this
+# floor. Real speech in our corpora peaks at 0.3-0.6; the silent clips peak
+# at ~1e-4, so 1e-3 (-60 dBFS) separates them with two orders of magnitude
+# of margin on each side. Source-agnostic: applies to every source/lang.
+SILENCE_PEAK_FLOOR = 1e-3
+
+
+def is_silent(path: Path) -> bool:
+    """True if the recording is effectively digital silence (empty/corrupt
+    source audio). Reads peak amplitude only — full read, since a clip can be
+    silent at the head and have content later."""
+    data, _ = sf.read(str(path), dtype="float32")
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    return len(data) == 0 or float(np.abs(data).max()) < SILENCE_PEAK_FLOOR
+
+
 def ensure_vad_compute_built() -> Path:
     """Build vad_compute if the release binary isn't there yet.
 
@@ -586,12 +609,18 @@ def main():
 
         override_applied = 0
         override_align_failures = 0
+        silent_dropped = 0
         # token -> (count, first-example sentence). Buffered per-lang so we
         # can report all unknowns and skip writing the file if any are found
         # — partial output would silently train on a vocab-mismatched corpus.
         unknown_examples: dict[str, tuple[int, str]] = {}
         entries: list[dict] = []
         for rec in tqdm(records, desc=lang):
+            # Drop empty/corrupt source recordings before doing any work —
+            # silent audio paired with a transcript is pure label noise.
+            if is_silent(lang_dir / rec["file"]):
+                silent_dropped += 1
+                continue
             # Prefer the per-record espeak voice if the manifest stored
             # one (Pimsleur does, since "por" covers both Brazilian and
             # European Portuguese, "spa" covers Castilian + Latin
@@ -662,6 +691,9 @@ def main():
                 out.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         print(f"{lang}: wrote {len(entries)} entries to {phonemes_path}")
+        if silent_dropped:
+            print(f"{lang}: dropped {silent_dropped} silent/empty recording(s) "
+                  f"(peak < {SILENCE_PEAK_FLOOR:g}, e.g. corrupt FLEURS source audio)")
         if lang in OVERRIDE_LANGS and stress_overrides:
             print(f"{lang}: applied stress override to {override_applied} records, "
                   f"{override_align_failures} alignment failures "

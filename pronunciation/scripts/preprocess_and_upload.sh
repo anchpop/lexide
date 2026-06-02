@@ -5,7 +5,8 @@
 # re-run; each step skips itself when its inputs haven't changed.
 #
 # Steps:
-#   1. Audit FLEURS audio (Whisper + phoneme-level CER) → train/fleurs_asr_exclusions.jsonl
+#   1. Audit FLEURS audio (Groq Whisper transcribe + aggressive content-overlap
+#      decision) → train/fleurs_asr_exclusions.jsonl
 #   2. Audit Tatoeba audio (same) → train/tatoeba_asr_exclusions.jsonl
 #   3. relabel-french: LLM-labeled rhythmic-group stress → data/audio/fra/stress_overrides.jsonl
 #   4. lang-filter: flag clips whose transcript isn't entirely the target
@@ -49,12 +50,17 @@ require_env GROQ_API_KEY
 require_env OPENAI_API_KEY
 require_env HF_TOKEN
 
-echo "=== Step 1/6: FLEURS audit (Groq Whisper) ==="
-python3 scripts/audit_fleurs_groq.py
+echo "=== Step 1/6: FLEURS audit (Groq Whisper, phoneme-PER) ==="
+# One source-parameterized auditor for FLEURS + Tatoeba (steps 1 & 2). Transcribes
+# each clip via Groq Whisper (language forced), phonemizes expected + transcript
+# through the same espeak pipeline as phonemes.jsonl, and writes per-clip phoneme
+# error to train/<source>_asr_exclusions.jsonl. Resumable (skips clips already in
+# the output), so rerun after a re-download to fill only new clips.
+python3 scripts/audit_asr_groq.py --source fleurs
 
 echo
-echo "=== Step 2/6: Tatoeba audit (Groq Whisper) ==="
-python3 scripts/audit_tatoeba_groq.py
+echo "=== Step 2/6: Tatoeba audit (Groq Whisper, phoneme-PER) ==="
+python3 scripts/audit_asr_groq.py --source tatoeba
 
 echo
 echo "=== Step 3/6: French rhythmic-group stress relabel ==="

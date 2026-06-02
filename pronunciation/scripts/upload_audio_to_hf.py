@@ -50,6 +50,12 @@ def main() -> None:
                         help=f"HF dataset repo (default: {DEFAULT_REPO})")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--commit-message", default="Add Tatoeba + Pimsleur clips")
+    parser.add_argument("--large", action="store_true",
+                        help="Use upload_large_folder (multi-commit, resumable). "
+                             "Required when >25k LFS files changed since the last "
+                             "upload — plain upload_folder hits HF's 25k-files-per-"
+                             "commit limit (413). No commit_message (it manages its "
+                             "own batched commits).")
     parser.add_argument("--dry-run", action="store_true",
                         help="List what would be uploaded without actually uploading.")
     args = parser.parse_args()
@@ -97,13 +103,23 @@ def main() -> None:
     api = HfApi()
     api.create_repo(args.repo, repo_type="dataset", exist_ok=True)
 
-    print(f"\nUploading {args.audio_root} → {args.repo} ...")
-    api.upload_folder(
-        folder_path=str(args.audio_root),
-        repo_id=args.repo,
-        repo_type="dataset",
-        commit_message=args.commit_message,
-    )
+    print(f"\nUploading {args.audio_root} → {args.repo} "
+          f"({'large/multi-commit' if args.large else 'single-commit'}) ...")
+    if args.large:
+        # Splits into <=25k-file commits and resumes from .cache/.huggingface
+        # state in the folder if interrupted. Manages its own commit messages.
+        api.upload_large_folder(
+            folder_path=str(args.audio_root),
+            repo_id=args.repo,
+            repo_type="dataset",
+        )
+    else:
+        api.upload_folder(
+            folder_path=str(args.audio_root),
+            repo_id=args.repo,
+            repo_type="dataset",
+            commit_message=args.commit_message,
+        )
     print("Done.")
 
 

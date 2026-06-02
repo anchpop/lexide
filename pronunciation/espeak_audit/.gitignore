@@ -8,3 +8,6 @@ out/*.phonemes_flapped.jsonl
 out/flap_samples/
 out/flap_full/
 out/_log*
+out/cluster_review/
+out/fleurs_whisper_audit.jsonl
+out/fleurs_whisper_flagged.jsonl
