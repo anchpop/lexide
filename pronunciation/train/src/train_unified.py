@@ -762,6 +762,11 @@ def main():
     parser.add_argument("--fleurs-audit-min-per", type=float, default=None)
     parser.add_argument("--fleurs-audit-min-cer", type=float, default=None)
     parser.add_argument("--fleurs-audit-min-wer", type=float, default=None)
+    parser.add_argument("--use-narrowed", action="store_true",
+                        help="Train on phonemes_narrowed.jsonl (acoustic narrowing: "
+                             "coda-nasal vowels nasalized + English flaps) where it "
+                             "exists, else fall back to phonemes.jsonl. The narrowed "
+                             "file is a full drop-in produced by espeak_audit/narrow.py.")
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints-unified"))
     parser.add_argument("--wandb-project", type=str, default="lexide-pronunciation")
     parser.add_argument("--num-workers", type=int, default=16)
@@ -862,6 +867,18 @@ def main():
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
+    # The CTC head size must match the (extension-augmented) tokenizer, or target
+    # ids land outside the head. Fresh models size to len(tokenizer) by construction;
+    # a RESUMED checkpoint keeps its own vocab_size — so if VOCAB_EXTENSIONS grew
+    # since it was trained (e.g. the narrowed nasal symbols), resuming would feed
+    # out-of-range targets. Fail early and clearly rather than deep in CTC.
+    if model.vocab_size != len(processor.tokenizer):
+        raise SystemExit(
+            f"Vocab-size mismatch: model head={model.vocab_size} but tokenizer="
+            f"{len(processor.tokenizer)}. The checkpoint predates the current "
+            f"VOCAB_EXTENSIONS (narrowed symbols?). Train fresh or expand the head; "
+            f"do not resume an old head with new target ids.")
+
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
     print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
@@ -895,13 +912,24 @@ def main():
         if args.langs is not None and lang_dir.name not in args.langs:
             continue
         phonemes_file = lang_dir / "phonemes.jsonl"
+        if args.use_narrowed and phonemes_file.exists():
+            # narrow.py writes a phonemes_narrowed.jsonl for EVERY lang (a broad
+            # copy where nothing narrowed), so under --use-narrowed it must exist
+            # for every trainable lang. Missing = setup error (narrow.py not run) —
+            # fail loud rather than silently train this lang on broad labels.
+            narrowed = lang_dir / "phonemes_narrowed.jsonl"
+            if not narrowed.exists():
+                raise SystemExit(
+                    f"--use-narrowed but {narrowed} is missing for {lang_dir.name}. "
+                    f"Run espeak_audit/narrow.py (it writes one per language).")
+            phonemes_file = narrowed
         if phonemes_file.exists():
             ds = StressDataset(phonemes_file, processor.tokenizer,
                                max_audio_sec=args.max_audio_sec,
                                min_rms=args.min_rms,
                                excluded_target_hashes=asr_exclusions.get(lang_dir.name),
                                min_whisper_logprob=args.min_whisper_logprob)
-            print(f"Loaded {lang_dir.name}: {len(ds)} samples")
+            print(f"Loaded {lang_dir.name} from {phonemes_file.name}: {len(ds)} samples")
             datasets.append(ds)
 
     if args.source_cap_second and datasets:

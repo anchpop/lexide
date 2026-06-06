@@ -19,12 +19,19 @@ import modal
 app = modal.App("espeak-audit-aligner")
 
 MODEL_ID = "anchpop/lexide-pronunciation-unified-vad-clean"
-MODEL_REVISION = "main"
+# PINNED commit, not "main": alignment depends on the exact weights, so a moving
+# ref would silently change spans/measurements (and invalidate caches without the
+# cache key knowing). Bumping vad-clean = bump this SHA = a fresh cache namespace.
+MODEL_REVISION = "2926e06f8092935f597e0018beb5d579b95b889a"
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
         "torch", "torchaudio", "transformers", "huggingface_hub", "numpy",
+        # measure-on-Modal: parselmouth (Praat DSP) + scipy (welch) for the
+        # acoustic arbiter, so per-segment measurement runs where the audio
+        # already is (parallel across containers) instead of a local bottleneck.
+        "praat-parselmouth", "scipy",
     )
     .run_commands(
         "echo 'WEIGHTS=vad_clean_align_v1' && "
@@ -34,6 +41,9 @@ image = (
         f"Wav2Vec2Model.from_pretrained('{MODEL_ID}', revision='{MODEL_REVISION}'); "
         f"hf_hub_download('{MODEL_ID}', 'factorized_heads.pt', revision='{MODEL_REVISION}')\""
     )
+    # The measurement code (phonetics.py) ships into the container so it runs
+    # identically here and locally.
+    .add_local_python_source("phonetics")
 )
 
 
@@ -113,60 +123,80 @@ class VadCleanAligner:
             prev = i
         return seq
 
-    @modal.method()
-    def force_align_batch(self, items: list) -> list:
-        """items: [{key, audio: list[float], sample_rate, target_ids: [int]}].
-
-        Returns [{key, n_frames, audio_sec, spans: [[start_s, end_s, score]],
-                  reading: [str]}], spans in target order.
-        """
+    def _align_samples(self, samples, sr: int, target_ids: list):
+        """Core CTC forced-alignment for one clip. Returns
+        (n_frames, audio_sec, spans[[start_s,end_s,score]], reading, align_error)."""
         import torch
         import torchaudio.functional as AF
 
-        results = []
+        audio_sec = len(samples) / sr
+        inputs = self.processor(samples, sampling_rate=sr, return_tensors="pt", padding=True)
+        iv = inputs.input_values.to("cuda").to(torch.float16)
+        with torch.no_grad():
+            log_probs = self._log_probs(iv)                 # (1, T, V) fp32
+        T = log_probs.shape[1]
+        sec_per_frame = audio_sec / T
+
+        target_ids = [int(x) for x in target_ids]
+        spans_out = []
+        align_error = None
+        # CTC forced alignment requires T >= len(target) + #adjacent-repeats.
+        # Long espeak targets on short/fast clips can violate this; skip those.
+        n_repeats = sum(1 for a, b in zip(target_ids, target_ids[1:]) if a == b)
+        if target_ids and (len(target_ids) + n_repeats) <= T:
+            try:
+                targets = torch.tensor([target_ids], dtype=torch.long)
+                lp = log_probs.cpu().contiguous()
+                aligned, scores = AF.forced_align(lp, targets, blank=self.blank_id)
+                spans = AF.merge_tokens(aligned[0], scores[0], blank=self.blank_id)
+                if len(spans) != len(target_ids):
+                    raise RuntimeError(f"span count {len(spans)} != target {len(target_ids)}")
+                for sp in spans:
+                    spans_out.append([float(sp.start * sec_per_frame),
+                                      float(sp.end * sec_per_frame), float(sp.score)])
+            except Exception as e:  # noqa: BLE001
+                align_error = f"{type(e).__name__}: {e}"
+        elif target_ids:
+            align_error = f"target_too_long: L={len(target_ids)}+rep{n_repeats} > T={T}"
+        return int(T), float(audio_sec), spans_out, self._reading(log_probs), align_error
+
+    @modal.method()
+    def force_align_batch(self, items: list) -> list:
+        """items: [{key, audio: list[float], sample_rate, target_ids: [int]}].
+        Returns [{key, n_frames, audio_sec, spans, reading, align_error}]."""
+        out = []
         for it in items:
-            samples = it["audio"]
             sr = int(it.get("sample_rate", 16000))
-            audio_sec = len(samples) / sr
-            inputs = self.processor(samples, sampling_rate=sr, return_tensors="pt", padding=True)
-            iv = inputs.input_values.to("cuda").to(torch.float16)
-            with torch.no_grad():
-                log_probs = self._log_probs(iv)             # (1, T, V) fp32
-            T = log_probs.shape[1]
-            sec_per_frame = audio_sec / T
+            T, audio_sec, spans, reading, err = self._align_samples(
+                it["audio"], sr, it["target_ids"])
+            out.append({"key": it["key"], "n_frames": T, "audio_sec": audio_sec,
+                        "spans": spans, "reading": reading, "align_error": err})
+        return out
 
-            target_ids = [int(x) for x in it["target_ids"]]
-            spans_out = []
-            align_error = None
-            # CTC forced alignment requires T >= len(target) + #adjacent-repeats.
-            # Long espeak targets on short/fast clips (some Pimsleur items) can
-            # violate this; skip those gracefully instead of aborting the batch.
-            n_repeats = sum(1 for a, b in zip(target_ids, target_ids[1:]) if a == b)
-            if target_ids and (len(target_ids) + n_repeats) <= T:
-                try:
-                    targets = torch.tensor([target_ids], dtype=torch.long)
-                    lp = log_probs.cpu().contiguous()
-                    aligned, scores = AF.forced_align(lp, targets, blank=self.blank_id)
-                    spans = AF.merge_tokens(aligned[0], scores[0], blank=self.blank_id)
-                    if len(spans) != len(target_ids):
-                        raise RuntimeError(f"span count {len(spans)} != target {len(target_ids)}")
-                    for sp in spans:
-                        spans_out.append([
-                            float(sp.start * sec_per_frame),
-                            float(sp.end * sec_per_frame),
-                            float(sp.score),
-                        ])
-                except Exception as e:  # noqa: BLE001
-                    align_error = f"{type(e).__name__}: {e}"
-            elif target_ids:
-                align_error = f"target_too_long: L={len(target_ids)}+rep{n_repeats} > T={T}"
+    @modal.method()
+    def align_and_measure_batch(self, items: list) -> list:
+        """Align AND parselmouth-measure each clip on the container — the
+        at-scale path. Audio arrives as base64 float32 bytes (compact); only the
+        tiny per-segment measurements come back.
 
-            results.append({
-                "key": it["key"],
-                "n_frames": int(T),
-                "audio_sec": float(audio_sec),
-                "spans": spans_out,
-                "reading": self._reading(log_probs),
-                "align_error": align_error,
-            })
-        return results
+        items: [{key, audio_b64, sample_rate, target_ids, phonemes, stress,
+                 word_of, ok, keep}].
+        Returns [{key, n_frames, audio_sec, reading, align_error, segments}].
+        """
+        import base64
+        import numpy as np
+        import phonetics
+
+        out = []
+        for it in items:
+            sr = int(it.get("sample_rate", 16000))
+            samples = np.frombuffer(base64.b64decode(it["audio_b64"]), dtype="<f4").astype(np.float64)
+            T, audio_sec, spans, reading, err = self._align_samples(
+                samples.tolist(), sr, it["target_ids"])
+            segments = phonetics.measure_segments(
+                samples, sr, it["phonemes"], it["stress"], it["word_of"],
+                it["ok"], it["keep"], spans)
+            out.append({"key": it["key"], "n_frames": T, "audio_sec": audio_sec,
+                        "reading": reading, "align_error": err, "segments": segments,
+                        "model_revision": MODEL_REVISION})  # for the caller's stale-deploy guard
+        return out

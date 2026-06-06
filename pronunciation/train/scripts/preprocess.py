@@ -202,6 +202,16 @@ VOCAB_EXTENSIONS: set[str] = {
     # Russian (/t/ vs /tʲ/), so these must be learnable, not collapsed.
     "ɫʲ",
     "ʃʲ",
+    # Stage-3 coarticulatory-nasalization narrowing (espeak_audit/narrow.py): an
+    # oral vowel before a CODA nasal surfaces nasalized in every non-French
+    # language (population-confirmed in the espeak audit — A1-P0 depressed vs the
+    # speaker's oral vowels in deu/eng/ita/spa/rus/por). The narrowed training
+    # labels (phonemes_narrowed.jsonl) carry these; espeak/preprocess itself
+    # never emits them (the broad phonemes.jsonl stays as-is). Decomposed form
+    # (base [+ ː length] + U+0303), matching the tokenizer's existing nasal
+    # vowels (ã ɔ̃ ɛ̃ …). panphon featurizes all cleanly. Freq 40–49k in-corpus.
+    "ə̃", "ʌ̃", "æ̃", "ɨ̃", "ɯ̃", "ɒ̃", "ø̃",
+    "aː̃", "eː̃", "iː̃", "oː̃", "uː̃", "yː̃", "øː̃", "ɛː̃", "ɔː̃", "ɑː̃",
 }
 
 

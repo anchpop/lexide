@@ -30,22 +30,22 @@ os.environ.setdefault("ESPEAK_NG_DATA_PATH", str(FORK / "build"))
 import soundfile as sf  # noqa: E402
 import preprocess  # noqa: E402  (phonemize); fork via env vars above
 import phonetics  # noqa: E402
+from modal_aligner import MODEL_ID, MODEL_REVISION  # noqa: E402  (single pinned-commit source)
 
 # Canonical espeak voice per dataset lang (matches training labels).
 LANG_TO_VOICE = dict(preprocess.LANG_TO_ESPEAK)
 
-VOCAB_PATH = Path(
-    os.path.expanduser(
-        "~/.cache/huggingface/hub/models--anchpop--lexide-pronunciation-unified-vad-clean"
-        "/snapshots/2926e06f8092935f597e0018beb5d579b95b889a/vocab.json"
-    )
-)
 MASKED_IDS = {0, 1, 2, 3}
 OUT = REPO / "espeak_audit" / "out"
 
 
 def load_vocab() -> dict:
-    return json.loads(VOCAB_PATH.read_text())
+    """vocab.json from the SAME pinned model commit the aligner uses — so target
+    ids can't drift from the weights when MODEL_REVISION is bumped (no hard-coded
+    snapshot path)."""
+    from huggingface_hub import hf_hub_download
+    return json.loads(Path(hf_hub_download(MODEL_ID, "vocab.json",
+                                           revision=MODEL_REVISION)).read_text())
 
 
 def select_clips(lang: str, voice: str, source: str, n: int,
@@ -137,74 +137,17 @@ def align_on_modal(preps: list[dict], batch_size: int = 8) -> dict:
 
 
 def measure_clip(prep: dict, aligned: dict) -> list[dict]:
-    """parselmouth-measure each espeak phone using the aligned spans."""
-    snd = phonetics.load_sound(prep["wav_path"])
-    f0 = phonetics.clip_f0_stats(snd)
-    ceiling = phonetics.formant_ceiling_for(f0["f0_median"])
-    spans = aligned["spans"]  # in keep order: [start_s, end_s, score]
-    # Alignment may have been skipped (target longer than frames, etc.): then
-    # spans is empty / mismatched. Measure nothing rather than misattribute.
-    if len(spans) != len(prep["keep"]):
-        return [{
-            "key": prep["key"], "sentence": prep["sentence"], "idx": j,
-            "symbol": sym, "stress": prep["stress"][j], "word_idx": prep["word_of"][j],
-            "oov": not prep["ok"][j], "start": None, "end": None, "dur": None,
-            "align_score": None, "align_skipped": True,
-        } for j, sym in enumerate(prep["phonemes"])]
-    span_by_j = {j: spans[k] for k, j in enumerate(prep["keep"])}
+    """parselmouth-measure each espeak phone using the aligned spans.
 
-    # CTC forced-alignment spans are "peaky" (often ~1 frame). For acoustic
-    # MEASUREMENT we dilate each span into the surrounding blank frames up to
-    # the midpoint of the gap to each neighbour (max 30 ms), giving fuller phone
-    # coverage. The RAW span (dur/score) is kept untouched as the independent
-    # over-specification signal — dilating that would mask deleted phones.
-    MAXD = 0.030
-    win_by_j = {}
-    for k, (s, e, _sc) in enumerate(spans):
-        prev_e = spans[k - 1][1] if k > 0 else s
-        next_s = spans[k + 1][0] if k + 1 < len(spans) else e
-        ws = s - min(MAXD, max(0.0, (s - prev_e) / 2.0))
-        we = e + min(MAXD, max(0.0, (next_s - e) / 2.0))
-        win_by_j[prep["keep"][k]] = (ws, we)
-
-    rows = []
-    for j, sym in enumerate(prep["phonemes"]):
-        base = {
-            "key": prep["key"],
-            "sentence": prep["sentence"],
-            "idx": j,
-            "symbol": sym,
-            "stress": prep["stress"][j],
-            "word_idx": prep["word_of"][j],
-            "oov": not prep["ok"][j],
-            "f0_median_clip": f0["f0_median"],
-            "ceiling": ceiling,
-        }
-        if not prep["ok"][j] or j not in span_by_j:
-            base.update({"start": None, "end": None, "dur": None, "align_score": None})
-            rows.append(base)
-            continue
-        s, e, score = span_by_j[j]
-        ws, we = win_by_j[j]
-        base.update({"start": s, "end": e, "dur": e - s, "align_score": score,
-                     "win_start": ws, "win_end": we})
-        try:
-            if phonetics.is_vowel(sym):
-                # Vowels: dilated window -> more steady-state frames.
-                base["kind"] = "vowel"
-                base.update(phonetics.measure_vowel(snd, ws, we, ceiling))
-            elif phonetics.is_stop(sym):
-                # Stops: RAW span (the CTC core), NOT the dilated window — a
-                # window bleeding into flanking vowels would spuriously inflate
-                # closure voicing for intervocalic stops. (Verified material.)
-                base["kind"] = "stop"
-                base.update(phonetics.measure_stop(snd, s, e))
-            else:
-                base["kind"] = "other"
-                base["intensity_db"] = phonetics._mean_intensity(snd, s, e)
-        except Exception as ex:  # measurement failure shouldn't kill the run
-            base["measure_error"] = str(ex)
-        rows.append(base)
+    Delegates the span→measurement logic to the shared phonetics.measure_segments
+    (same code the at-scale Modal path runs) and only attaches this clip's identity
+    (key/sentence). One implementation, no drift."""
+    rows = phonetics.measure_segments(
+        prep["audio"], prep["sample_rate"], prep["phonemes"], prep["stress"],
+        prep["word_of"], prep["ok"], prep["keep"], aligned["spans"])
+    for r in rows:
+        r["key"] = prep["key"]
+        r["sentence"] = prep["sentence"]
     return rows
 
 

@@ -39,6 +39,75 @@ def load_sound(path: str) -> parselmouth.Sound:
     return snd
 
 
+def sound_from_array(values, sr) -> parselmouth.Sound:
+    """Build a Sound from an in-memory mono sample array (no file read).
+
+    Used by the at-scale measure-on-Modal path, where the audio is already in
+    hand from the alignment call — avoids a disk round-trip per clip."""
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.ndim > 1:
+        arr = arr.mean(axis=0 if arr.shape[0] < arr.shape[1] else 1)
+    return parselmouth.Sound(arr, sampling_frequency=float(sr))
+
+
+def measure_segments(audio, sr, phonemes, stress, word_of, ok, keep, spans) -> list[dict]:
+    """Acoustic measurement of every espeak phone from an in-memory clip + its
+    aligned spans. Pure (no I/O, no clip-identity fields) so it runs identically
+    locally or on a Modal container. Mirrors run_audit.measure_clip exactly;
+    `spans` are [start_s, end_s, score] in `keep` order.
+    """
+    snd = sound_from_array(audio, sr)
+    f0 = clip_f0_stats(snd)
+    ceiling = formant_ceiling_for(f0["f0_median"])
+
+    if len(spans) != len(keep):
+        # Alignment skipped / mismatched: measure nothing, don't misattribute.
+        return [{
+            "idx": j, "symbol": sym, "stress": stress[j], "word_idx": word_of[j],
+            "oov": not ok[j], "start": None, "end": None, "dur": None,
+            "align_score": None, "align_skipped": True,
+        } for j, sym in enumerate(phonemes)]
+    span_by_j = {j: spans[k] for k, j in enumerate(keep)}
+
+    MAXD = 0.030  # dilate peaky CTC spans into surrounding blanks for measurement
+    win_by_j = {}
+    for k, (s, e, _sc) in enumerate(spans):
+        prev_e = spans[k - 1][1] if k > 0 else s
+        next_s = spans[k + 1][0] if k + 1 < len(spans) else e
+        ws = s - min(MAXD, max(0.0, (s - prev_e) / 2.0))
+        we = e + min(MAXD, max(0.0, (next_s - e) / 2.0))
+        win_by_j[keep[k]] = (ws, we)
+
+    rows = []
+    for j, sym in enumerate(phonemes):
+        base = {
+            "idx": j, "symbol": sym, "stress": stress[j], "word_idx": word_of[j],
+            "oov": not ok[j], "f0_median_clip": f0["f0_median"], "ceiling": ceiling,
+        }
+        if not ok[j] or j not in span_by_j:
+            base.update({"start": None, "end": None, "dur": None, "align_score": None})
+            rows.append(base)
+            continue
+        s, e, score = span_by_j[j]
+        ws, we = win_by_j[j]
+        base.update({"start": s, "end": e, "dur": e - s, "align_score": score,
+                     "win_start": ws, "win_end": we})
+        try:
+            if is_vowel(sym):
+                base["kind"] = "vowel"
+                base.update(measure_vowel(snd, ws, we, ceiling))
+            elif is_stop(sym):
+                base["kind"] = "stop"      # RAW span, not dilated (see run_audit)
+                base.update(measure_stop(snd, s, e))
+            else:
+                base["kind"] = "other"
+                base["intensity_db"] = _mean_intensity(snd, s, e)
+        except Exception as ex:  # measurement failure shouldn't kill the clip
+            base["measure_error"] = str(ex)
+        rows.append(base)
+    return rows
+
+
 def clip_f0_stats(snd: parselmouth.Sound) -> dict:
     """Median/min/max F0 over the whole clip (voiced frames only).
 
