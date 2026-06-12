@@ -96,15 +96,54 @@ These are hard-won and override generic ML instincts. Violating them has burned 
    - `train/lang-filter/` (Rust + tysm + gpt-5.4-nano): flag clips whose transcript
      isn't entirely the target language → `train/lang_exclusions.jsonl`.
    - `train/relabel-french/`: LLM rhythmic-group stress → `fra/stress_overrides.jsonl`.
-4. **Narrow** (`espeak_audit/`, optional): `measure_corpus.py` force-aligns + measures
-   every clip on Modal (pinned model) → cache; `narrow.py` rewrites tokens where the
-   acoustics confidently disagree → `phonemes_narrowed.jsonl`. Train with
-   `--use-narrowed`. (See `espeak_audit/` docstrings; nasal vs flap detector choices
-   are an active question.)
+4. **Narrow** (`espeak_audit/`, optional): `measure_corpus.py` force-aligns each clip
+   on Modal (pinned model) and **measures locally** (parselmouth) → cache. (Modal does
+   ONLY alignment — the GPU thing that can't run locally; all DSP is local, so any
+   measurement/param change re-runs with zero Modal. Caches incrementally per
+   super-chunk.) `narrow.py` then rewrites tokens where the acoustics justify it →
+   `phonemes_narrowed.jsonl` (contextual nasal) or `phonemes_narrowed_acoustic.jsonl`
+   (`--mode acoustic`, per-token harmonic-A1–P0 within-speaker gating). Train with
+   `--use-narrowed [--narrowed-name <file>]`. (See `espeak_audit/` docstrings;
+   contextual-vs-acoustic nasal is an open A/B, decided by the minimal-pair eval.)
 5. **Train** (`train/src/train_unified.py`) on SkyPilot/Modal GPUs; push to HF.
 6. **Eval**: the isolated minimal-pair set (gold standard) + held-out clips.
 
 `scripts/preprocess_and_upload.sh` chains the audit → filter → preprocess → upload steps.
+
+## Speaker identity (every clip has one — the FIELD depends on source)
+
+Any per-token acoustic analysis that normalizes within-speaker (e.g. the acoustic
+nasalization detector: a vowel is nasal only if its A1–P0 is depressed vs *that
+speaker's own* oral vowels of the same category) needs a speaker id per clip.
+**Every clip has one — but do not assume which field carries it, and never fall
+back to per-clip "no speaker" without checking all of them** (a single short clip
+rarely has ≥3 same-vowel oral tokens, so per-clip baselines abstain on ~95% of
+tokens — a silent coverage hole that *looks* like the analysis working):
+
+- **Tatoeba** — `voice` is the **contributor username** (e.g. `CK`,
+  `MisterTrouser`); a real, ground-truth speaker id. Prolific contributors have
+  hundreds of clips → strong baselines. No clustering needed.
+- **TTS** — `voice` is the synthetic voice name (one speaker per language).
+- **FLEURS / Pimsleur** — `voice` is **null**; instead they carry
+  `speaker_cluster`, a *pseudo-speaker* label from the embedding pipeline below.
+
+So resolve the speaker as **`speaker_cluster or voice`** (cluster first — FLEURS/
+Pimsleur; else `voice` — Tatoeba/TTS), and only treat a clip as speaker-less if
+*both* are absent.
+
+**Speaker-embedding → clustering pipeline** (`train/speaker-embed/`, run in the
+preprocess phase; populates `speaker_cluster` for the `voice=null` sources):
+- `modal_embed.py` — ECAPA-TDNN (`speechbrain/spkrec-ecapa-voxceleb`) 192-d
+  speaker-verification embeddings on Modal (T4). `embed.py` orchestrates with a
+  per-clip cache (key = `sha256("<lang>/<file>")`), so re-runs only embed new clips.
+- `cluster.py` — agglomerative clustering of those embeddings into
+  `speaker_cluster`, two ear-validated regimes: **FLEURS** per-language @ cosine
+  **0.15** (10 s clips group tightly); **Pimsleur** per-**course** @ cosine
+  **0.45** (1–3 s clips need a looser bar; course-scoping stops cross-recording
+  merges). Deliberately *over*-segmented: merging two speakers corrupts
+  within-speaker normalization, splitting one is harmless. Clusters only clips in
+  `phonemes.jsonl` (so preprocess's silence-drop excludes degenerate silent clips).
+- `cluster_review.py` — sanity/gender-consistency review of the clusters.
 
 ## Repo layout
 

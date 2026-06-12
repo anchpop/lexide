@@ -14,7 +14,10 @@
 #      then mislabels silently) → train/lang_exclusions.jsonl (training excludes)
 #   5. preprocess.py: per-lang phonemes.jsonl + vad.jsonl from the manifest
 #      (phonemize via espeak-ng; framewise VAD via vad_compute Rust binary)
-#   6. upload_audio_to_hf.py: push data/audio/ to anchpop/lexide-pronunciation-audio
+#   6. narrow: measure_corpus.py (Modal align, cache-aware → no-op when phonemes
+#      unchanged) + narrow.py (acoustic nasal + English flap → phonemes_narrowed.jsonl,
+#      the file training reads). Harmonic A1-P0 is recomputed locally, not cached.
+#   7. upload_audio_to_hf.py: push data/audio/ to anchpop/lexide-pronunciation-audio
 #
 # This script does NOT acquire new data. If you have new Pimsleur lessons
 # or Tatoeba records to ingest, run the appropriate downloader first:
@@ -26,6 +29,8 @@
 #   GROQ_API_KEY    — Whisper audits (Groq Cloud)
 #   OPENAI_API_KEY  — gpt-5.4-nano calls in relabel-french + lang-filter
 #   HF_TOKEN        — HuggingFace dataset upload
+# Also needs Modal auth (~/.modal.toml) for step 6's alignment — cached, so it's
+# a no-op (no GPU spend) when no phonemes changed since the last run.
 #
 # Run from any directory; the script cd's into pronunciation/.
 
@@ -50,7 +55,7 @@ require_env GROQ_API_KEY
 require_env OPENAI_API_KEY
 require_env HF_TOKEN
 
-echo "=== Step 1/6: FLEURS audit (Groq Whisper, phoneme-PER) ==="
+echo "=== Step 1/7: FLEURS audit (Groq Whisper, phoneme-PER) ==="
 # One source-parameterized auditor for FLEURS + Tatoeba (steps 1 & 2). Transcribes
 # each clip via Groq Whisper (language forced), phonemizes expected + transcript
 # through the same espeak pipeline as phonemes.jsonl, and writes per-clip phoneme
@@ -59,11 +64,11 @@ echo "=== Step 1/6: FLEURS audit (Groq Whisper, phoneme-PER) ==="
 python3 scripts/audit_asr_groq.py --source fleurs
 
 echo
-echo "=== Step 2/6: Tatoeba audit (Groq Whisper, phoneme-PER) ==="
+echo "=== Step 2/7: Tatoeba audit (Groq Whisper, phoneme-PER) ==="
 python3 scripts/audit_asr_groq.py --source tatoeba
 
 echo
-echo "=== Step 3/6: French rhythmic-group stress relabel ==="
+echo "=== Step 3/7: French rhythmic-group stress relabel ==="
 # espeak emits per-word stress for French, which is systematically wrong:
 # French stress falls on the final syllable of each rhythmic group, not on
 # every word. tysm's prompt-aware caching makes re-runs free if no rows
@@ -73,7 +78,7 @@ echo "=== Step 3/6: French rhythmic-group stress relabel ==="
 (cd train/relabel-french && cargo run --release --quiet)
 
 echo
-echo "=== Step 4/6: Language-contamination filter (gpt-5.4-nano) ==="
+echo "=== Step 4/7: Language-contamination filter (gpt-5.4-nano) ==="
 # Pimsleur courses teach other languages, so some clips' transcripts are
 # foreign / mixed-language; espeak then phonemizes the foreign text as the
 # target language → silently wrong labels. Flag clips whose transcript isn't
@@ -85,15 +90,31 @@ echo "=== Step 4/6: Language-contamination filter (gpt-5.4-nano) ==="
 (cd train/lang-filter && mkdir -p .cache && cargo run --release --quiet)
 
 echo
-echo "=== Step 5/6: Phonemize + recompute VAD ==="
+echo "=== Step 5/7: Phonemize + recompute VAD ==="
 # preprocess.py rebuilds vad.jsonl via vad_compute as it goes, keeping VAD
 # coverage in lockstep with phonemes. --skip-vad if you regenerated phonemes
 # for a label-only fix that didn't change which audio files are referenced.
 python3 train/scripts/preprocess.py
 
 echo
-echo "=== Step 6/6: Upload to HF dataset ==="
-python3 scripts/upload_audio_to_hf.py
+echo "=== Step 6/7: Narrow (acoustic nasal + English flap) ==="
+# Alignment boundaries come from Modal; measure_corpus is cache-aware (keyed by
+# the exact phonemes), so this is a no-op with no GPU spend unless step 5 changed
+# some clip's phonemes — those clips re-align, the rest are served from cache.
+# Redeploy first so the container code matches the pinned revision measure_corpus
+# asserts. Then narrow.py rewrites tokens the acoustics justify → the canonical
+# phonemes_narrowed.jsonl that train.sh (--use-narrowed) reads. narrow recomputes
+# harmonic A1-P0 locally (no cache) — a few min of DSP, no Modal.
+(cd espeak_audit && python3 -m modal deploy modal_aligner.py >/dev/null)
+python3 espeak_audit/measure_corpus.py
+python3 espeak_audit/narrow.py
+
+echo
+echo "=== Step 7/7: Upload to HF dataset ==="
+# --large = upload_large_folder: splits into ≤25k-file commits (HF's per-commit
+# cap) and resumes from .cache/.huggingface if interrupted. The plain single-commit
+# path 413s on this dataset (hundreds of thousands of files > 25k/commit).
+python3 scripts/upload_audio_to_hf.py --large
 
 echo
 echo "=== DONE ==="

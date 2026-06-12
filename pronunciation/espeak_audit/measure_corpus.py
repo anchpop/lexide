@@ -111,12 +111,38 @@ def prep(lang, file, phonemes, stress, vocab):
     }
 
 
+def _measure_and_cache(task):
+    """LOCAL measurement worker (multiprocessed). Reads the clip's audio from disk,
+    runs the SAME pure phonetics.measure_segments used to run on Modal, and writes
+    the cache JSON. Modal did only the alignment (spans); all DSP is here, so it's
+    free to re-run with changed parameters and never touches the GPU."""
+    import soundfile as sf
+    import phonetics
+    (lang, file, phonemes, stress, ok, keep, pk,
+     spans, n_frames, audio_sec, reading, align_error) = task
+    audio, sr = sf.read(str(AUDIO / lang / file))
+    if getattr(audio, "ndim", 1) > 1:
+        audio = audio.mean(axis=1)
+    segments = phonetics.measure_segments(
+        audio, int(sr), phonemes, stress, [-1] * len(phonemes), ok, keep, spans)
+    cp = cache_path(lang, file, pk)
+    cp.parent.mkdir(parents=True, exist_ok=True)
+    cp.write_text(json.dumps({
+        "model": MODEL, "lang": lang, "file": file,
+        "n_frames": n_frames, "audio_sec": audio_sec,
+        "reading": reading, "align_error": align_error,
+        "segments": segments,
+    }, ensure_ascii=False))
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--langs", nargs="+", default=sorted(NAS_LANGS))
     ap.add_argument("--limit", type=int, default=None, help="per-lang cap (testing)")
-    ap.add_argument("--batch", type=int, default=8, help="clips per Modal call")
-    ap.add_argument("--concurrency", type=int, default=24, help="parallel Modal calls (→ containers)")
+    ap.add_argument("--batch", type=int, default=8, help="clips per Modal align call")
+    ap.add_argument("--concurrency", type=int, default=24, help="parallel Modal align calls (→ containers)")
+    ap.add_argument("--measure-workers", type=int, default=8, help="local parselmouth processes")
     args = ap.parse_args()
 
     vocab = RA.load_vocab()
@@ -139,48 +165,72 @@ def main():
         return
 
     import modal
+    from multiprocessing import Pool
     Aligner = modal.Cls.from_name("espeak-audit-aligner", "VadCleanAligner")
     aligner = Aligner()
 
-    def do_batch(chunk):
+    def align_batch(chunk):
+        """Modal align-only → list of measure-tasks (spans + the locals the
+        measurement needs). No DSP here; the GPU does only forced-align."""
         items = [prep(lang, file, ph, stress, vocab) for (lang, file, ph, stress, pk) in chunk]
-        res = aligner.align_and_measure_batch.remote(items)
+        send = [{"key": it["key"], "audio_b64": it["audio_b64"],
+                 "sample_rate": it["sample_rate"], "target_ids": it["target_ids"]} for it in items]
+        # Plain .remote() in threads is the proven path (it cached 54k clips this
+        # way). NOT .spawn() — Modal's client deadlocks on concurrent .spawn() from
+        # many threads. Resilience comes from the per-super-chunk incremental cache
+        # below (a wedged tail batch loses only the current chunk; re-run resumes),
+        # with a couple of retries for transient RPC errors.
+        res = None
+        for attempt in range(3):
+            try:
+                res = aligner.align_batch_b64.remote(send)
+                break
+            except Exception as e:  # noqa: BLE001 (transient gRPC/network)
+                print(f"  [align retry {attempt + 1}/3] {type(e).__name__}: {e}", flush=True)
+                time.sleep(3)
+        if res is None:
+            print(f"  [align gave up] deferring {len(chunk)} clips to next run", flush=True)
+            return []
         by_key = {r["key"]: r for r in res}
-        # Guard against a stale deploy: the container echoes the revision its
-        # weights came from; if it differs from the pinned one this cache namespace
-        # claims, the cache would be mislabeled. Fail rather than poison it.
+        # Stale-deploy guard: container echoes its weights' revision; if it differs
+        # from the pinned one this cache namespace claims, fail rather than poison.
         for r in res:
             rev = r.get("model_revision")
             if rev is not None and rev != MODEL_REVISION:
                 raise SystemExit(f"deployed aligner is revision {rev} but cache namespace "
                                  f"is {MODEL_REVISION} — redeploy modal_aligner.py.")
-        wrote = 0
-        for (lang, file, ph, stress, pk) in chunk:
+        tasks = []
+        for (lang, file, ph, stress, pk), it in zip(chunk, items):
             r = by_key.get(f"{lang}/{file}")
             if r is None:
                 continue
-            cp = cache_path(lang, file, pk)
-            cp.parent.mkdir(parents=True, exist_ok=True)
-            cp.write_text(json.dumps({
-                "model": MODEL, "lang": lang, "file": file,
-                "n_frames": r["n_frames"], "audio_sec": r["audio_sec"],
-                "reading": r["reading"], "align_error": r["align_error"],
-                "segments": r["segments"],
-            }, ensure_ascii=False))
-            wrote += 1
-        return wrote
+            tasks.append((lang, file, ph, stress, it["ok"], it["keep"], pk,
+                          r["spans"], r["n_frames"], r["audio_sec"], r["reading"], r["align_error"]))
+        return tasks
 
-    batches = [todo[i:i + args.batch] for i in range(0, len(todo), args.batch)]
+    # Work in SUPER-CHUNKS: align a chunk on Modal (threads), then measure+cache it
+    # locally (Pool), then the next. This (a) caches incrementally so a crash/hang
+    # never loses prior work (re-runs skip cached), (b) bounds memory, and (c) keeps
+    # the Modal gRPC client and the multiprocessing Pool from ever being live at the
+    # same time (on macOS spawn that combo wedges the async client → "Deadline
+    # exceeded"). Within a chunk: ThreadPool fully closes before the Pool opens.
+    SUPER = max(400, args.concurrency * args.batch * 4)
+    super_chunks = [todo[i:i + SUPER] for i in range(0, len(todo), SUPER)]
     t0, done = time.time(), 0
-    with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-        futs = [ex.submit(do_batch, b) for b in batches]
-        for fut in as_completed(futs):
-            done += fut.result()
-            if done % (args.batch * 20) < args.batch or done >= len(todo):
-                rate = done / (time.time() - t0)
-                eta = (len(todo) - done) / rate / 60 if rate else 0
-                print(f"  measured {done}/{len(todo)} ({rate:.1f}/s, ETA {eta:.0f} min)", flush=True)
-    print(f"done: {done} clips measured + cached in {time.time()-t0:.0f}s → {CACHE}")
+    for si, sc in enumerate(super_chunks):
+        batches = [sc[i:i + args.batch] for i in range(0, len(sc), args.batch)]
+        tasks = []
+        with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+            for fut in as_completed([ex.submit(align_batch, b) for b in batches]):
+                tasks.extend(fut.result())
+        with Pool(args.measure_workers) as pool:
+            for _ in pool.imap_unordered(_measure_and_cache, tasks, chunksize=8):
+                done += 1
+        rate = done / (time.time() - t0)
+        eta = (len(todo) - done) / rate / 60 if rate else 0
+        print(f"  super-chunk {si+1}/{len(super_chunks)}: cached {done}/{len(todo)} "
+              f"({rate:.1f}/s, ETA {eta:.0f} min)", flush=True)
+    print(f"done: {done} clips aligned(Modal)+measured(local)+cached in {time.time()-t0:.0f}s → {CACHE}")
 
 
 if __name__ == "__main__":

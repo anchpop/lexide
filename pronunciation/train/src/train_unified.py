@@ -763,10 +763,13 @@ def main():
     parser.add_argument("--fleurs-audit-min-cer", type=float, default=None)
     parser.add_argument("--fleurs-audit-min-wer", type=float, default=None)
     parser.add_argument("--use-narrowed", action="store_true",
-                        help="Train on phonemes_narrowed.jsonl (acoustic narrowing: "
-                             "coda-nasal vowels nasalized + English flaps) where it "
-                             "exists, else fall back to phonemes.jsonl. The narrowed "
-                             "file is a full drop-in produced by espeak_audit/narrow.py.")
+                        help="Train on the narrowed phonemes file (coda-nasal vowels "
+                             "nasalized + English flaps) where it exists, else fall back "
+                             "to phonemes.jsonl. A full drop-in from espeak_audit/narrow.py.")
+    parser.add_argument("--narrowed-name", default="phonemes_narrowed.jsonl",
+                        help="Filename of the narrowed file under each lang dir "
+                             "(for A/B-ing narrowing variants, e.g. "
+                             "phonemes_narrowed_acoustic.jsonl).")
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints-unified"))
     parser.add_argument("--wandb-project", type=str, default="lexide-pronunciation")
     parser.add_argument("--num-workers", type=int, default=16)
@@ -917,7 +920,7 @@ def main():
             # copy where nothing narrowed), so under --use-narrowed it must exist
             # for every trainable lang. Missing = setup error (narrow.py not run) —
             # fail loud rather than silently train this lang on broad labels.
-            narrowed = lang_dir / "phonemes_narrowed.jsonl"
+            narrowed = lang_dir / args.narrowed_name
             if not narrowed.exists():
                 raise SystemExit(
                     f"--use-narrowed but {narrowed} is missing for {lang_dir.name}. "

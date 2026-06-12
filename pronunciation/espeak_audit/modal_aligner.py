@@ -174,6 +174,32 @@ class VadCleanAligner:
         return out
 
     @modal.method()
+    def align_batch_b64(self, items: list) -> list:
+        """ALIGN-ONLY at scale (no parselmouth). Audio arrives as compact base64
+        float32; only the tiny alignment spans come back. Measurement is done
+        LOCALLY by the caller — the GPU container does the one thing it must (CTC
+        forced-align) and never burns GPU time on CPU DSP. This is the cheap path:
+        boundaries cached once, then any measurement/param change re-runs locally
+        with zero Modal involvement.
+
+        items: [{key, audio_b64, sample_rate, target_ids}].
+        Returns [{key, n_frames, audio_sec, spans, reading, align_error}].
+        """
+        import base64
+        import numpy as np
+
+        out = []
+        for it in items:
+            sr = int(it.get("sample_rate", 16000))
+            samples = np.frombuffer(base64.b64decode(it["audio_b64"]), dtype="<f4").astype(np.float64)
+            T, audio_sec, spans, reading, err = self._align_samples(
+                samples.tolist(), sr, it["target_ids"])
+            out.append({"key": it["key"], "n_frames": T, "audio_sec": audio_sec,
+                        "spans": spans, "reading": reading, "align_error": err,
+                        "model_revision": MODEL_REVISION})  # caller's stale-deploy guard
+        return out
+
+    @modal.method()
     def align_and_measure_batch(self, items: list) -> list:
         """Align AND parselmouth-measure each clip on the container — the
         at-scale path. Audio arrives as base64 float32 bytes (compact); only the

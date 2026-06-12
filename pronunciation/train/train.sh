@@ -66,4 +66,5 @@ python -m src.train_unified \
   --stress-warmup-steps 400 \
   --num-workers 16 \
   --bf16 \
+  --use-narrowed \
   "$@"
