@@ -3,6 +3,7 @@
 import hashlib
 import json
 import random
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -221,6 +222,17 @@ def collate_fn_augment(batch):
     return _collate(batch, augment=True)
 
 
+def make_train_collate(degrade_prob: float | None = None):
+    """Training collate carrying the audio-degradation probability explicitly.
+
+    Returns a picklable functools.partial (module-level _collate + simple args),
+    so the degradation config reaches DataLoader workers under both fork AND
+    spawn — unlike a module global, which spawn workers would re-import as off.
+    degrade_prob=None → no degradation (the plain augment path).
+    """
+    return partial(_collate, augment=True, degrade_prob=degrade_prob)
+
+
 def _match_vad_length(vad: torch.Tensor, target_len: int) -> torch.Tensor:
     """Trim/pad VAD to the number of complete 16 ms frames in the audio."""
     if vad.shape[0] > target_len:
@@ -259,7 +271,70 @@ def _zero_vad_after_trailing_silence(
     return vad
 
 
-def _collate(batch, *, augment: bool):
+# --- Audio degradation augmentation (opt-in via --audio-degrade) -------------
+# Realistic learner-mic corruptions so the mel side-channel learns to extract
+# phonetics THROUGH noise instead of amplifying it (the momom2 failure: clean
+# audio +8, noisy −10). Every op preserves phoneme identity (no pitch/time warp
+# — those move formants and could flip the label) and preserves length (so the
+# precomputed 16ms VAD grid stays aligned). The per-clip probability flows in
+# as a _collate argument (see make_train_collate) — no module global, so it is
+# carried explicitly to workers under both fork and spawn.
+
+
+def _colored_noise(n: int, rng) -> torch.Tensor:
+    """White / pink / brown noise — colored is closer to real ambient than white."""
+    w = torch.randn(n)
+    kind = rng.choice(["white", "pink", "brown"])
+    if kind == "white":
+        return w
+    # 1/f-ish shaping in the frequency domain.
+    spec = torch.fft.rfft(w)
+    f = torch.arange(spec.shape[0], dtype=torch.float32).clamp_min(1.0)
+    spec = spec / (f ** (0.5 if kind == "pink" else 1.0))
+    x = torch.fft.irfft(spec, n=n)
+    return x / x.std().clamp_min(1e-9)
+
+
+def degrade_waveform(audio: torch.Tensor, sr: int = 16000, rng=random) -> torch.Tensor:
+    """Apply a random subset of identity-preserving, length-preserving corruptions."""
+    import torchaudio.functional as AF
+    n = audio.shape[0]
+    x = audio
+    # random gain (mel_norm largely absorbs this, but it varies clipping/SNR interplay)
+    if rng.random() < 0.5:
+        x = x * (10.0 ** (rng.uniform(-8, 6) / 20.0))
+    # reverb: convolve with a randomized exp-decay synthetic room impulse (FFT conv, trim to n)
+    if rng.random() < 0.3:
+        L = int(sr * rng.uniform(0.05, 0.35))
+        t = torch.arange(L, dtype=torch.float32)
+        rir = torch.randn(L) * torch.exp(-t / (sr * rng.uniform(0.02, 0.12)))
+        rir[0] = 1.0                                  # direct path dominates
+        rir = rir / rir.norm().clamp_min(1e-9)
+        x = AF.fftconvolve(x, rir)[:n]
+    # band-limit: laptop/phone mic + telephone band
+    if rng.random() < 0.4:
+        x = AF.lowpass_biquad(x, sr, rng.uniform(2500, 7000))
+    if rng.random() < 0.25:
+        x = AF.highpass_biquad(x, sr, rng.uniform(60, 300))
+    # mic coloration: one random peaking-EQ band
+    if rng.random() < 0.3:
+        x = AF.equalizer_biquad(x, sr, rng.uniform(500, 4000),
+                                gain=rng.uniform(-9, 9), Q=rng.uniform(0.5, 2.0))
+    # additive colored noise at a random SNR
+    if rng.random() < 0.8:
+        snr_db = rng.uniform(3, 30)
+        noise = _colored_noise(n, rng)
+        sig = x.pow(2).mean().clamp_min(1e-12).sqrt()
+        x = x + noise * (sig / (10.0 ** (snr_db / 20.0)))
+    # clipping/saturation from a too-hot mic
+    if rng.random() < 0.2:
+        thr = x.abs().max().clamp_min(1e-6) * rng.uniform(0.3, 0.8)
+        x = x.clamp(-thr, thr)
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    return x[:n] if x.shape[0] >= n else torch.cat([x, x.new_zeros(n - x.shape[0])])
+
+
+def _collate(batch, *, augment: bool, degrade_prob: float | None = None):
     sr = 16000
     augmented = []
     for item in batch:
@@ -279,9 +354,10 @@ def _collate(batch, *, augment: bool):
             head = head_frames * VAD_FRAME_SAMPLES
             tail = tail_frames * VAD_FRAME_SAMPLES
             audio = torch.cat([torch.zeros(head), audio, torch.zeros(tail)])
-            noise = torch.randn_like(audio) * 1e-4
-            audio = audio + noise
-            # Pad VAD with zeros for the silence head/tail (silence = no speech).
+            # VAD target cleanup must run on the CLEAN waveform: the trailing-
+            # silence detector is energy-based, so degradation noise/reverb in
+            # the padded tail would make it see speech and stop suppressing
+            # stale VAD positives. Finalize VAD here, THEN corrupt the audio.
             if vad.numel() > 0:
                 vad = torch.cat([
                     vad.new_zeros(head_frames),
@@ -290,6 +366,14 @@ def _collate(batch, *, augment: bool):
                 ])
                 vad = _match_vad_length(vad, audio.shape[0] // VAD_FRAME_SAMPLES)
                 vad = _zero_vad_after_trailing_silence(audio, vad)
+            if degrade_prob is not None and random.random() < degrade_prob:
+                # Degrade the whole padded clip → reverb tail + noise floor cover
+                # the silence too (realistic). Length-preserving, so VAD stays aligned.
+                audio = degrade_waveform(audio, sr)
+            else:
+                # Clean-ish path (also the ~1-prob fraction that stays clean so
+                # studio-quality performance like Jean-Cavard isn't lost).
+                audio = audio + torch.randn_like(audio) * 1e-4
         augmented.append({**item, "audio": audio, "vad_probs": vad})
 
     max_audio = max(item["audio"].shape[0] for item in augmented)

@@ -11,11 +11,13 @@ workdir: .
 
 file_mounts:
   ~/.netrc: ~/.netrc
-  # Upload local data/audio/ directly to the cluster instead of hf-downloading
-  # at run time. Sky uses rsync for local-path mounts which is much faster
-  # than the HF↔Lambda link. train.sh detects ~/data is already populated and
-  # skips its hf download step.
-  ~/data: /Users/andrepopovitch/coding/lexide/pronunciation/data/audio
+  # Ship the dataset as ONE tarball, not 374k loose files. Syncing the loose
+  # data/audio dir (rsync OR hf-download) dies on per-file overhead (~2-8k files
+  # then a hang/status-255). A single tar transfers at full uplink (~26 MB/s →
+  # ~18 min for 28 GB). `run:` untars it into ~/data before training. Rebuild the
+  # tar after any data/label change:
+  #   tar -cf /Volumes/T7/pron_audio.tar -C data/audio --exclude=.cache .
+  ~/data.tar: /Volumes/T7/pron_audio.tar
 
 setup: |
   cd ~/sky_workdir
@@ -23,6 +25,13 @@ setup: |
   pip install transformers datasets soundfile tqdm wandb panphon
 
 run: |
+  # Unpack the dataset tarball into ~/data (train.sh then sees it populated and
+  # skips its hf-download). Idempotent: skip if already extracted (e.g. requeue).
+  if [ ! -e ~/data/eng/phonemes.jsonl ]; then
+    mkdir -p ~/data && tar -xf ~/data.tar -C ~/data && rm -f ~/data.tar
+  fi
+  echo "data langs: $(ls ~/data | tr '\n' ' ')"
+
   # Baseline + VAD on the cleaned dataset (i.e. with audit exclusions applied
   # to FLEURS + Tatoeba via the auto-loaded *_asr_exclusions.jsonl sidecars).
   # No articulatory aux supervision, no regularized heads — just the direct

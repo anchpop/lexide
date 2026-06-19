@@ -1,0 +1,68 @@
+resources:
+  cloud: lambda
+  accelerators: GH200:1
+  disk_size: 200
+
+  autostop:
+    idle_minutes: 120
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+  # Same one-tarball dataset staging as sky_baseline_vad_clean.yaml (374k loose
+  # files choke rsync/hf-download; a single tar streams at full uplink). Rebuild
+  # after any data/label change:
+  #   tar -cf /Volumes/T7/pron_audio.tar -C data/audio --exclude=.cache .
+  ~/data.tar: /Volumes/T7/pron_audio.tar
+
+setup: |
+  cd ~/sky_workdir
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  # transformers PINNED: the Cohere remote-code model declares
+  # _keys_to_ignore_on_load_unexpected as a list, and transformers >5.5.3
+  # regressed _finalize_model_loading to do `list | set` (TypeError). 5.5.3 is
+  # the verified-working version (loads + forwards the Cohere encoder locally).
+  pip install 'transformers==5.5.3' datasets soundfile tqdm wandb panphon
+  # Cohere Transcribe extras: trust_remote_code modeling needs sentencepiece +
+  # librosa (mel filterbank) at load; accelerate enables low_cpu_mem_usage load.
+  pip install sentencepiece librosa accelerate
+
+run: |
+  # Unpack the dataset tarball into ~/data (train.sh sees it populated and skips
+  # its hf-download). Idempotent: skip if already extracted (e.g. requeue).
+  if [ ! -e ~/data/eng/phonemes.jsonl ]; then
+    mkdir -p ~/data && tar -xf ~/data.tar -C ~/data && rm -f ~/data.tar
+  fi
+  echo "data langs: $(ls ~/data | tr '\n' ' ')"
+
+  # EXPERIMENT: swap the self-supervised wav2vec2-xls-r-2b backbone for Cohere
+  # Transcribe's supervised Fast-Conformer encoder (CohereBackbone: raw wav →
+  # Cohere mel → 48-layer conformer @12.5fps → learned 4× upsampler → 50fps).
+  # Full fine-tune. New HF repo so it does NOT clobber the vad-clean champion.
+  # SPEED-TUNED rerun of the 3-epoch v1 (val/ctc 1.06, undertrained):
+  #  - --no-gradient-checkpointing: the v1 actually used only 38 GB at batch 16
+  #    (the 12.5 fps encoder has tiny activations), so checkpointing was paying a
+  #    full backward-pass recompute for memory we don't need. Off → no recompute.
+  #  - batch 32: still overhead-bound at 16 (8→16 barely moved it/s), and even
+  #    without checkpointing memory is dominated by the ~35 GB of model+optimizer
+  #    state, not activations — so 32 fits comfortably in 97 GB and amortizes the
+  #    fixed per-step overhead further.
+  #  - epochs 7: v1's val/ctc was still falling steeply at epoch 3; the win above
+  #    buys the epochs to see if the encoder actually catches the champion (0.27).
+  # The upsampler is now a bigger NON-overlapping per-frame MLP (see
+  # cohere_backbone.py) — targets v1's stalled nonblank_prob (~0.14).
+  # --model-name in "$@" overrides train.sh's wav2vec2 default (argparse last-wins).
+  bash train/train.sh \
+    --model-name CohereLabs/cohere-transcribe-03-2026 \
+    --no-gradient-checkpointing \
+    --batch-size 32 \
+    --epochs 7 \
+    --vad-weight 0.05 \
+    --save-dir checkpoints-cohere-conformer \
+    --hf-repo anchpop/lexide-pronunciation-cohere-conformer
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null

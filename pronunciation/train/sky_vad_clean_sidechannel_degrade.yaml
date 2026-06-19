@@ -1,0 +1,51 @@
+resources:
+  cloud: lambda
+  accelerators: GH200:1
+  disk_size: 200
+
+  autostop:
+    idle_minutes: 120
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+  # One-tarball dataset staging (374k loose files choke rsync/hf-download).
+  #   tar -cf /Volumes/T7/pron_audio.tar -C data/audio --exclude=.cache .
+  ~/data.tar: /Volumes/T7/pron_audio.tar
+
+setup: |
+  cd ~/sky_workdir
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  pip install transformers datasets soundfile tqdm wandb panphon
+
+run: |
+  if [ ! -e ~/data/eng/phonemes.jsonl ]; then
+    mkdir -p ~/data && tar -xf ~/data.tar -C ~/data && rm -f ~/data.tar
+  fi
+  echo "data langs: $(ls ~/data | tr '\n' ' ')"
+
+  # sidechannel + NOISE ROBUSTNESS: identical to sky_vad_clean_sidechannel.yaml
+  # (xls-r-2b, narrowed, batch 16, no-checkpointing, 12 epochs, mel side-channel
+  # + MLP heads) PLUS --audio-degrade. The sidechannel model was +8 on clean
+  # (Jean-Cavard) / +1 nasals but −10 on noisy (momom2) because the mel
+  # side-channel amplifies noise it never saw in training (collate noise was a
+  # token 1e-4 RMS). --audio-degrade applies realistic, identity- and
+  # length-preserving corruptions (colored noise / reverb / band-limit / clip /
+  # EQ) to 60% of training clips so the side-channel learns to extract phonetics
+  # THROUGH noise. Goal: keep the clean-audio win, recover momom2 → beat the
+  # champion overall (already ahead on nasals). See dataset.degrade_waveform.
+  bash train/train.sh \
+    --no-gradient-checkpointing \
+    --epochs 12 \
+    --mel-sidechannel \
+    --mlp-heads \
+    --audio-degrade \
+    --vad-weight 0.05 \
+    --save-dir checkpoints-vad-clean-sidechannel-degrade \
+    --hf-repo anchpop/lexide-pronunciation-vad-clean-sidechannel-degrade
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null

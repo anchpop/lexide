@@ -33,6 +33,7 @@ from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec
 
 from .dataset import (
     StressDataset, collate_fn, collate_fn_augment, NUM_STRESS_LABELS,
+    make_train_collate,
     LengthBucketedBatchSampler, get_audio_lengths,
 )
 from .factorized_ctc import FactorizedCTCModel
@@ -733,6 +734,23 @@ def main():
                              "signal; (3) shared Linear(K*H+64, 768)→GELU→Dropout base feeding "
                              "all four heads, so phoneme and feature heads share a learned "
                              "projection (they predict overlapping information by construction).")
+    parser.add_argument("--mel-sidechannel", action="store_true",
+                        help="Concatenate a raw log-mel side-channel (projected to "
+                             "acoustic_dim) onto the FINAL encoder layer feeding the heads — "
+                             "the regularized-heads acoustic channel WITHOUT the K-layer "
+                             "mixture (which empirically collapsed to L48+L0). Gives heads "
+                             "the low-level acoustic the final layer abstracts away.")
+    parser.add_argument("--mlp-heads", action="store_true",
+                        help="Make the nonblank + phoneme heads 2-layer MLPs "
+                             "(din→din→GELU→dout) instead of single linears. A cheap "
+                             "'bigger head' on top of the 2B encoder.")
+    parser.add_argument("--audio-degrade", action="store_true",
+                        help="Training-time audio degradation augmentation (noise/reverb/"
+                             "band-limit/clip/EQ, identity- and length-preserving). For "
+                             "noise-robustness of the mel side-channel — see dataset.degrade_waveform.")
+    parser.add_argument("--audio-degrade-prob", type=float, default=0.6,
+                        help="Per-clip probability of applying audio degradation "
+                             "(the rest stay clean so studio-quality perf is preserved).")
     parser.add_argument("--stress-warmup-steps", type=int, default=400,
                         help="Disable stress loss for this many steps so phoneme "
                              "model can converge enough for forced alignment to be meaningful. "
@@ -865,6 +883,8 @@ def main():
             special_token_ids=special_token_ids,
             regularized_heads=args.regularized_heads,
             feature_emission_weight=args.feature_emission_weight if args.use_aux_features else 0.0,
+            mel_sidechannel=args.mel_sidechannel,
+            mlp_heads=args.mlp_heads,
         ).to(device)
 
     if args.gradient_checkpointing:
@@ -1003,9 +1023,15 @@ def main():
     train_batch_sampler = LengthBucketedBatchSampler(
         train_lengths, batch_size=args.batch_size, bucket_size_mul=100, seed=42,
     )
+    # Audio-degradation augmentation: the probability is baked into the collate
+    # (a picklable partial), so it reaches workers under fork AND spawn.
+    degrade_prob = args.audio_degrade_prob if args.audio_degrade else None
+    train_collate = make_train_collate(degrade_prob)
+    if args.audio_degrade:
+        print(f"Audio degradation augmentation ON (per-clip prob={args.audio_degrade_prob})")
     train_loader = DataLoader(
         train_ds, batch_sampler=train_batch_sampler,
-        collate_fn=collate_fn_augment, num_workers=args.num_workers, pin_memory=True,
+        collate_fn=train_collate, num_workers=args.num_workers, pin_memory=True,
         persistent_workers=args.num_workers > 0,
         prefetch_factor=4 if args.num_workers > 0 else None,
     )
@@ -1027,7 +1053,10 @@ def main():
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        is_backbone = name.startswith("backbone.")
+        # The Cohere backbone's ConvTranspose upsampler (backbone.upsampler) is
+        # a from-scratch adapter, not pretrained weights — it must learn at the
+        # fast head LR, not the gentle backbone fine-tune LR.
+        is_backbone = name.startswith("backbone.") and not name.startswith("backbone.upsampler")
         no_decay = p.dim() < 2 or name.endswith("layer_weights")
         if is_backbone:
             (backbone_no_decay if no_decay else backbone_decay).append(p)

@@ -12,3 +12,11 @@ vad_compare/
 *.pth
 *.safetensors
 checkpoints*/
+# tysm LLM caches + speaker-embed cache: hundreds of thousands of tiny files
+# (lang-filter .cache alone is 440k+) that exploded the workdir rsync and aren't
+# needed on the training cluster.
+.cache/
+# rust build artifacts + python bytecode
+target/
+__pycache__/
+*.pyc

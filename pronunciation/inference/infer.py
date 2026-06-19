@@ -80,8 +80,24 @@ def transcribe(
     audio, sr = sf.read(wav_path)
     assert sr == 16000, f"expected 16kHz audio, got {sr}"
 
-    inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
-    input_values = inputs.input_values.to(device)
+    # Training (dataset.py) feeds the RAW waveform — no feature-extractor
+    # normalization. Any model that computes a log-mel internally from
+    # input_values must get the raw waveform to match training: the Cohere
+    # front-end, the mel_sidechannel head, and the regularized-heads acoustic
+    # channel all do. (do_normalize's per-utterance scaling shifts the log-mel;
+    # mel_norm largely absorbs it, but feeding raw removes the dependence.)
+    # The plain wav2vec2 path keeps processor() — its GroupNorm encoder is
+    # scale-robust, so the published champion is unaffected.
+    _needs_raw = (
+        getattr(model.backbone.config, "model_type", "") == "cohere_conformer_ctc"
+        or getattr(model, "mel_sidechannel", False)
+        or getattr(model, "regularized_heads", False)
+    )
+    if _needs_raw:
+        input_values = torch.from_numpy(audio).float().unsqueeze(0).to(device)
+    else:
+        inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
+        input_values = inputs.input_values.to(device)
 
     autocast_ctx = (
         torch.autocast(device_type=device.type, dtype=torch.bfloat16)

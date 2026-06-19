@@ -61,6 +61,8 @@ class FactorizedCTCModel(nn.Module):
         acoustic_dim: int = 64,
         n_mels: int = 80,
         feature_emission_weight: float = 0.0,
+        mel_sidechannel: bool = False,
+        mlp_heads: bool = False,
     ):
         super().__init__()
         if feature_table is not None and aux_feature_table is not None:
@@ -68,8 +70,26 @@ class FactorizedCTCModel(nn.Module):
                 "feature_table (factorized) and aux_feature_table (auxiliary) are mutually exclusive. "
                 "Pick one feature mode."
             )
+        if regularized_heads and mel_sidechannel:
+            raise ValueError(
+                "regularized_heads and mel_sidechannel are alternative head-base modes "
+                "(both build the mel side-channel) and are mutually exclusive."
+            )
 
-        self.backbone = Wav2Vec2Model.from_pretrained(model_name)
+        # Backbone swap: Cohere Transcribe's Conformer encoder (via CohereBackbone,
+        # which presents a wav2vec2-shaped interface at 50 fps) when the model name
+        # points at it OR a saved cohere checkpoint is present; else plain wav2vec2.
+        import os as _os
+        _is_cohere = ("cohere" in str(model_name).lower()
+                      or _os.path.exists(_os.path.join(str(model_name), "cohere_backbone.pt")))
+        if _is_cohere:
+            try:
+                from .cohere_backbone import CohereBackbone
+            except ImportError:
+                from cohere_backbone import CohereBackbone
+            self.backbone = CohereBackbone.from_pretrained(model_name)
+        else:
+            self.backbone = Wav2Vec2Model.from_pretrained(model_name)
         self.vocab_size = vocab_size
         self.blank_id = blank_id
         self.num_stress_labels = num_stress_labels
@@ -78,6 +98,8 @@ class FactorizedCTCModel(nn.Module):
         self.acoustic_dim = acoustic_dim
         self.n_mels = n_mels
         self.feature_emission_weight = feature_emission_weight
+        self.mel_sidechannel = mel_sidechannel
+        self.mlp_heads = mlp_heads
 
         hidden_size = self.backbone.config.hidden_size
         self.dropout = nn.Dropout(self.backbone.config.final_dropout)
@@ -150,14 +172,48 @@ class FactorizedCTCModel(nn.Module):
                 nn.Dropout(0.1),
             )
             head_input_dim = head_base_dim
+        elif mel_sidechannel:
+            # Lightweight variant of the regularized base: keep the simple
+            # final-layer hidden (the layer-mixture experiment showed the model
+            # picks L48 + raw L0 anyway), but concat a raw log-mel side-channel
+            # so the heads get the low-level acoustic the final layer abstracts
+            # away — the signal the learned mixtures kept ~5-45% mass on (L0).
+            self.layer_weights = None
+            self.shared_base = None
+            import torchaudio  # lazy: only train environments need this
+            self.mel_spec = torchaudio.transforms.MelSpectrogram(
+                sample_rate=16000, n_fft=400, win_length=400,
+                hop_length=320, n_mels=n_mels, center=False,
+            )
+            self.mel_norm = nn.LayerNorm(n_mels)
+            self.mel_proj = nn.Linear(n_mels, acoustic_dim)
+            head_input_dim = hidden_size + acoustic_dim
         else:
             self.layer_weights = None
             self.mel_spec = None
+            self.mel_norm = None
             self.mel_proj = None
             self.shared_base = None
             head_input_dim = hidden_size
 
-        self.nonblank_head = nn.Linear(head_input_dim, 1)
+        def _mk_head(dout):
+            # "Bigger head" option: nonlinear MLP readout (din→din→dout) instead
+            # of a single linear projection. Cheap (a few M params) on top of the
+            # 2B encoder; tests whether a thicker readout helps.
+            if mlp_heads:
+                return nn.Sequential(
+                    nn.Linear(head_input_dim, head_input_dim),
+                    nn.GELU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(head_input_dim, dout),
+                )
+            return nn.Linear(head_input_dim, dout)
+
+        def _zero_head_bias(head):
+            # Final Linear's bias — works for both plain Linear and the MLP Sequential.
+            (head[-1] if isinstance(head, nn.Sequential) else head).bias.data.zero_()
+
+        self.nonblank_head = _mk_head(1)
         if regularized_heads:
             # Shared base already provides the bottleneck; one Linear suffices.
             self.stress_head = nn.Linear(head_input_dim, num_stress_labels)
@@ -238,13 +294,13 @@ class FactorizedCTCModel(nn.Module):
         else:
             # Mode: off. Direct phoneme head only (original baseline-VAD behavior).
             self.num_features = 0
-            self.phoneme_head = nn.Linear(head_input_dim, vocab_size)
+            self.phoneme_head = _mk_head(vocab_size)
             self.feature_head = None
             self.feature_table = None
             self._masked_slots = None
-            nn.init.zeros_(self.phoneme_head.bias)
+            _zero_head_bias(self.phoneme_head)
 
-        nn.init.zeros_(self.nonblank_head.bias)
+        _zero_head_bias(self.nonblank_head)
 
     @property
     def use_features(self) -> bool:
@@ -389,6 +445,24 @@ class FactorizedCTCModel(nn.Module):
             combined = torch.cat([hidden, mel_proj], dim=-1)
             return self.shared_base(combined)
 
+        if self.mel_sidechannel:
+            # Final-layer hidden + raw log-mel side-channel (no layer mixture,
+            # no shared-base bottleneck — heads consume [hidden ; mel_proj]).
+            out = self.backbone(input_values=input_values, attention_mask=attention_mask)
+            hidden = self.dropout(out.last_hidden_state)
+            with torch.autocast(device_type=input_values.device.type, enabled=False):
+                mel = self.mel_spec(input_values.float())             # (B, n_mels, T_mel)
+            mel = mel.transpose(1, 2)                                 # (B, T_mel, n_mels)
+            T_target = hidden.shape[1]
+            if mel.shape[1] > T_target:
+                mel = mel[:, :T_target, :]
+            elif mel.shape[1] < T_target:
+                mel = F.pad(mel, (0, 0, 0, T_target - mel.shape[1]))
+            mel = torch.log(mel + 1e-6).to(hidden.dtype)
+            mel = self.mel_norm(mel)                                  # per-frame LayerNorm
+            mel_proj = self.mel_proj(mel)                            # (B, T, acoustic_dim)
+            return torch.cat([hidden, mel_proj], dim=-1)
+
         out = self.backbone(input_values=input_values, attention_mask=attention_mask)
         return self.dropout(out.last_hidden_state)
 
@@ -515,6 +589,8 @@ class FactorizedCTCModel(nn.Module):
             # Keep `uses_features` for backward compatibility with older ckpts.
             "uses_features": (mode == "factorized"),
             "regularized_heads": self.regularized_heads,
+            "mel_sidechannel": self.mel_sidechannel,
+            "mlp_heads": self.mlp_heads,
         }
         if self.regularized_heads:
             payload["head_base_dim"] = self.head_base_dim
@@ -524,6 +600,11 @@ class FactorizedCTCModel(nn.Module):
             payload["mel_norm"] = self.mel_norm.state_dict()
             payload["mel_proj"] = self.mel_proj.state_dict()
             payload["shared_base"] = self.shared_base.state_dict()
+        if self.mel_sidechannel:
+            payload["acoustic_dim"] = self.acoustic_dim
+            payload["n_mels"] = self.n_mels
+            payload["mel_norm"] = self.mel_norm.state_dict()
+            payload["mel_proj"] = self.mel_proj.state_dict()
         if mode == "factorized":
             payload["feature_head"] = self.feature_head.state_dict()
             payload["feature_table"] = self.feature_table.cpu()
@@ -561,9 +642,14 @@ class FactorizedCTCModel(nn.Module):
             ms = heads.get("masked_slots", [])
             special_ids = [i for i in ms if i != heads["blank_id"]]
         regularized = heads.get("regularized_heads", False)
+        mel_sidechannel = heads.get("mel_sidechannel", False)
+        mlp_heads = heads.get("mlp_heads", False)
         reg_kwargs = {}
         if regularized:
             reg_kwargs["head_base_dim"] = heads["head_base_dim"]
+            reg_kwargs["acoustic_dim"] = heads["acoustic_dim"]
+            reg_kwargs["n_mels"] = heads["n_mels"]
+        if mel_sidechannel:
             reg_kwargs["acoustic_dim"] = heads["acoustic_dim"]
             reg_kwargs["n_mels"] = heads["n_mels"]
         model = cls(
@@ -576,6 +662,8 @@ class FactorizedCTCModel(nn.Module):
             special_token_ids=special_ids,
             regularized_heads=regularized,
             feature_emission_weight=heads.get("feature_emission_weight", 0.0),
+            mel_sidechannel=mel_sidechannel,
+            mlp_heads=mlp_heads,
             **reg_kwargs,
         )
         if regularized:
@@ -583,6 +671,9 @@ class FactorizedCTCModel(nn.Module):
             model.mel_norm.load_state_dict(heads["mel_norm"])
             model.mel_proj.load_state_dict(heads["mel_proj"])
             model.shared_base.load_state_dict(heads["shared_base"])
+        if mel_sidechannel:
+            model.mel_norm.load_state_dict(heads["mel_norm"])
+            model.mel_proj.load_state_dict(heads["mel_proj"])
         model.nonblank_head.load_state_dict(heads["nonblank_head"])
         model.stress_head.load_state_dict(heads["stress_head"])
         if mode == "factorized":
@@ -613,6 +704,10 @@ class FactorizedCTCModel(nn.Module):
             yield from self.mel_norm.parameters()
             yield from self.mel_proj.parameters()
             yield from self.shared_base.parameters()
+        if self.mel_sidechannel:
+            # The side-channel mel projection trains from scratch at head LR too.
+            yield from self.mel_norm.parameters()
+            yield from self.mel_proj.parameters()
 
     def backbone_parameters(self):
         yield from self.backbone.parameters()
