@@ -213,6 +213,63 @@ def vad_loss(nonblank_logit, vad_probs, vad_lens, n_frames):
     return torch.stack(losses).mean()
 
 
+def _soften_log_probs(log_probs: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Re-temperature an already-normalized log-prob tensor.
+
+    Our model emits composed log-probabilities (post log_softmax), not raw
+    logits, so temperature is applied as `log_softmax(log_probs / T)` —
+    equivalent to softmaxing the underlying logits at temperature T up to the
+    per-frame normalization. T=1 is an exact no-op.
+    """
+    if temperature == 1.0:
+        return log_probs
+    scaled = log_probs / temperature
+    return scaled - torch.logsumexp(scaled, dim=-1, keepdim=True)
+
+
+def distill_kl_loss(
+    student_log_probs: torch.Tensor,
+    teacher_log_probs: torch.Tensor,
+    frame_mask: torch.Tensor,
+    *,
+    temperature: float = 1.0,
+) -> torch.Tensor:
+    """Per-frame KL(teacher ‖ student), averaged over valid (non-pad) frames.
+
+    Both inputs are (B, T, V) log-probabilities on the SAME 50 fps frame grid
+    (teacher and student share the wav2vec2 conv feature extractor, so for a
+    given input they emit identical frame counts). The full distribution —
+    blank slot included — carries the teacher's per-frame acoustic
+    discrimination ("dark knowledge"); transferring it is the whole point of
+    distillation. KL is scaled by T² so its gradient magnitude is comparable
+    across temperatures (standard Hinton scaling).
+
+    `frame_mask` is (B, T) bool, True on real frames. Reduction is a flat mean
+    over valid frames (not per-clip) so longer clips contribute proportionally.
+    """
+    s = _soften_log_probs(student_log_probs.float(), temperature)
+    t = _soften_log_probs(teacher_log_probs.float(), temperature)
+    # KL(t ‖ s) = Σ_v exp(t_v) (t_v − s_v). exp(-inf)=0 handles masked slots.
+    per_frame = (t.exp() * (t - s)).sum(dim=-1)              # (B, T)
+    per_frame = per_frame * frame_mask
+    denom = frame_mask.sum().clamp(min=1)
+    return (temperature ** 2) * per_frame.sum() / denom
+
+
+def distill_stress_kl(
+    student_stress_logits: torch.Tensor,
+    teacher_stress_logits: torch.Tensor,
+    frame_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Per-frame KL(teacher ‖ student) on the 3-way stress head (valid frames)."""
+    s = F.log_softmax(student_stress_logits.float(), dim=-1)
+    t = F.log_softmax(teacher_stress_logits.float(), dim=-1)
+    per_frame = (t.exp() * (t - s)).sum(dim=-1)              # (B, T)
+    per_frame = per_frame * frame_mask
+    denom = frame_mask.sum().clamp(min=1)
+    return per_frame.sum() / denom
+
+
 def check_finite(name: str, value, *, enabled: bool) -> None:
     """Fail fast with a useful tensor name when debugging NaNs/Infs."""
     if not enabled or not torch.is_tensor(value):
@@ -408,7 +465,10 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 blank_id, stress_active: bool, stress_weight: float,
                 vad_weight: float, invalid_mass_weight: float,
                 feature_aux_weight: float, grad_clip_norm: float,
-                debug_finite: bool, max_train_batches: int | None):
+                debug_finite: bool, max_train_batches: int | None,
+                teacher=None, distill_weight: float = 0.0,
+                distill_temperature: float = 1.0,
+                distill_stress_weight: float = 0.0):
     model.train()
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -420,10 +480,12 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
     total_vad = 0.0
     total_invalid = 0.0
     total_aux = 0.0
+    total_distill = 0.0
     n_stress_batches = 0
     n_vad_batches = 0
     n_invalid_batches = 0
     n_aux_batches = 0
+    n_distill_batches = 0
     n_batches = 0
     total_samples = 0
     total_audio_sec = 0.0
@@ -538,11 +600,47 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             total_aux += aux_loss.item()
             n_aux_batches += 1
 
+        distill_loss = torch.zeros((), device=device)
+        if teacher is not None and distill_weight > 0:
+            # Teacher transcribes the CLEAN companion clip (best-quality soft
+            # targets, matching its own clean training regime); the student
+            # learned from the degraded `audio`. Degrade is length-preserving,
+            # so both share the same frame grid → per-frame KD aligns exactly.
+            teacher_audio = batch.get("audio_clean")
+            teacher_audio = (teacher_audio.to(device, non_blocking=True)
+                             if teacher_audio is not None else audio)
+            n_frames_kd = model.backbone._get_feat_extract_output_lengths(
+                audio_mask.sum(-1)
+            ).to(torch.long)
+            with torch.no_grad(), autocast_ctx:
+                teacher_out = teacher(teacher_audio, attention_mask=audio_mask)
+            T_s = outputs["log_probs"].shape[1]
+            T_t = teacher_out["log_probs"].shape[1]
+            assert T_s == T_t, (
+                f"Teacher/student frame-count mismatch ({T_t} vs {T_s}); KD "
+                f"assumes a shared 50 fps grid (identical conv feature extractor)."
+            )
+            frame_mask = (
+                torch.arange(T_s, device=device)[None, :] < n_frames_kd[:, None]
+            )
+            distill_loss = distill_kl_loss(
+                outputs["log_probs"], teacher_out["log_probs"], frame_mask,
+                temperature=distill_temperature,
+            )
+            check_finite("loss/distill", distill_loss, enabled=debug_finite)
+            total_distill += distill_loss.item()
+            n_distill_batches += 1
+            if distill_stress_weight > 0:
+                distill_loss = distill_loss + distill_stress_weight * distill_stress_kl(
+                    outputs["stress_logits"], teacher_out["stress_logits"], frame_mask,
+                )
+
         loss = (ctc_loss
                 + stress_weight * stress_loss
                 + vad_weight * vl
                 + invalid_mass_weight * im_loss
-                + feature_aux_weight * aux_loss)
+                + feature_aux_weight * aux_loss
+                + distill_weight * distill_loss)
         check_finite("loss/total", loss, enabled=debug_finite)
 
         t_lb = time.perf_counter()
@@ -569,6 +667,8 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         nonblank_means.append(torch.sigmoid(outputs["nonblank_logit"]).mean().item())
 
         postfix = {"ctc": f"{ctc_loss.item():.3f}", "p_nb": f"{nonblank_means[-1]:.2f}"}
+        if teacher is not None and n_distill_batches > 0:
+            postfix["kd"] = f"{distill_loss.item():.3f}"
         if stress_active and n_stress_batches > 0:
             postfix["stress"] = f"{stress_loss.item():.3f}"
         postfix["g"] = f"{grad_norm.item():.1f}"
@@ -588,6 +688,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         "vad_loss": total_vad / max(n_vad_batches, 1) if n_vad_batches else 0.0,
         "off_manifold": total_invalid / max(n_invalid_batches, 1) if n_invalid_batches else 0.0,
         "aux_ctc_loss": total_aux / max(n_aux_batches, 1) if n_aux_batches else 0.0,
+        "distill_loss": total_distill / max(n_distill_batches, 1) if n_distill_batches else 0.0,
         "wallclock_sec": epoch_sec,
         "samples_per_sec": total_samples / epoch_sec,
         "audio_realtime_factor": total_audio_sec / epoch_sec,
@@ -788,6 +889,30 @@ def main():
                         help="Filename of the narrowed file under each lang dir "
                              "(for A/B-ing narrowing variants, e.g. "
                              "phonemes_narrowed_acoustic.jsonl).")
+    parser.add_argument("--distill-teacher", type=str, default=None,
+                        help="HF repo id or local checkpoint dir of a larger "
+                             "FactorizedCTCModel to distill from. When set, a "
+                             "per-frame KL(teacher‖student) term is added on the "
+                             "CTC log-probs. The teacher is frozen (eval, no grad) "
+                             "and never enters the optimizer. The student's hard "
+                             "CTC targets stay the narrowed espeak labels — the "
+                             "teacher is a capacity-transfer regularizer, NOT a "
+                             "relabeler (see CLAUDE.md anti-circularity).")
+    parser.add_argument("--distill-revision", type=str,
+                        default="2926e06f8092935f597e0018beb5d579b95b889a",
+                        help="Git revision (commit SHA) of --distill-teacher to "
+                             "pin. Alignment/posteriors depend on the exact "
+                             "weights, so the teacher is always pinned. Ignored "
+                             "when --distill-teacher is a local dir.")
+    parser.add_argument("--distill-weight", type=float, default=1.0,
+                        help="Coefficient on the distillation KL term. 0 disables.")
+    parser.add_argument("--distill-temperature", type=float, default=1.0,
+                        help="Softmax temperature for distillation; KL is scaled "
+                             "by T² (Hinton). 1.0 is an exact no-op.")
+    parser.add_argument("--distill-stress-weight", type=float, default=0.0,
+                        help="Optional KL distillation on the stress head (added "
+                             "to the KD term). 0 = off; the existing forced-align "
+                             "hard-stress path is unchanged either way.")
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints-unified"))
     parser.add_argument("--wandb-project", type=str, default="lexide-pronunciation")
     parser.add_argument("--num-workers", type=int, default=16)
@@ -906,6 +1031,33 @@ def main():
     total = sum(p.numel() for p in model.parameters())
     print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
     print(f"Blank id: {model.blank_id}, vocab size: {model.vocab_size}")
+
+    # Distillation teacher (optional). Frozen, eval, no grad — kept as a local
+    # var (NOT a submodule of `model`) so it never enters model.parameters()/
+    # the optimizer. Pinned to an exact revision: the soft targets depend on
+    # the precise weights.
+    teacher = None
+    if args.distill_teacher:
+        teacher_dir = args.distill_teacher
+        if not Path(teacher_dir).exists():
+            from huggingface_hub import snapshot_download
+            print(f"Downloading teacher {args.distill_teacher} @ {args.distill_revision} ...")
+            teacher_dir = snapshot_download(
+                args.distill_teacher, revision=args.distill_revision,
+            )
+        teacher = FactorizedCTCModel.load_from_dir(teacher_dir).to(device)
+        teacher.eval()
+        teacher.requires_grad_(False)
+        if teacher.vocab_size != model.vocab_size or teacher.blank_id != model.blank_id:
+            raise SystemExit(
+                f"Teacher/student vocab mismatch: teacher "
+                f"(vocab={teacher.vocab_size}, blank={teacher.blank_id}) vs student "
+                f"(vocab={model.vocab_size}, blank={model.blank_id}). They must share "
+                f"the processor-source + VOCAB_EXTENSIONS for per-token KD to be valid.")
+        t_params = sum(p.numel() for p in teacher.parameters())
+        print(f"Distillation ON: teacher {args.distill_teacher} ({t_params:,} params, "
+              f"frozen) | weight={args.distill_weight} T={args.distill_temperature} "
+              f"stress_weight={args.distill_stress_weight}")
 
     # Resolve audit-path inputs. The old `--fleurs-audit-path` is honored
     # as an alias; the new `--audit-path` is the canonical multi-file form.
@@ -1026,9 +1178,15 @@ def main():
     # Audio-degradation augmentation: the probability is baked into the collate
     # (a picklable partial), so it reaches workers under fork AND spawn.
     degrade_prob = args.audio_degrade_prob if args.audio_degrade else None
-    train_collate = make_train_collate(degrade_prob)
+    # When distilling, ship each clip's clean (pre-degrade) companion so the
+    # teacher transcribes clean while the student sees the degraded `audio`.
+    keep_clean = teacher is not None and args.distill_weight > 0
+    train_collate = make_train_collate(degrade_prob, keep_clean=keep_clean)
     if args.audio_degrade:
         print(f"Audio degradation augmentation ON (per-clip prob={args.audio_degrade_prob})")
+    if keep_clean:
+        print("Distillation: teacher reads the clean companion clip "
+              f"({'degraded' if degrade_prob else 'same'} clip to student).")
     train_loader = DataLoader(
         train_ds, batch_sampler=train_batch_sampler,
         collate_fn=train_collate, num_workers=args.num_workers, pin_memory=True,
@@ -1077,7 +1235,12 @@ def main():
         for _ in range(args.resume_epoch - 1):
             scheduler.step()
 
-    wandb.init(project=args.wandb_project, name="unified-xls-r-2b", config=vars(args))
+    # Run name reflects the backbone + whether it's a distillation run, so the
+    # 300m distill jobs don't all show up as "unified-xls-r-2b" in wandb.
+    run_name = args.model_name.split("/")[-1]
+    if teacher is not None:
+        run_name = f"distill-{run_name}"
+    wandb.init(project=args.wandb_project, name=run_name, config=vars(args))
     args.save_dir.mkdir(parents=True, exist_ok=True)
     best_val_loss = float("inf")
     start_epoch = args.resume_epoch if args.resume_epoch is not None else 1
@@ -1110,6 +1273,10 @@ def main():
             grad_clip_norm=args.grad_clip_norm,
             debug_finite=args.debug_finite,
             max_train_batches=args.max_train_batches,
+            teacher=teacher,
+            distill_weight=args.distill_weight,
+            distill_temperature=args.distill_temperature,
+            distill_stress_weight=args.distill_stress_weight,
         )
         val_stats = eval_epoch(
             model, val_loader, device,
@@ -1136,6 +1303,7 @@ def main():
             "train/vad_loss": train_stats["vad_loss"],
             "train/off_manifold": train_stats["off_manifold"],
             "train/aux_ctc_loss": train_stats["aux_ctc_loss"],
+            "train/distill_loss": train_stats["distill_loss"],
             "train/nonblank_prob_mean": train_stats["nonblank_prob_mean"],
             "val/ctc_loss": val_stats["ctc_loss"],
             "val/stress_loss": val_stats["stress_loss"],

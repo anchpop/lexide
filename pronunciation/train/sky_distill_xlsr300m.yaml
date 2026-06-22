@@ -1,0 +1,64 @@
+resources:
+  cloud: lambda
+  accelerators: GH200:1
+  disk_size: 200
+
+  autostop:
+    idle_minutes: 120
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+  # Ship the dataset as ONE tarball, not 374k loose files (see baseline yaml).
+  #   tar -cf /Volumes/T7/pron_audio.tar -C data/audio --exclude=.cache .
+  ~/data.tar: /Volumes/T7/pron_audio.tar
+
+setup: |
+  cd ~/sky_workdir
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  pip install transformers datasets soundfile tqdm wandb panphon
+
+run: |
+  if [ ! -e ~/data/eng/phonemes.jsonl ]; then
+    mkdir -p ~/data && tar -xf ~/data.tar -C ~/data && rm -f ~/data.tar
+  fi
+  echo "data langs: $(ls ~/data | tr '\n' ' ')"
+
+  # DISTILLATION → small on-device student. Knowledge-distill the xls-r-2b
+  # champion (anchpop/lexide-pronunciation-unified-vad-clean @ 2926e06, the
+  # plain mode=off phoneme head) into a 6.5x smaller xls-r-300m student.
+  #
+  # Both backbones share the wav2vec2 conv feature extractor (50 fps), so the
+  # teacher's per-frame posterior aligns frame-for-frame with the student's and
+  # is transferred via KL(teacher‖student) on the CTC log-probs. Degrade-robust:
+  # --audio-degrade corrupts 60% of clips for the STUDENT while the teacher
+  # reads the clean companion clip (best-quality targets) — the trainer ships
+  # both when distilling.
+  #
+  # The student's HARD targets stay the narrowed espeak labels (--use-narrowed
+  # via train.sh); the teacher is a capacity-transfer regularizer, not a
+  # relabeler (CLAUDE.md anti-circularity). The isolated minimal-pair eval is
+  # the arbiter of whether the small model is good enough.
+  #
+  # --model-name / --no-gradient-checkpointing / --backbone-lr override
+  # train.sh's xls-r-2b defaults (argparse last-wins); batch 16, head-lr 1e-3,
+  # --bf16, --use-narrowed, stress knobs are inherited.
+  bash train/train.sh \
+    --model-name facebook/wav2vec2-xls-r-300m \
+    --no-gradient-checkpointing \
+    --epochs 12 \
+    --backbone-lr 3e-5 \
+    --audio-degrade \
+    --vad-weight 0.05 \
+    --distill-teacher anchpop/lexide-pronunciation-unified-vad-clean \
+    --distill-revision 2926e06f8092935f597e0018beb5d579b95b889a \
+    --distill-weight 1.0 \
+    --distill-temperature 1.0 \
+    --save-dir checkpoints-distill-xlsr300m \
+    --hf-repo anchpop/lexide-pronunciation-distill-xlsr300m
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null

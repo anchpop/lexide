@@ -222,15 +222,23 @@ def collate_fn_augment(batch):
     return _collate(batch, augment=True)
 
 
-def make_train_collate(degrade_prob: float | None = None):
+def make_train_collate(degrade_prob: float | None = None, keep_clean: bool = False):
     """Training collate carrying the audio-degradation probability explicitly.
 
     Returns a picklable functools.partial (module-level _collate + simple args),
     so the degradation config reaches DataLoader workers under both fork AND
     spawn — unlike a module global, which spawn workers would re-import as off.
     degrade_prob=None → no degradation (the plain augment path).
+
+    keep_clean=True additionally returns an `audio_clean` batch tensor holding
+    each clip's padded-but-UN-degraded waveform (same shape/mask as `audio`,
+    since every degrade op is length-preserving). Used by distillation: the
+    teacher transcribes the clean clip (best-quality soft targets) while the
+    student sees the degraded one, and the shared 50 fps frame grid keeps the
+    per-frame KD aligned.
     """
-    return partial(_collate, augment=True, degrade_prob=degrade_prob)
+    return partial(_collate, augment=True, degrade_prob=degrade_prob,
+                   keep_clean=keep_clean)
 
 
 def _match_vad_length(vad: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -334,12 +342,14 @@ def degrade_waveform(audio: torch.Tensor, sr: int = 16000, rng=random) -> torch.
     return x[:n] if x.shape[0] >= n else torch.cat([x, x.new_zeros(n - x.shape[0])])
 
 
-def _collate(batch, *, augment: bool, degrade_prob: float | None = None):
+def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
+             keep_clean: bool = False):
     sr = 16000
     augmented = []
     for item in batch:
         audio = item["audio"]
         vad = item["vad_probs"]
+        audio_clean = None
         if augment:
             # Quantize synthetic silence to VAD frames so the precomputed VAD
             # grid remains aligned after prepending silence.
@@ -366,6 +376,12 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None):
                 ])
                 vad = _match_vad_length(vad, audio.shape[0] // VAD_FRAME_SAMPLES)
                 vad = _zero_vad_after_trailing_silence(audio, vad)
+            # Snapshot the padded, un-degraded waveform for the distillation
+            # teacher BEFORE any corruption. Degrade is length-preserving, so
+            # this matches `audio`'s length/mask exactly. Only kept when asked,
+            # to avoid doubling the audio payload on normal runs.
+            if keep_clean:
+                audio_clean = audio
             if degrade_prob is not None and random.random() < degrade_prob:
                 # Degrade the whole padded clip → reverb tail + noise floor cover
                 # the silence too (realistic). Length-preserving, so VAD stays aligned.
@@ -374,13 +390,21 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None):
                 # Clean-ish path (also the ~1-prob fraction that stays clean so
                 # studio-quality performance like Jean-Cavard isn't lost).
                 audio = audio + torch.randn_like(audio) * 1e-4
-        augmented.append({**item, "audio": audio, "vad_probs": vad})
+        elif keep_clean:
+            audio_clean = audio
+        augmented.append({**item, "audio": audio, "vad_probs": vad,
+                          "audio_clean": audio_clean})
 
     max_audio = max(item["audio"].shape[0] for item in augmented)
     max_phonemes = max(item["phoneme_ids"].shape[0] for item in augmented)
     max_vad = max((item["vad_probs"].shape[0] for item in augmented), default=0)
 
     audio_batch = torch.zeros(len(augmented), max_audio)
+    audio_clean_batch = (
+        torch.zeros(len(augmented), max_audio)
+        if keep_clean and augmented and augmented[0]["audio_clean"] is not None
+        else None
+    )
     audio_mask = torch.zeros(len(augmented), max_audio, dtype=torch.long)
     phoneme_batch = torch.zeros(len(augmented), max_phonemes, dtype=torch.long)
     stress_batch = torch.zeros(len(augmented), max_phonemes, dtype=torch.long)
@@ -393,6 +417,8 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None):
         a = item["audio"].shape[0]
         p = item["phoneme_ids"].shape[0]
         audio_batch[i, :a] = item["audio"]
+        if audio_clean_batch is not None:
+            audio_clean_batch[i, :a] = item["audio_clean"]
         audio_mask[i, :a] = 1
         phoneme_batch[i, :p] = item["phoneme_ids"]
         stress_batch[i, :p] = item["stress_seq"]
@@ -403,7 +429,7 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None):
             vad_batch[i, :v] = item["vad_probs"]
             vad_lens[i] = v
 
-    return {
+    result = {
         "audio": audio_batch,
         "audio_mask": audio_mask,
         "audio_lens": audio_lens,
@@ -414,6 +440,10 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None):
         "vad_lens": vad_lens,
         "langs": [item["lang"] for item in augmented],
     }
+    if audio_clean_batch is not None:
+        # Un-degraded companion for the distillation teacher (same shape/mask).
+        result["audio_clean"] = audio_clean_batch
+    return result
 
 
 def get_audio_lengths(dataset) -> list[int]:
