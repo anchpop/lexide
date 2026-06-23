@@ -466,7 +466,8 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 vad_weight: float, invalid_mass_weight: float,
                 feature_aux_weight: float, grad_clip_norm: float,
                 debug_finite: bool, max_train_batches: int | None,
-                teacher=None, distill_weight: float = 0.0,
+                teacher=None, teacher_vocab_remap=None,
+                distill_weight: float = 0.0,
                 distill_temperature: float = 1.0,
                 distill_stress_weight: float = 0.0):
     model.train()
@@ -623,8 +624,19 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             frame_mask = (
                 torch.arange(T_s, device=device)[None, :] < n_frames_kd[:, None]
             )
+            # Remap teacher log-probs (B,T,Vt) into the student's class order/size
+            # (B,T,Vs) by token-string id. Student-only classes get a finite, tiny
+            # log-prob (renormalized away) — never -inf, which would make the
+            # exp(t)*(t-s) KL term produce NaNs. When vocabs are identical the
+            # remap is the identity permutation and the renorm is a no-op.
+            teacher_lp = teacher_out["log_probs"]
+            if teacher_vocab_remap is not None:
+                Vs = outputs["log_probs"].shape[-1]
+                remapped = teacher_lp.new_full((*teacher_lp.shape[:-1], Vs), -30.0)
+                remapped[..., teacher_vocab_remap] = teacher_lp
+                teacher_lp = remapped - torch.logsumexp(remapped, dim=-1, keepdim=True)
             distill_loss = distill_kl_loss(
-                outputs["log_probs"], teacher_out["log_probs"], frame_mask,
+                outputs["log_probs"], teacher_lp, frame_mask,
                 temperature=distill_temperature,
             )
             check_finite("loss/distill", distill_loss, enabled=debug_finite)
@@ -1037,6 +1049,7 @@ def main():
     # the optimizer. Pinned to an exact revision: the soft targets depend on
     # the precise weights.
     teacher = None
+    teacher_vocab_remap = None
     if args.distill_teacher:
         teacher_dir = args.distill_teacher
         if not Path(teacher_dir).exists():
@@ -1048,16 +1061,42 @@ def main():
         teacher = FactorizedCTCModel.load_from_dir(teacher_dir).to(device)
         teacher.eval()
         teacher.requires_grad_(False)
-        if teacher.vocab_size != model.vocab_size or teacher.blank_id != model.blank_id:
+        if teacher.blank_id != model.blank_id:
             raise SystemExit(
-                f"Teacher/student vocab mismatch: teacher "
-                f"(vocab={teacher.vocab_size}, blank={teacher.blank_id}) vs student "
-                f"(vocab={model.vocab_size}, blank={model.blank_id}). They must share "
-                f"the processor-source + VOCAB_EXTENSIONS for per-token KD to be valid.")
+                f"Teacher/student blank-id mismatch ({teacher.blank_id} vs "
+                f"{model.blank_id}); KD assumes a shared blank slot.")
+        # The student vocab is often a SUPERSET of the teacher's: VOCAB_EXTENSIONS
+        # grows over time (new narrowed nasal/length symbols), so a teacher pinned
+        # to an older commit has fewer classes (e.g. 404 vs the current 423). Worse,
+        # tokenizer.add_tokens(sorted(...)) REORDERS ids, so teacher class k and
+        # student class k are NOT the same phoneme. Build a per-token-string map
+        # teacher_id -> student_id so KD compares like phonemes, not like indices.
+        teacher_tok = Wav2Vec2CTCTokenizer.from_pretrained(teacher_dir)
+        student_vocab = processor.tokenizer.get_vocab()        # token -> id (current)
+        teacher_id_to_token = {i: t for t, i in teacher_tok.get_vocab().items()}
+        remap = torch.full((teacher.vocab_size,), -1, dtype=torch.long)
+        missing = []
+        for tid in range(teacher.vocab_size):
+            tok = teacher_id_to_token.get(tid)
+            sid = student_vocab.get(tok) if tok is not None else None
+            if sid is None:
+                missing.append(tok)
+            else:
+                remap[tid] = sid
+        if missing:
+            raise SystemExit(
+                f"{len(missing)} teacher tokens are absent from the student vocab "
+                f"(student must be a superset for KD remap): {missing[:20]}")
+        teacher_vocab_remap = remap.to(device)
         t_params = sum(p.numel() for p in teacher.parameters())
+        extra = model.vocab_size - teacher.vocab_size
         print(f"Distillation ON: teacher {args.distill_teacher} ({t_params:,} params, "
               f"frozen) | weight={args.distill_weight} T={args.distill_temperature} "
               f"stress_weight={args.distill_stress_weight}")
+        print(f"  KD vocab remap: teacher {teacher.vocab_size} -> student "
+              f"{model.vocab_size} classes by token string"
+              + (f" ({extra} student-only tokens get no KD signal, hard-label only)"
+                 if extra else " (identical vocab)"))
 
     # Resolve audit-path inputs. The old `--fleurs-audit-path` is honored
     # as an alias; the new `--audit-path` is the canonical multi-file form.
@@ -1274,6 +1313,7 @@ def main():
             debug_finite=args.debug_finite,
             max_train_batches=args.max_train_batches,
             teacher=teacher,
+            teacher_vocab_remap=teacher_vocab_remap,
             distill_weight=args.distill_weight,
             distill_temperature=args.distill_temperature,
             distill_stress_weight=args.distill_stress_weight,
