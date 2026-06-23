@@ -35,7 +35,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import Wav2Vec2Model
+from transformers import AutoModel
 
 # torchaudio is imported lazily inside the regularized_heads branch so that
 # inference environments that don't use that feature can skip the dep.
@@ -78,7 +78,14 @@ class FactorizedCTCModel(nn.Module):
 
         # Backbone swap: Cohere Transcribe's Conformer encoder (via CohereBackbone,
         # which presents a wav2vec2-shaped interface at 50 fps) when the model name
-        # points at it OR a saved cohere checkpoint is present; else plain wav2vec2.
+        # points at it OR a saved cohere checkpoint is present; else AutoModel.
+        # AutoModel resolves the right encoder class from the config — Wav2Vec2Model
+        # for wav2vec2 (xls-r), HubertModel for hubert/distilhubert — so a tiny
+        # DistilHuBERT student drops in unchanged. All share the 320-stride conv
+        # feature extractor (50 fps), the .config.{hidden_size,final_dropout} fields,
+        # _get_feat_extract_output_lengths, and last_hidden_state the heads consume.
+        # Works for HF repo ids AND saved checkpoint dirs (config.json carries
+        # model_type), so load_from_dir round-trips regardless of backbone family.
         import os as _os
         _is_cohere = ("cohere" in str(model_name).lower()
                       or _os.path.exists(_os.path.join(str(model_name), "cohere_backbone.pt")))
@@ -89,7 +96,7 @@ class FactorizedCTCModel(nn.Module):
                 from cohere_backbone import CohereBackbone
             self.backbone = CohereBackbone.from_pretrained(model_name)
         else:
-            self.backbone = Wav2Vec2Model.from_pretrained(model_name)
+            self.backbone = AutoModel.from_pretrained(model_name)
         self.vocab_size = vocab_size
         self.blank_id = blank_id
         self.num_stress_labels = num_stress_labels

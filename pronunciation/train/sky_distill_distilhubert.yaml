@@ -1,0 +1,59 @@
+# Distill the xls-r-2b champion into a TINY ~24M DistilHuBERT student — the
+# genuinely phone-real target (~25MB int8, 2 transformer layers, real-time on
+# device). Highest-risk/highest-reward: a 2-layer English-pretrained encoder has
+# to learn faithful narrow multilingual IPA. The isolated minimal-pair eval is
+# the arbiter of whether it keeps enough of the teacher's acoustic discrimination
+# to be worth shipping.
+#
+# DistilHuBERT shares the wav2vec2 320-stride conv extractor (50 fps), so it is
+# frame-aligned with the 2B teacher and drops into the distillation pipeline
+# unchanged (FactorizedCTCModel uses AutoModel -> HubertModel from the config).
+resources:
+  cloud: lambda
+  accelerators: GH200:1
+  disk_size: 256
+
+  autostop:
+    idle_minutes: 120
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+  # One tarball, not 374k loose files (see baseline yaml). Rebuild after data/
+  # label changes:  tar -cf /Volumes/T7/pron_audio.tar -C data/audio --exclude=.cache .
+  ~/data.tar: /Volumes/T7/pron_audio.tar
+
+setup: |
+  cd ~/sky_workdir
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  pip install transformers datasets soundfile tqdm wandb panphon huggingface_hub
+
+run: |
+  if [ ! -e ~/data/eng/phonemes.jsonl ]; then
+    mkdir -p ~/data && tar -xf ~/data.tar -C ~/data && rm -f ~/data.tar
+  fi
+  echo "data langs: $(ls ~/data | tr '\n' ' ')"
+  # Disable hf-xet (it stalls badly on the HF<->Lambda link) for the teacher pull.
+  export HF_HUB_DISABLE_XET=1
+
+  # backbone-lr is higher than the 2B/300m runs (1e-4): DistilHuBERT is tiny and
+  # English-pretrained, so it needs to adapt the encoder much more aggressively.
+  bash train/train.sh \
+    --model-name ntu-spml/distilhubert \
+    --no-gradient-checkpointing \
+    --epochs 12 \
+    --backbone-lr 1e-4 \
+    --audio-degrade \
+    --vad-weight 0.05 \
+    --distill-teacher anchpop/lexide-pronunciation-unified-vad-clean \
+    --distill-revision 2926e06f8092935f597e0018beb5d579b95b889a \
+    --distill-weight 1.0 \
+    --distill-temperature 1.0 \
+    --save-dir checkpoints-distill-distilhubert \
+    --hf-repo anchpop/lexide-pronunciation-distill-distilhubert
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null
