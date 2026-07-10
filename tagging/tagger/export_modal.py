@@ -2,8 +2,8 @@
 
     modal run tagger/export_modal.py
 
-Downloads anchpop/lexide-tagger/tagger/best, runs export_onnx.py (exports + numerically
-verifies against PyTorch), and uploads the graph to anchpop/lexide-tagger/onnx/tagger.onnx.
+Downloads anchpop/lexide-parsley/tagger/best, runs export_onnx.py (exports + numerically
+verifies against PyTorch), and uploads the graph to anchpop/lexide-parsley/onnx/tagger.onnx.
 """
 import os
 from pathlib import Path
@@ -11,7 +11,7 @@ from pathlib import Path
 import modal
 
 _tagger_src = Path(__file__).resolve().parent
-app = modal.App("lexide-tagger-export")
+app = modal.App("lexide-parsley-export")
 hf_secret = modal.Secret.from_name("huggingface-secret")
 onnx_vol = modal.Volume.from_name("lexide-onnx", create_if_missing=True)  # export lands here
 
@@ -35,7 +35,7 @@ def export():
     from huggingface_hub import snapshot_download
 
     tok = os.environ["HF_TOKEN"]
-    d = snapshot_download("anchpop/lexide-tagger", allow_patterns=["tagger/best/*"],
+    d = snapshot_download("anchpop/lexide-parsley", allow_patterns=["tagger/best/*"],
                           local_dir="/tmp/model", token=tok)
     out = "/tmp/tagger.onnx"
     subprocess.run(

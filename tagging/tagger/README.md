@@ -67,11 +67,11 @@ Launch training on Lambda (single GPU, autostop 20 min / autodown):
 
 ```bash
 export HF_TOKEN=... WANDB_API_KEY=...
-sky launch -c lexide-tagger tagger/sky_tagger.yaml \
+sky launch -c lexide-parsley tagger/sky_tagger.yaml \
   --secret HF_TOKEN --secret WANDB_API_KEY -i 20 --down --retry-until-up -y
 ```
 
-Artifacts are pushed to `anchpop/lexide-tagger` on HF (`tagger/` and `tokenizer/`
+Artifacts are pushed to `anchpop/lexide-parsley` on HF (`tagger/` and `tokenizer/`
 subfolders) because autodown wipes the node disk.
 
 Inference:

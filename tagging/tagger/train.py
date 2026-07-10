@@ -182,7 +182,7 @@ def main():
 
     if args.wandb:
         import wandb
-        wandb.init(project=os.environ.get("WANDB_PROJECT", "lexide-tagger"),
+        wandb.init(project=os.environ.get("WANDB_PROJECT", "lexide-parsley"),
                    name=f"tagger-{args.encoder.split('/')[-1]}", config=vars(args))
 
     # ---- smoke phase on GPU: few steps on a small subset, one eval, assert sanity ----

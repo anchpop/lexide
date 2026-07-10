@@ -1,0 +1,9 @@
+# Regenerate, don't commit (see OVERVIEW.md "Key facts"):
+# big = raw silver sentences, processed = data_prep output, lemma_tables = Wiktionary
+# JSON + training priors, onnx = exported model artifacts (published on HF
+# anchpop/lexide-parsley/onnx/), tagger/output = training runs.
+data/big/
+data/processed/
+data/lemma_tables/
+data/onnx/
+tagger/output/

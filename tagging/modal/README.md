@@ -46,7 +46,7 @@ modal deploy modal/modal_serve.py
 
 # parsley 🌿 — the small CPU tagger (replaces the Gemma serve)
 
-`modal_serve_tagger.py` serves the encoder tagger + minGRU tokenizer (`anchpop/lexide-tagger`)
+`modal_serve_tagger.py` serves the encoder tagger + minGRU tokenizer (`anchpop/lexide-parsley`)
 on **CPU** with scale-to-zero. One forward pass per sentence, no GPU — idle cost ≈ nothing, a
 warm container answers in ms. This is the online endpoint for user-submitted sentences.
 

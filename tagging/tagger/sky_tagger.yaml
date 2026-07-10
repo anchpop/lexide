@@ -1,4 +1,4 @@
-name: lexide-tagger
+name: lexide-parsley
 
 # Single x86 Ampere+ GPU (bf16 + pip CUDA torch). A6000 (48GB, $1.09/hr) is cheapest;
 # fall back to A10 then A100 if capacity is dry. GH200 excluded on purpose (aarch64 = no
@@ -42,4 +42,4 @@ envs:
   EPOCHS: "2"
   EVAL_EVERY: "3000"
   TOK_EPOCHS: "2"
-  WANDB_PROJECT: lexide-tagger
+  WANDB_PROJECT: lexide-parsley

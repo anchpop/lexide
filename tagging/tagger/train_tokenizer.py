@@ -108,7 +108,7 @@ def main():
 
     if args.wandb:
         import wandb
-        wandb.init(project=os.environ.get("WANDB_PROJECT", "lexide-tagger"),
+        wandb.init(project=os.environ.get("WANDB_PROJECT", "lexide-parsley"),
                    name="char-tokenizer", config=vars(args))
 
     step = 0

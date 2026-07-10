@@ -5,7 +5,7 @@
 The byte-minGRU tokenizer doesn't export cleanly to ONNX (its sequential scan would be
 trace-unrolled at a fixed length), and at ~0.31M params it doesn't need a runtime — the Rust
 side reimplements the forward pass and just needs the weights. This downloads
-anchpop/lexide-tagger/tokenizer/tokenizer.pt, re-saves the state dict as f32 safetensors,
+anchpop/lexide-parsley/tokenizer/tokenizer.pt, re-saves the state dict as f32 safetensors,
 and also dumps reference outputs (per-byte labels + char spans) for a multilingual set of
 strings so the Rust reimplementation can be verified bit-for-bit at the argmax level.
 Artifacts land on the lexide-onnx volume next to tagger.onnx:
@@ -61,7 +61,7 @@ def export():
     from model import CharBoundaryTagger
     from predict import spans_from_byte_labels
 
-    pt = hf_hub_download("anchpop/lexide-tagger", "tokenizer/tokenizer.pt",
+    pt = hf_hub_download("anchpop/lexide-parsley", "tokenizer/tokenizer.pt",
                          token=os.environ["HF_TOKEN"])
     state = torch.load(pt, map_location="cpu")
     model = CharBoundaryTagger()

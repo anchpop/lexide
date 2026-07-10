@@ -34,7 +34,7 @@ train/val/test.
 - **CharBoundaryTagger** — a byte-level bidirectional **minGRU** predicting per-byte O/B/I token
   boundaries (~0.31M params) — tokenization-free segmentation.
 
-Trained on Lambda (single A10, ~2.5h, bf16, 2 epochs). Both pushed to HF `anchpop/lexide-tagger`.
+Trained on Lambda (single A10, ~2.5h, bf16, 2 epochs). Both pushed to HF `anchpop/lexide-parsley`.
 
 **Results** — held-out **silver** test (measures agreement with the Gemma teacher, not gold):
 overall POS 98.3 / lemma 97.9 / UAS 93.1 / **LAS 91.7**.
@@ -82,7 +82,7 @@ ONNX tagger, HF **`tokenizers`** for XLM-R subwords, a pure-Rust **byte-minGRU**
 (verified bit-for-bit against Python on multilingual fixtures), edit-script decode, and the
 Wiktionary lemma tables compiled to **`fst`** (`build-lemma-fst` bin: 185 MB JSON → 30 MB total,
 candidate selection resolved at build time). Verified **token-for-token against the live parsley
-serve** on 24 sentences × 10 languages (`lexide/tests/parsley_parity.rs`): text, POS, lemma,
+serve** on 25 sentences × 10 languages (`lexide/tests/parsley_parity.rs`): text, POS, lemma,
 dep, head all identical. ~55 ms warm per sentence on CPU; load is ~10-15 s on this box
 (disk-bound — the fp32 graph is 1.1 GB, so int8 quantization is also the load-time fix).
 `Lexide::from_pretrained(LocalConfig)` reads `LEXIDE_MODEL_DIR` (see `lexide/README.md`).
@@ -94,9 +94,10 @@ dep, head all identical. ~55 ms warm per sentence on CPU; load is ~10-15 s on th
 1. **Fly service** — thin Rust binary reusing the crate's `local` backend; ~ms cold starts.
 2. **int8 / ONNX quantization** — encoder → ~280MB, faster load + inference (also shrinks the
    Fly image).
-3. **Distribute the ONNX artifacts** — they're on the `lexide-onnx` Modal volume + HF
-   `anchpop/lexide-tagger/onnx/`; `char_tokenizer.safetensors` is volume-only until we get a
-   write token for the HF repo.
+3. ~~Distribute the ONNX artifacts~~ — done: everything the Rust backend needs (graph,
+   tokenizer, vocab, char-minGRU safetensors, fst lemma tables) is on HF
+   `anchpop/lexide-parsley/onnx/` (repo renamed from `lexide-tagger`; old name redirects)
+   and mirrored on the `lexide-onnx` Modal volume.
 
 Quality follow-ups (separate from the Rust work):
 - **Fix Japanese** — the biggest POS+lemma win: rebalance the training mix (weighted sampler so
@@ -108,7 +109,10 @@ Quality follow-ups (separate from the Rust work):
 
 ## Key facts
 
-- **HF model:** `anchpop/lexide-tagger` (`tagger/best`, `tagger/final`, `tokenizer/`, `onnx/`... token is read-only from Modal).
+- **HF model:** `anchpop/lexide-parsley` (renamed from `lexide-tagger`, old name redirects):
+  `tagger/best`, `tagger/final`, `tokenizer/`, and `onnx/` (the complete Rust local-backend
+  artifact set incl. fst lemma tables). The Modal secret's token is read-only (fine for
+  serving); a write token exists locally for uploads.
 - **Live endpoint:** `https://anchpop--lexide-parsley-parsley-tag.modal.run` (Modal app `lexide-parsley`, workspace `anchpop`).
 - **Not shipped:** Japanese (POS/LAS 85/65).
 - **Cold starts:** ~26s scale-to-zero on Modal; `min_containers=1` for zero cold starts (ongoing

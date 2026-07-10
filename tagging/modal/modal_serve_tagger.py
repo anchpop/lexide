@@ -2,7 +2,7 @@
 """Modal deployment for `parsley` — the small CPU tagger that replaces the Gemma pipeline.
 
 Serves the encoder multi-task tagger (POS + lemma + dependency) plus the byte-minGRU
-tokenizer from anchpop/lexide-tagger, on CPU, with scale-to-zero. One forward pass per
+tokenizer from anchpop/lexide-parsley, on CPU, with scale-to-zero. One forward pass per
 sentence — no GPU — so idle cost is ~nothing and a warm container answers in ms.
 
     modal deploy modal/modal_serve_tagger.py     # deploy the web endpoint
@@ -20,7 +20,7 @@ from pathlib import Path
 import modal
 
 APP_NAME = "lexide-parsley"
-HF_REPO = "anchpop/lexide-tagger"
+HF_REPO = "anchpop/lexide-parsley"
 MODEL_DIR = "/model"                    # tagger weights baked into the image (see _download_model)
 APP_SRC = "/root/parsley"               # baked-in tagger source
 TABLES_DIR = "/root/lemma_tables"       # baked-in Wiktionary tables

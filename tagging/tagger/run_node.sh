@@ -7,7 +7,7 @@ set -euo pipefail
 
 cd ~/sky_workdir
 export TOKENIZERS_PARALLELISM=false
-export WANDB_PROJECT="${WANDB_PROJECT:-lexide-tagger}"
+export WANDB_PROJECT="${WANDB_PROJECT:-lexide-parsley}"
 export HF_HUB_DISABLE_XET=1   # classic LFS; the xet backend stalled on prior runs
 
 echo "=== GPU ==="
@@ -22,7 +22,7 @@ fi
 python3 -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''); assert torch.cuda.is_available(), 'no CUDA after torch-ensure'"
 
 export HF_USER=$(python3 -c "from huggingface_hub import whoami; import os; print(whoami(token=os.environ['HF_TOKEN'])['name'])")
-REPO="${HF_USER}/lexide-tagger"
+REPO="${HF_USER}/lexide-parsley"
 echo "=== HF target repo: ${REPO} ==="
 
 cd tagger
@@ -44,7 +44,7 @@ echo "=== PUSH TAGGER -> ${REPO} ==="
 python3 - <<'PY'
 import os
 from huggingface_hub import HfApi, create_repo
-repo = f"{os.environ['HF_USER']}/lexide-tagger"
+repo = f"{os.environ['HF_USER']}/lexide-parsley"
 tok = os.environ["HF_TOKEN"]
 create_repo(repo, exist_ok=True, token=tok)
 HfApi().upload_folder(folder_path="output/tagger", path_in_repo="tagger",
@@ -67,7 +67,7 @@ echo "=== PUSH TOKENIZER -> ${REPO} ==="
 python3 - <<'PY'
 import os
 from huggingface_hub import HfApi
-repo = f"{os.environ['HF_USER']}/lexide-tagger"
+repo = f"{os.environ['HF_USER']}/lexide-parsley"
 HfApi().upload_folder(folder_path="output/tokenizer", path_in_repo="tokenizer",
                       repo_id=repo, token=os.environ["HF_TOKEN"])
 print("pushed tokenizer to", repo)

@@ -48,6 +48,18 @@ fn main() -> Result<()> {
         // Training-data priors steer multi-candidate selection (build_lemma_priors.py).
         let priors_path = in_dir.join(format!("wikt_priors_{lang}.json"));
         let priors: Option<serde_json::Value> = if priors_path.exists() {
+            // Priors derive from the table: an older mtime means the table was rebuilt
+            // without rerunning build_lemma_priors.py, and selections may silently regress.
+            let table_mtime = entry.metadata().and_then(|m| m.modified()).ok();
+            let priors_mtime = priors_path.metadata().and_then(|m| m.modified()).ok();
+            if let (Some(t), Some(p)) = (table_mtime, priors_mtime) {
+                if p < t {
+                    eprintln!(
+                        "WARNING: wikt_priors_{lang}.json is older than wikt_{lang}.json — \
+                         rerun tagger/build_lemma_priors.py before building"
+                    );
+                }
+            }
             Some(
                 serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(
                     &priors_path,
@@ -55,6 +67,10 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed to parse wikt_priors_{lang}.json"))?,
             )
         } else {
+            eprintln!(
+                "WARNING: no wikt_priors_{lang}.json — multi-candidate lemma selection falls \
+                 back to closest-length (homograph-prone); run tagger/build_lemma_priors.py"
+            );
             None
         };
         let out_path = out_dir.join(format!("wikt_{lang}.fst"));

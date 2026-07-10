@@ -49,17 +49,23 @@ async fn main() -> anyhow::Result<()> {
 The `local` backend reads a directory (`LocalConfig::model_dir`, or the `LEXIDE_MODEL_DIR`
 env var, default `data/onnx`) containing:
 
-| file | what | from |
-|------|------|------|
+| file | what | built by |
+|------|------|----------|
 | `tagger.onnx` | XLM-R encoder + POS/lemma/biaffine heads, one graph | `tagger/export_onnx.py` |
-| `tokenizer.json` | XLM-R fast tokenizer | HF `anchpop/lexide-tagger` |
-| `vocab.json` | POS / dep / lemma edit-script vocabularies | HF `anchpop/lexide-tagger` |
+| `tokenizer.json` | XLM-R fast tokenizer | (from tagger training) |
+| `vocab.json` | POS / dep / lemma edit-script vocabularies | (from tagger training) |
 | `char_tokenizer.safetensors` | byte-minGRU segmenter weights | `tagger/export_char_modal.py` |
 | `lemma_fst/wikt_{lang}.fst` | optional per-language lemma tables | `build-lemma-fst` (below) |
 
-The first four live on the `lexide-onnx` Modal volume
-(`modal volume get lexide-onnx tagger.onnx …`). The lemma tables are built from the
-Wiktionary JSON tables (`tagging/data/lemma_tables/`, see `tagger/LEMMA_LOOKUP.md`):
+The complete set is on HF — one download gives a working model dir:
+
+```bash
+hf download anchpop/lexide-parsley --include "onnx/*" --local-dir . && export LEXIDE_MODEL_DIR=./onnx
+```
+
+(also mirrored on the `lexide-onnx` Modal volume: `modal volume get lexide-onnx …`).
+To rebuild the lemma tables from the Wiktionary JSON (`tagging/data/lemma_tables/`,
+see `tagger/LEMMA_LOOKUP.md`):
 
 ```bash
 cargo run --release --features local --bin build-lemma-fst -- \
