@@ -16,6 +16,24 @@ pub enum Language {
     Hindi,
 }
 
+impl Language {
+    /// Short code used to select the parsley lemma table for this language.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Language::English => "eng",
+            Language::French => "fra",
+            Language::Spanish => "spa",
+            Language::Korean => "kor",
+            Language::German => "deu",
+            Language::Italian => "ita",
+            Language::Portuguese => "por",
+            Language::Russian => "rus",
+            Language::Japanese => "jpn",
+            Language::Hindi => "hin",
+        }
+    }
+}
+
 impl fmt::Display for Language {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

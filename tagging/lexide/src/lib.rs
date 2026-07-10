@@ -18,7 +18,7 @@ use std::fmt;
 #[cfg(feature = "local")]
 pub use local::{LocalConfig, LocalLexide};
 #[cfg(feature = "remote")]
-pub use remote::{RemoteClient, RemoteConfig};
+pub use remote::{RemoteClient, RemoteConfig, ResponseFormat};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Text {
@@ -135,12 +135,23 @@ impl Lexide {
         ))
     }
 
+    /// Connect to the Gemma vLLM endpoint (OpenAI completions, tab-separated text).
     #[cfg(feature = "remote")]
     pub fn from_server(url: &str) -> Result<Self> {
         Ok(Self::Remote(RemoteClient::new(RemoteConfig {
             endpoint_url: url.to_string(),
             max_tokens: 1024,
             temperature: 0.0,
+            ..Default::default()
+        })?))
+    }
+
+    /// Connect to the parsley CPU tagger endpoint (JSON tokens with char offsets).
+    #[cfg(feature = "remote")]
+    pub fn from_parsley_server(url: &str) -> Result<Self> {
+        Ok(Self::Remote(RemoteClient::new(RemoteConfig {
+            endpoint_url: url.to_string(),
+            format: ResponseFormat::ParsleyJson,
             ..Default::default()
         })?))
     }
@@ -153,21 +164,21 @@ impl Lexide {
     /// 3. Parsing the response (shared logic)
     #[allow(unreachable_code)]
     pub async fn analyze(&self, sentence: &str, language: Language) -> Result<Tokenization> {
-        // Step 1: Create prompt (shared between local and remote)
-        let prompt = parsing::create_prompt(sentence, language);
-
-        // Step 2: Generate response (differs between local and remote)
-        let response: String = match self {
+        match self {
+            // Local Gemma: prompt -> generate text -> parse the tab-separated format.
             #[cfg(feature = "local")]
-            Self::Local(local) => local.generate(&prompt, sentence).await?,
+            Self::Local(local) => {
+                let prompt = parsing::create_prompt(sentence, language);
+                let response = local.generate(&prompt, sentence).await?;
+                parsing::parse_response(&response, sentence)
+            }
+            // Remote: dispatches internally on the endpoint's response format
+            // (Gemma completions text, or parsley JSON).
             #[cfg(feature = "remote")]
-            Self::Remote(remote) => remote.generate(&prompt).await?,
+            Self::Remote(remote) => remote.analyze(sentence, language).await,
             #[cfg(not(any(feature = "local", feature = "remote")))]
             _ => unreachable!("Type should be uninhabited!"),
-        };
-
-        // Step 3: Parse response (shared between local and remote)
-        parsing::parse_response(&response, sentence)
+        }
     }
 }
 
