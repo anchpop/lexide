@@ -1,19 +1,27 @@
 use anyhow::Result;
-use lexide::{Language, Lexide, LocalConfig};
+use lexide::{Language, Lexide};
+#[cfg(feature = "local")]
+use lexide::LocalConfig;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Check for HF_TOKEN
+    // Only local inference downloads the Gemma weights and needs an HF token.
+    #[cfg(feature = "local")]
     if std::env::var("HF_TOKEN").is_err() {
-        eprintln!("Error: HF_TOKEN environment variable is required for accessing Gemma models.");
-        eprintln!("Please set it to your HuggingFace token:");
-        eprintln!("  export HF_TOKEN=your_token_here");
-        eprintln!("Get your token from: https://huggingface.co/settings/tokens");
+        eprintln!("Error: HF_TOKEN is required for local Gemma inference.");
+        eprintln!("  export HF_TOKEN=your_token_here  (https://huggingface.co/settings/tokens)");
         std::process::exit(1);
     }
 
+    // Remote by default. Set LEXIDE_ENDPOINT_URL to point elsewhere; for the parsley CPU
+    // tagger use Lexide::from_parsley_server(&url) instead (JSON response format).
     #[cfg(feature = "remote")]
-    let lexide = Lexide::from_server("https://anchpop--lexide-gemma-3-27b-vllm-serve.modal.run")?;
+    let lexide = {
+        let url = std::env::var("LEXIDE_ENDPOINT_URL").unwrap_or_else(|_| {
+            "https://anchpop--lexide-gemma-4-31b-vllm-serve.modal.run".to_string()
+        });
+        Lexide::from_server(&url)?
+    };
 
     #[cfg(feature = "local")]
     let lexide = Lexide::from_pretrained(LocalConfig::default()).await?;

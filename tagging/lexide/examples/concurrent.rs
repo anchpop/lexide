@@ -1,20 +1,32 @@
 use anyhow::Result;
 use futures::StreamExt as _;
-use lexide::{Language, Lexide, LexideConfig};
+use lexide::{Language, Lexide};
+#[cfg(feature = "local")]
+use lexide::LocalConfig;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Check for HF_TOKEN
+    // Only local inference downloads the Gemma weights and needs an HF token.
+    #[cfg(feature = "local")]
     if std::env::var("HF_TOKEN").is_err() {
-        eprintln!("Error: HF_TOKEN environment variable is required for accessing Gemma models.");
-        eprintln!("Please set it to your HuggingFace token:");
-        eprintln!("  export HF_TOKEN=your_token_here");
-        eprintln!("Get your token from: https://huggingface.co/settings/tokens");
+        eprintln!("Error: HF_TOKEN is required for local Gemma inference.");
+        eprintln!("  export HF_TOKEN=your_token_here  (https://huggingface.co/settings/tokens)");
         std::process::exit(1);
     }
 
-    // Load the model with LoRA adapter (automatically reads HF_TOKEN)
-    let lexide = Lexide::from_pretrained(LexideConfig::default()).await?;
+    #[cfg(feature = "remote")]
+    let lexide = {
+        let url = std::env::var("LEXIDE_ENDPOINT_URL").unwrap_or_else(|_| {
+            "https://anchpop--lexide-gemma-4-31b-vllm-serve.modal.run".to_string()
+        });
+        Lexide::from_server(&url)?
+    };
+
+    #[cfg(feature = "local")]
+    let lexide = Lexide::from_pretrained(LocalConfig::default()).await?;
+
+    #[cfg(not(any(feature = "remote", feature = "local")))]
+    panic!("Either `remote` or `local` feature must be enabled!");
 
     let sentences = vec![
         "I love programming.",
