@@ -1,0 +1,113 @@
+# lexide tagging — project overview & status
+
+Replacing the expensive autoregressive **Gemma 4 31B** tagger with a small, cheap model that
+does the same job — **tokenization + POS + lemma + dependency (head & relation)** for 10
+languages (deu eng fra hin ita jpn kor por rus spa) — to tag user-submitted sentences.
+
+Component docs: `tagger/README.md` (models/training), `tagger/LEMMA_LOOKUP.md` (Wiktionary
+lemma floor), `modal/README.md` (parsley serve + cold-start notes).
+
+---
+
+## Why
+
+The old pipeline makes a 31B decoder re-emit the whole analysis as text — generation-length
+compute on an always-warm A100 (`modal/modal_serve.py`, vLLM). Tagging is a per-token labeling
+problem, so an **encoder with multi-task heads** does it in one forward pass, ~100× smaller and
+CPU-servable. The one wrinkle — our token boundaries don't match any subword vocabulary — is
+handled by offset-based subword→word pooling (for tagging) and a separate byte-level tokenizer
+(for segmentation).
+
+---
+
+## Done
+
+**Data** (`tagger/data_prep.py`). Normalized 2.89M sentences (silver from Gemma + gold
+`cleaned_*`) into a unified schema with exact char offsets, POS/dep/lemma-script vocabs
+(18 UPOS, 65 dep relations, 4001 lemma edit-scripts covering 99.4% of tokens), split
+train/val/test.
+
+**Models** (`tagger/model.py`). Two independently-trainable pieces:
+- **MultiTaskTagger** — XLM-RoBERTa-base encoder + offset subword→word pooling, then a POS
+  linear head, a lemma **edit-script** classifier, and a Dozat-Manning **biaffine** dependency
+  head (head + relation).
+- **CharBoundaryTagger** — a byte-level bidirectional **minGRU** predicting per-byte O/B/I token
+  boundaries (~0.31M params) — tokenization-free segmentation.
+
+Trained on Lambda (single A10, ~2.5h, bf16, 2 epochs). Both pushed to HF `anchpop/lexide-tagger`.
+
+**Results** — held-out **silver** test (measures agreement with the Gemma teacher, not gold):
+overall POS 98.3 / lemma 97.9 / UAS 93.1 / **LAS 91.7**.
+
+| tier | langs | POS | LAS |
+|------|-------|-----|-----|
+| European | fra ita spa por deu eng rus | ~99 | 92–95 |
+| low-resource | kor, hin | 95–96 | ~84 |
+| **weak** | **jpn** | **85** | **65** |
+
+Quality tracks per-language data volume: jpn/kor/hin (22–96k sentences) lag the European
+languages (300–400k each). Char tokenizer: **99.78% token-span F1**.
+
+**Lemma quality investigation.** A blind `claude-fable-5` judge on 100 hard tokens found the
+silver lemmas are **~99% accurate** (only ~1 real error; most disagreements are annotation
+*policy*, e.g. jpn です→だ). Conclusion: the lemma lever is small and external gold would import
+a *different* policy — so **don't override in-distribution labels**. But a Wiktionary
+`(form,POS)→lemma` table is an excellent **out-of-distribution floor** (`tagger/lemma_lookup.py`,
+built by `tagger/parse_wiktextract.py`): on out-of-training content-word forms it lifts lemma
+accuracy over copy-the-form by **+23 (deu) / +39 (rus) / +28 (spa) / +21 (fra) / +12 (eng)**,
+agreeing with/correcting Gemma 93–96%. Applied to content POS only (proper nouns copy). Tables
+built for 9 languages (jpn omitted — gated + weakest fit); in `data/lemma_tables/` (gitignored).
+
+**Deployment — `parsley` 🌿** (`modal/modal_serve_tagger.py`). CPU Modal serve, scale-to-zero,
+**live** at `https://anchpop--lexide-parsley-parsley-tag.modal.run`. `POST {sentences, lang}` →
+JSON tokens. Reuses the existing `huggingface-secret`. All 9 languages. ~0.4s warm, ~26s cold.
+(Memory snapshots don't help here — Modal rebuilds them each cold start; see `modal/README.md`.)
+
+**Rust client** (`lexide/src/`). The `lexide` crate now speaks parsley's JSON format alongside
+the Gemma text format: `Lexide::from_parsley_server(url)`, a `ResponseFormat` dispatch, and
+whitespace rebuilt exactly from char offsets. Compiles + 73 tests pass (via the yap nix flake).
+
+**ONNX export** (`tagger/export_onnx.py`, `tagger/export_modal.py`). The tagger exports to a
+single ONNX graph (encoder + pooling + all heads), **verified to match PyTorch to ~1e-5** at
+multiple shapes — the biaffine + gather ops survive the export. 1129 MB fp32; on the `lexide-onnx`
+Modal volume + local `data/onnx/`.
+
+---
+
+## Doing now — moving inference to Rust
+
+A Rust reimplementation kills two birds: a Rust binary + mmap'd ONNX starts in ~ms (the real
+cold-start fix), and it replaces the dead `local` backend (mistralrs Gemma-E2B, unusably slow).
+Stack: **`ort`** (ONNX Runtime) for inference, the HF **`tokenizers`** crate for XLM-R
+tokenization, **`fst`** for the lemma tables, and a Rust reimpl of the tiny char-minGRU.
+
+The ONNX export (above) is the completed first step.
+
+---
+
+## Where we're going
+
+1. **Rust inference prototype** — `tokenizers` + `ort` + head decode + edit-script apply +
+   char-minGRU forward; verify it matches Python parsley token-for-token.
+2. **Lemma tables → `fst`** (compact, mmap'd; built in Rust).
+3. **Replace lexide's `local` backend** — retire mistralrs; `from_pretrained` runs the ONNX
+   tagger locally and fast.
+4. **Fly service** — thin Rust binary reusing the crate; ~ms cold starts.
+5. **int8 / ONNX quantization** — encoder → ~280MB, faster load + inference.
+
+Quality follow-ups (separate from the Rust work):
+- **Fix Japanese** — the biggest POS+lemma win: rebalance the training mix (weighted sampler so
+  22k Hindi / 38k Japanese aren't drowned by 400k European) and/or get more low-resource silver.
+- **Measure real accuracy** — everything so far is teacher-agreement; a small gold set (or a
+  morphological analyzer for jpn/kor) would give true numbers.
+
+---
+
+## Key facts
+
+- **HF model:** `anchpop/lexide-tagger` (`tagger/best`, `tagger/final`, `tokenizer/`, `onnx/`... token is read-only from Modal).
+- **Live endpoint:** `https://anchpop--lexide-parsley-parsley-tag.modal.run` (Modal app `lexide-parsley`, workspace `anchpop`).
+- **Not shipped:** Japanese (POS/LAS 85/65).
+- **Cold starts:** ~26s scale-to-zero; `min_containers=1` for zero cold starts (ongoing warm-container cost) is the reliable fix until the Rust/Fly path lands.
+- **Toolchain on this box:** sky/Lambda via `~/.sky-venv` (+ gcc `LD_LIBRARY_PATH`); Modal via `~/.modal-venv`; Rust via `direnv exec /data/coding/yap`.
+- **Gitignored (regenerate, don't commit):** `data/big/`, `data/processed/`, `data/lemma_tables/`, `data/onnx/`, `tagger/output/`.
