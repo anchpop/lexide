@@ -110,6 +110,18 @@ Quality follow-ups (separate from the Rust work):
 
 ---
 
+## The old Gemma tagger (teacher) — not forgotten
+
+The first-generation tagger (`train/`, LoRA on Gemma 4 31B; see `train/README.md`) is replaced
+*online* by parsley but stays load-bearing: it's the **teacher** that generates silver (the jpn
+fix needs it), `train/data/cleaned_*.jsonl` is the **gold** set data_prep mixes in (11 langs
+incl. zho, which parsley doesn't cover), and it's the only shippable tagger for **Japanese**.
+Its vLLM serves stay deployed on Modal (scale-to-zero → idle cost ≈ 0). Decommission the serve
+only after yap switches to parsley (the lexide crate's `RemoteConfig` **default URL is still the
+Gemma endpoint**) and jpn is fixed or gated.
+
+---
+
 ## Key facts
 
 - **HF model:** `anchpop/lexide-parsley` (renamed from `lexide-tagger`, old name redirects):

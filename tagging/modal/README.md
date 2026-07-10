@@ -1,6 +1,14 @@
 # Lexide Modal Deployment
 
-Serves the Gemma 3 27B model with LoRA adapter using vLLM on Modal.
+Two serves live here: the **legacy Gemma 4 31B vLLM serve** (`modal_serve.py` — replaced
+online by parsley, but kept as the silver-data teacher and the Japanese fallback; see
+`../train/README.md`) and **parsley 🌿**, the small CPU tagger (`modal_serve_tagger.py`,
+second half of this file).
+
+## Gemma vLLM serve (legacy — teacher + jpn fallback)
+
+Gemma 4 31B merged with the lexide LoRA adapter, served by vLLM on an A100-80GB with
+scale-to-zero (idle cost ≈ 0, which is why it stays deployed).
 
 ## Setup
 
@@ -38,9 +46,12 @@ modal deploy modal/modal_serve.py
 
 ## Model Configuration
 
-- **Base model**: `google/gemma-3-27b-it`
-- **LoRA adapter**: `anchpop/lexide-gemma-3-27b-it`
-- **Merged model path**: `/models/merged` (on Modal volume)
+- **Base model**: `google/gemma-4-31B-it`
+- **LoRA adapter**: `anchpop/lexide-gemma-4-31B-it`
+- **Merged model path**: `/models/merged-gemma4` (on the `lexide-models` Modal volume)
+- **Endpoint**: `https://anchpop--lexide-gemma-4-31b-vllm-serve.modal.run` (also the lexide
+  crate's `RemoteConfig` default; the older gemma-3 app is still deployed too, both
+  scale-to-zero)
 
 ---
 
@@ -73,7 +84,9 @@ curl -X POST "$PARSLEY_URL" -H 'content-type: application/json' \
 
 `lang` is optional and only selects the Wiktionary lemma floor (the tagger is multilingual);
 omit it for model-only lemmas. Built-in lemma tables: whatever is in `data/lemma_tables/`
-(currently `deu`, `rus` — generate the rest with `tagger/parse_wiktextract.py`).
+at deploy time (currently all 9 served languages, with training-data candidate priors —
+see `tagger/LEMMA_LOOKUP.md`). Deploys happen via `../release.sh`, which re-records the
+Rust parity fixtures right after.
 
 ## Cold starts
 
