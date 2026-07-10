@@ -30,11 +30,12 @@ ort = { version = "2.0.0-rc.10", optional = true }
 tokenizers = { version = "0.21", optional = true }
 safetensors = { version = "0.6", optional = true }
 fst = { version = "0.4", optional = true }
+hf-hub = { version = "0.4", optional = true, default-features = false, features = ["ureq", "native-tls"] }
 
 # Remote inference dependencies (only included with 'remote' feature)
 reqwest = { version = "0.12", features = ["json"], optional = true }
 
 [features]
 # Backend selection - choose one (or both)
-local = ["dep:ort", "dep:tokenizers", "dep:safetensors", "dep:fst"]
+local = ["dep:ort", "dep:tokenizers", "dep:safetensors", "dep:fst", "dep:hf-hub"]
 remote = ["dep:reqwest"]

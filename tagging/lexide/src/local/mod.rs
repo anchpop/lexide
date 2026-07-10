@@ -3,8 +3,10 @@
 //! mistralrs Gemma backend (which was unusably slow) with the same pipeline the
 //! parsley Modal serve runs, minus the network.
 //!
-//! Expected `model_dir` layout (artifacts live on the `lexide-onnx` Modal volume;
-//! see `tagger/export_onnx.py` + `tagger/export_char_modal.py`):
+//! By default the artifacts are downloaded from HF `anchpop/lexide-parsley/onnx/` into
+//! the standard HuggingFace cache on first load; set `LocalConfig::model_dir` (or
+//! `LEXIDE_MODEL_DIR`) to use a local directory instead. Expected `model_dir` layout
+//! (published by `tagging/release.sh`):
 //!   tagger.onnx                  encoder + heads, exported ONNX graph
 //!   tokenizer.json               XLM-R fast tokenizer
 //!   vocab.json                   POS / dep / lemma edit-script vocabularies
@@ -31,7 +33,13 @@ pub use lemma::{build_table, LemmaTable};
 #[derive(Debug, Clone)]
 pub struct LocalConfig {
     /// Directory with tagger.onnx, tokenizer.json, vocab.json, char_tokenizer.safetensors.
-    pub model_dir: PathBuf,
+    /// `None` (the default when `LEXIDE_MODEL_DIR` is unset) downloads the artifacts from
+    /// `hf_repo` into the standard HuggingFace cache on first use.
+    pub model_dir: Option<PathBuf>,
+    /// HuggingFace repo to fetch from when `model_dir` is None; artifacts live under its
+    /// `onnx/` folder. The repo is public, so no token is needed (`HF_TOKEN` is honored
+    /// if set, e.g. for a private fork).
+    pub hf_repo: String,
     /// Directory with per-language `wikt_{lang}.fst` lemma tables.
     /// Defaults to `{model_dir}/lemma_fst`; missing tables just mean model-only lemmas,
     /// matching the parsley server's behavior for languages without a table.
@@ -42,15 +50,55 @@ pub struct LocalConfig {
 
 impl Default for LocalConfig {
     fn default() -> Self {
-        let model_dir = std::env::var("LEXIDE_MODEL_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("data/onnx"));
         Self {
-            model_dir,
+            model_dir: std::env::var("LEXIDE_MODEL_DIR").map(PathBuf::from).ok(),
+            hf_repo: "anchpop/lexide-parsley".to_string(),
             lemma_tables_dir: None,
             threads: 0,
         }
     }
+}
+
+/// The languages with published lemma tables (jpn isn't served; see OVERVIEW.md).
+const TABLE_LANGS: [&str; 9] = ["deu", "eng", "fra", "hin", "ita", "kor", "por", "rus", "spa"];
+
+/// Fetch the model artifacts from the hub into the HF cache (no-op when already cached)
+/// and return the cache directory that mirrors a local model_dir layout.
+fn fetch_from_hub(repo_id: &str) -> Result<PathBuf> {
+    let mut builder = hf_hub::api::sync::ApiBuilder::from_env();
+    if let Ok(token) = std::env::var("HF_TOKEN") {
+        builder = builder.with_token(Some(token));
+    }
+    let api = builder.build().context("failed to build HF hub client")?;
+    let repo = api.model(repo_id.to_string());
+
+    let mut tagger_path = None;
+    for f in [
+        "tagger.onnx",
+        "tokenizer.json",
+        "vocab.json",
+        "char_tokenizer.safetensors",
+    ] {
+        let p = repo
+            .get(&format!("onnx/{f}"))
+            .with_context(|| format!("failed to download onnx/{f} from {repo_id}"))?;
+        if f == "tagger.onnx" {
+            tagger_path = Some(p);
+        }
+    }
+    for lang in TABLE_LANGS {
+        // Optional: a table missing on the hub just means model-only lemmas for that language.
+        if let Err(e) = repo.get(&format!("onnx/lemma_fst/wikt_{lang}.fst")) {
+            eprintln!("lexide: no lemma table for {lang} on {repo_id}: {e}");
+        }
+    }
+    // The snapshot layout mirrors the repo, so tagger.onnx's parent is a valid model_dir
+    // (with lemma_fst/ beneath it).
+    Ok(tagger_path
+        .expect("tagger.onnx was just downloaded")
+        .parent()
+        .expect("cached file has a parent directory")
+        .to_path_buf())
 }
 
 /// Local inference pipeline: segment (byte minGRU) -> tag (ONNX) -> lemma floor (fst).
@@ -63,21 +111,32 @@ pub struct LocalLexide {
 }
 
 impl LocalLexide {
-    /// Load all model artifacts from `config.model_dir`. Async only for API compatibility
-    /// with the old backend — loading is synchronous and takes ~a second.
+    /// Load the model. With the default config this downloads the artifacts from the hub
+    /// into the HF cache on first use (~1.2 GB; subsequent loads reuse the cache), so the
+    /// download runs off the async executor.
     pub async fn from_pretrained(config: LocalConfig) -> Result<Self> {
-        Self::load(config)
+        tokio::task::spawn_blocking(move || Self::load(config))
+            .await
+            .context("model loading task panicked")?
     }
 
     pub fn load(config: LocalConfig) -> Result<Self> {
-        let dir = &config.model_dir;
-        if !dir.join("tagger.onnx").exists() {
-            bail!(
-                "no tagger.onnx in {} — set LocalConfig.model_dir (or LEXIDE_MODEL_DIR) to a \
-                 directory with the parsley ONNX artifacts (see `modal volume get lexide-onnx`)",
-                dir.display()
-            );
-        }
+        let dir = match &config.model_dir {
+            Some(dir) => {
+                if !dir.join("tagger.onnx").exists() {
+                    bail!(
+                        "no tagger.onnx in {} — point LocalConfig.model_dir (or \
+                         LEXIDE_MODEL_DIR) at the parsley ONNX artifacts, or leave it unset \
+                         to download them from HF {}",
+                        dir.display(),
+                        config.hf_repo
+                    );
+                }
+                dir.clone()
+            }
+            None => fetch_from_hub(&config.hf_repo)?,
+        };
+        let dir = &dir;
         let chartok = chartok::CharTokenizer::load(&dir.join("char_tokenizer.safetensors"))
             .context("failed to load the char tokenizer")?;
         let tagger = tagger::OnnxTagger::load(dir, config.threads)

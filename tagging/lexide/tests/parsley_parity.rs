@@ -59,9 +59,8 @@ fn local_pipeline_matches_parsley_server() {
     );
 
     let lexide = LocalLexide::load(LocalConfig {
-        model_dir: dir,
-        lemma_tables_dir: None,
-        threads: 0,
+        model_dir: Some(dir),
+        ..Default::default()
     })
     .expect("failed to load local pipeline");
 

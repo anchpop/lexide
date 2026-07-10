@@ -266,8 +266,12 @@ mod tests {
     #[test]
     fn test_local_config() {
         let config = LocalConfig::default();
-        // default resolves via LEXIDE_MODEL_DIR or falls back to data/onnx
-        assert!(config.model_dir.ends_with("data/onnx") || std::env::var("LEXIDE_MODEL_DIR").is_ok());
+        // model_dir defaults to LEXIDE_MODEL_DIR when set, else None -> hub download
+        assert_eq!(
+            config.model_dir.is_some(),
+            std::env::var("LEXIDE_MODEL_DIR").is_ok()
+        );
+        assert_eq!(config.hf_repo, "anchpop/lexide-parsley");
         assert_eq!(config.threads, 0);
         assert!(config.lemma_tables_dir.is_none());
     }

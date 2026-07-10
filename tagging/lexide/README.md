@@ -31,7 +31,8 @@ async fn main() -> anyhow::Result<()> {
     // Remote (parsley serve):
     let lexide = Lexide::from_parsley_server("https://anchpop--lexide-parsley-parsley-tag.modal.run")?;
 
-    // Or local, with the `local` feature (reads LEXIDE_MODEL_DIR, see below):
+    // Or local, with the `local` feature — downloads the model from HF on first use
+    // (~1.2 GB into the standard HF cache), no setup needed:
     // let lexide = Lexide::from_pretrained(lexide::LocalConfig::default()).await?;
 
     let result = lexide.analyze("The cats were sleeping.", Language::English).await?;
@@ -46,8 +47,10 @@ async fn main() -> anyhow::Result<()> {
 
 ## Local model artifacts
 
-The `local` backend reads a directory (`LocalConfig::model_dir`, or the `LEXIDE_MODEL_DIR`
-env var, default `data/onnx`) containing:
+By default the `local` backend downloads everything it needs from HF
+`anchpop/lexide-parsley/onnx/` into the standard HuggingFace cache on first load — no
+setup. To use a local directory instead (offline, or artifacts you built yourself), set
+`LocalConfig::model_dir` or the `LEXIDE_MODEL_DIR` env var to a directory containing:
 
 | file | what | built by |
 |------|------|----------|
@@ -57,7 +60,7 @@ env var, default `data/onnx`) containing:
 | `char_tokenizer.safetensors` | byte-minGRU segmenter weights | `tagger/export_char_modal.py` |
 | `lemma_fst/wikt_{lang}.fst` | optional per-language lemma tables | `build-lemma-fst` (below) |
 
-The complete set is on HF — one download gives a working model dir:
+To fetch that manually rather than through the crate:
 
 ```bash
 hf download anchpop/lexide-parsley --include "onnx/*" --local-dir . && export LEXIDE_MODEL_DIR=./onnx

@@ -15,7 +15,8 @@ async fn main() -> Result<()> {
         Lexide::from_server(&url)?
     };
 
-    // Local parsley inference: ONNX artifacts come from LEXIDE_MODEL_DIR (or ./data/onnx).
+    // Local parsley inference: downloads the ONNX artifacts from HF on first use
+    // (cached afterwards); set LEXIDE_MODEL_DIR to use a local directory instead.
     #[cfg(feature = "local")]
     let lexide = Lexide::from_pretrained(LocalConfig::default()).await?;
 
