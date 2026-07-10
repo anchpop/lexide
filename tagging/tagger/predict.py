@@ -48,8 +48,12 @@ def spans_from_byte_labels(text, byte_labels):
 
 
 class Pipeline:
-    def __init__(self, tagger_dir, tokenizer_path=None, device=None):
+    def __init__(self, tagger_dir, tokenizer_path=None, device=None, lemma_table_path=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.lemma_table = None
+        if lemma_table_path:
+            from lemma_lookup import LemmaTable
+            self.lemma_table = LemmaTable.load(lemma_table_path)
         meta = json.load(open(os.path.join(tagger_dir, "meta.json")))
         vocab = json.load(open(os.path.join(tagger_dir, "vocab.json"), encoding="utf-8"))
         self.pos_list = vocab["pos"]
@@ -121,9 +125,13 @@ class Pipeline:
             form = text[s:e]
             script = self.scripts[lemma[i]] if lemma[i] < len(self.scripts) else None
             lem = apply_script(form, script) if script else form
+            pos_tag = self.pos_list[pos[i]]
+            if self.lemma_table is not None:
+                # OOD floor: fill in a real lemma where the model punted to copy on a content form
+                lem = self.lemma_table.resolve(form, pos_tag, lem)
             result.append({
                 "text": form, "start": s, "end": e,
-                "pos": self.pos_list[pos[i]],
+                "pos": pos_tag,
                 "lemma": lem,
                 "head": arc[i],                       # 0 = ROOT, else 1-indexed token
                 "dep": self.dep_list[rel[i]],
