@@ -32,6 +32,11 @@ is handled two ways:
 | `train_tokenizer.py` | Trains the char boundary tagger; reports token-span F1. |
 | `predict.py` | End-to-end inference: raw text → tokens with POS/lemma/head/dep. |
 | `sky_tagger.yaml` + `run_node.sh` | Lambda launch (single x86 GPU, autostop/autodown) + node orchestration (train → push to HF → train tokenizer → push). |
+| `export_onnx.py` / `export_modal.py` | Tagger → single ONNX graph, numerically verified vs PyTorch; the Modal wrapper runs it with the HF weights. |
+| `export_char_modal.py` | Char-minGRU weights → safetensors + multilingual reference fixtures (for the Rust reimpl's bit-parity test). |
+| `parse_wiktextract.py` / `build_lemma_priors.py` / `lemma_lookup.py` | Wiktionary lemma tables, training-data candidate priors, and the layered OOD lemma floor (see `LEMMA_LOOKUP.md`). |
+| `record_parity_fixtures.py` | Records live-serve outputs as the Rust parity-test fixtures. |
+| `../release.sh` | The whole post-training chain: export → verify → publish to HF → deploy → parity-gate (below). |
 
 ## Data
 
@@ -80,6 +85,31 @@ Inference:
 python3 predict.py --tagger-dir output/tagger/best --tokenizer output/tokenizer/tokenizer.pt \
   --text "Eine Fundgrube."
 ```
+
+## Release pipeline (after training)
+
+Once training has pushed `tagger/best` + `tokenizer/tokenizer.pt` to HF, one command
+turns them into a verified, published, deployed release:
+
+```bash
+cd tagging && ./release.sh
+```
+
+It chains, stopping at the first failure: ONNX export (numerically verified against
+PyTorch, on Modal) → char-minGRU safetensors + reference fixtures (Modal) → pull to
+`data/onnx/` → rebuild training-data lemma priors (`build_lemma_priors.py`) → compile
+Wiktionary tables + priors to fst (`build-lemma-fst`) → Rust unit tests (bit-for-bit
+char-tokenizer parity against the fresh fixtures) → upload the complete `onnx/` set to
+HF `anchpop/lexide-parsley` → deploy the parsley Modal serve → re-record parity fixtures
+from the live endpoint (`record_parity_fixtures.py`) → run the Rust↔serve
+token-for-token parity test. Green at the end means: what's on HF, what the serve runs,
+and what the Rust `local` backend computes are all the same model producing identical
+tokens. Commit the refreshed `lexide/tests/fixtures/parsley_reference.json` afterwards.
+
+Prereqs on the box: `~/.modal-venv` (Modal CLI), cargo (direnv exec of the yap flake is
+auto-detected), a write-role `HF_TOKEN` in the repo-root `.env`, and — for the priors
+step — `data/processed/` + `data/lemma_tables/` (it warns and keeps existing priors if
+the training data isn't present).
 
 ## Choices worth revisiting
 

@@ -1,8 +1,9 @@
 //! Token-for-token parity between the local ONNX pipeline and the parsley Modal serve.
 //!
 //! `tests/fixtures/parsley_reference.json` holds recorded responses from the live endpoint
-//! (24 sentences across all 10 languages; refresh with
-//! `scratchpad/fetch_parsley_fixtures.py`-style POSTs). The local pipeline — byte-minGRU
+//! (25 sentences across all 10 languages; refresh with
+//! `tagger/record_parity_fixtures.py`, which `tagging/release.sh` runs after each deploy).
+//! The local pipeline — byte-minGRU
 //! segmentation, ONNX tagging, fst lemma floor — must reproduce them exactly: same token
 //! boundaries, POS, lemma, dependency relation, and head.
 //!

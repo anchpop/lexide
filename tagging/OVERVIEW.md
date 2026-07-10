@@ -4,8 +4,11 @@ Replacing the expensive autoregressive **Gemma 4 31B** tagger with a small, chea
 does the same job — **tokenization + POS + lemma + dependency (head & relation)** for 10
 languages (deu eng fra hin ita jpn kor por rus spa) — to tag user-submitted sentences.
 
-Component docs: `tagger/README.md` (models/training), `tagger/LEMMA_LOOKUP.md` (Wiktionary
-lemma floor), `modal/README.md` (parsley serve + cold-start notes).
+Component docs: `tagger/README.md` (models/training + the release pipeline), `tagger/LEMMA_LOOKUP.md`
+(Wiktionary lemma floor), `modal/README.md` (parsley serve + cold-start notes).
+
+**After training: `./release.sh`** — exports, verifies, publishes to HF, deploys the serve,
+and gates on the Rust↔serve token-for-token parity test (details in `tagger/README.md`).
 
 ---
 
