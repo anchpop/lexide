@@ -5,12 +5,6 @@ use lexide::{Language, Lexide};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    #[cfg(feature = "local")]
-    if std::env::var("HF_TOKEN").is_err() {
-        eprintln!("Error: HF_TOKEN is required for local Gemma inference");
-        std::process::exit(1);
-    }
-
     #[cfg(feature = "remote")]
     let lexide = {
         let url = std::env::var("LEXIDE_ENDPOINT_URL").unwrap_or_else(|_| {

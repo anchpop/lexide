@@ -63,37 +63,37 @@ built for 9 languages (jpn omitted — gated + weakest fit); in `data/lemma_tabl
 JSON tokens. Reuses the existing `huggingface-secret`. All 9 languages. ~0.4s warm, ~26s cold.
 (Memory snapshots don't help here — Modal rebuilds them each cold start; see `modal/README.md`.)
 
-**Rust client** (`lexide/src/`). The `lexide` crate now speaks parsley's JSON format alongside
+**Rust client** (`lexide/src/`). The `lexide` crate speaks parsley's JSON format alongside
 the Gemma text format: `Lexide::from_parsley_server(url)`, a `ResponseFormat` dispatch, and
-whitespace rebuilt exactly from char offsets. Compiles + 73 tests pass (via the yap nix flake).
+whitespace rebuilt exactly from char offsets (shared with the local backend in `src/raw.rs`).
 
 **ONNX export** (`tagger/export_onnx.py`, `tagger/export_modal.py`). The tagger exports to a
 single ONNX graph (encoder + pooling + all heads), **verified to match PyTorch to ~1e-5** at
 multiple shapes — the biaffine + gather ops survive the export. 1129 MB fp32; on the `lexide-onnx`
-Modal volume + local `data/onnx/`.
+Modal volume + local `data/onnx/`. The char-minGRU doesn't ONNX-export (sequential scan), so
+`tagger/export_char_modal.py` dumps its weights as safetensors + reference fixtures instead.
 
----
-
-## Doing now — moving inference to Rust
-
-A Rust reimplementation kills two birds: a Rust binary + mmap'd ONNX starts in ~ms (the real
-cold-start fix), and it replaces the dead `local` backend (mistralrs Gemma-E2B, unusably slow).
-Stack: **`ort`** (ONNX Runtime) for inference, the HF **`tokenizers`** crate for XLM-R
-tokenization, **`fst`** for the lemma tables, and a Rust reimpl of the tiny char-minGRU.
-
-The ONNX export (above) is the completed first step.
+**Rust local inference** (`lexide/src/local/`). The `local` feature now runs the whole parsley
+pipeline in-process on CPU — mistralrs/Gemma-E2B is retired. Stack as planned: **`ort`** for the
+ONNX tagger, HF **`tokenizers`** for XLM-R subwords, a pure-Rust **byte-minGRU** reimpl
+(verified bit-for-bit against Python on multilingual fixtures), edit-script decode, and the
+Wiktionary lemma tables compiled to **`fst`** (`build-lemma-fst` bin: 185 MB JSON → 30 MB total,
+candidate selection resolved at build time). Verified **token-for-token against the live parsley
+serve** on 24 sentences × 10 languages (`lexide/tests/parsley_parity.rs`): text, POS, lemma,
+dep, head all identical. ~55 ms warm per sentence on CPU; load is ~10-15 s on this box
+(disk-bound — the fp32 graph is 1.1 GB, so int8 quantization is also the load-time fix).
+`Lexide::from_pretrained(LocalConfig)` reads `LEXIDE_MODEL_DIR` (see `lexide/README.md`).
 
 ---
 
 ## Where we're going
 
-1. **Rust inference prototype** — `tokenizers` + `ort` + head decode + edit-script apply +
-   char-minGRU forward; verify it matches Python parsley token-for-token.
-2. **Lemma tables → `fst`** (compact, mmap'd; built in Rust).
-3. **Replace lexide's `local` backend** — retire mistralrs; `from_pretrained` runs the ONNX
-   tagger locally and fast.
-4. **Fly service** — thin Rust binary reusing the crate; ~ms cold starts.
-5. **int8 / ONNX quantization** — encoder → ~280MB, faster load + inference.
+1. **Fly service** — thin Rust binary reusing the crate's `local` backend; ~ms cold starts.
+2. **int8 / ONNX quantization** — encoder → ~280MB, faster load + inference (also shrinks the
+   Fly image).
+3. **Distribute the ONNX artifacts** — they're on the `lexide-onnx` Modal volume + HF
+   `anchpop/lexide-tagger/onnx/`; `char_tokenizer.safetensors` is volume-only until we get a
+   write token for the HF repo.
 
 Quality follow-ups (separate from the Rust work):
 - **Fix Japanese** — the biggest POS+lemma win: rebalance the training mix (weighted sampler so
@@ -108,6 +108,8 @@ Quality follow-ups (separate from the Rust work):
 - **HF model:** `anchpop/lexide-tagger` (`tagger/best`, `tagger/final`, `tokenizer/`, `onnx/`... token is read-only from Modal).
 - **Live endpoint:** `https://anchpop--lexide-parsley-parsley-tag.modal.run` (Modal app `lexide-parsley`, workspace `anchpop`).
 - **Not shipped:** Japanese (POS/LAS 85/65).
-- **Cold starts:** ~26s scale-to-zero; `min_containers=1` for zero cold starts (ongoing warm-container cost) is the reliable fix until the Rust/Fly path lands.
+- **Cold starts:** ~26s scale-to-zero on Modal; `min_containers=1` for zero cold starts (ongoing
+  warm-container cost). The Rust `local` backend runs in-process (load ~10-15s, disk-bound on the
+  1.1 GB fp32 graph — quantization shrinks it); a Fly deploy of it is the remaining serving work.
 - **Toolchain on this box:** sky/Lambda via `~/.sky-venv` (+ gcc `LD_LIBRARY_PATH`); Modal via `~/.modal-venv`; Rust via `direnv exec /data/coding/yap`.
 - **Gitignored (regenerate, don't commit):** `data/big/`, `data/processed/`, `data/lemma_tables/`, `data/onnx/`, `tagger/output/`.

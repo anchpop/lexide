@@ -1,22 +1,26 @@
 mod dep;
 mod language;
 pub mod matching;
+#[cfg(feature = "remote")]
 mod parsing;
 pub mod pos;
 
 #[cfg(feature = "local")]
 mod local;
+#[cfg(any(feature = "local", feature = "remote"))]
+mod raw;
 #[cfg(feature = "remote")]
 mod remote;
 
+pub use crate::dep::DependencyRelation;
 pub use crate::language::Language;
-use crate::{dep::DependencyRelation, pos::PartOfSpeech};
+use crate::pos::PartOfSpeech;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[cfg(feature = "local")]
-pub use local::{LocalConfig, LocalLexide};
+pub use local::{build_table, LemmaTable, LocalConfig, LocalLexide};
 #[cfg(feature = "remote")]
 pub use remote::{RemoteClient, RemoteConfig, ResponseFormat};
 
@@ -157,21 +161,12 @@ impl Lexide {
     }
 
     /// Analyze a sentence and return structured results
-    ///
-    /// This is the main entry point that orchestrates:
-    /// 1. Creating the prompt (shared logic)
-    /// 2. Generating the response (local or remote)
-    /// 3. Parsing the response (shared logic)
-    #[allow(unreachable_code)]
+    #[allow(unreachable_code, unused_variables)]
     pub async fn analyze(&self, sentence: &str, language: Language) -> Result<Tokenization> {
         match self {
-            // Local Gemma: prompt -> generate text -> parse the tab-separated format.
+            // Local parsley: in-process segment -> ONNX tag -> lemma floor.
             #[cfg(feature = "local")]
-            Self::Local(local) => {
-                let prompt = parsing::create_prompt(sentence, language);
-                let response = local.generate(&prompt, sentence).await?;
-                parsing::parse_response(&response, sentence)
-            }
+            Self::Local(local) => local.analyze(sentence, language),
             // Remote: dispatches internally on the endpoint's response format
             // (Gemma completions text, or parsley JSON).
             #[cfg(feature = "remote")]
@@ -268,11 +263,13 @@ mod tests {
     }
 
     #[cfg(feature = "local")]
-    #[tokio::test]
-    async fn test_local_config() {
+    #[test]
+    fn test_local_config() {
         let config = LocalConfig::default();
-        assert_eq!(config.base_model_repo, "google/gemma-4-E2B-it");
-        assert_eq!(config.lora_adapter_repo, "anchpop/lexide-gemma-4-E2B-it");
+        // default resolves via LEXIDE_MODEL_DIR or falls back to data/onnx
+        assert!(config.model_dir.ends_with("data/onnx") || std::env::var("LEXIDE_MODEL_DIR").is_ok());
+        assert_eq!(config.threads, 0);
+        assert!(config.lemma_tables_dir.is_none());
     }
 
     #[cfg(feature = "remote")]

@@ -6,14 +6,6 @@ use lexide::LocalConfig;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Only local inference downloads the Gemma weights and needs an HF token.
-    #[cfg(feature = "local")]
-    if std::env::var("HF_TOKEN").is_err() {
-        eprintln!("Error: HF_TOKEN is required for local Gemma inference.");
-        eprintln!("  export HF_TOKEN=your_token_here  (https://huggingface.co/settings/tokens)");
-        std::process::exit(1);
-    }
-
     #[cfg(feature = "remote")]
     let lexide = {
         let url = std::env::var("LEXIDE_ENDPOINT_URL").unwrap_or_else(|_| {

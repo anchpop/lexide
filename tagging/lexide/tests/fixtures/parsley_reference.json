@@ -1,0 +1,1487 @@
+[
+ {
+  "lang": "deu",
+  "text": "Eine Fundgrube.",
+  "tokens": [
+   {
+    "text": "Eine",
+    "start": 0,
+    "end": 4,
+    "pos": "DET",
+    "lemma": "ein",
+    "head": 2,
+    "dep": "det"
+   },
+   {
+    "text": "Fundgrube",
+    "start": 5,
+    "end": 14,
+    "pos": "NOUN",
+    "lemma": "Fundgrube",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": ".",
+    "start": 14,
+    "end": 15,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 2,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "deu",
+  "text": "Die Kinder spielten gestern im Garten.",
+  "tokens": [
+   {
+    "text": "Die",
+    "start": 0,
+    "end": 3,
+    "pos": "DET",
+    "lemma": "der",
+    "head": 2,
+    "dep": "det"
+   },
+   {
+    "text": "Kinder",
+    "start": 4,
+    "end": 10,
+    "pos": "NOUN",
+    "lemma": "Kind",
+    "head": 3,
+    "dep": "nsubj"
+   },
+   {
+    "text": "spielten",
+    "start": 11,
+    "end": 19,
+    "pos": "VERB",
+    "lemma": "spielen",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "gestern",
+    "start": 20,
+    "end": 27,
+    "pos": "ADV",
+    "lemma": "gestern",
+    "head": 3,
+    "dep": "advmod"
+   },
+   {
+    "text": "im",
+    "start": 28,
+    "end": 30,
+    "pos": "ADP",
+    "lemma": "im",
+    "head": 6,
+    "dep": "case"
+   },
+   {
+    "text": "Garten",
+    "start": 31,
+    "end": 37,
+    "pos": "NOUN",
+    "lemma": "Garten",
+    "head": 3,
+    "dep": "obl"
+   },
+   {
+    "text": ".",
+    "start": 37,
+    "end": 38,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 3,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "deu",
+  "text": "Ich weiß, dass es 3,5 km sind.",
+  "tokens": [
+   {
+    "text": "Ich",
+    "start": 0,
+    "end": 3,
+    "pos": "PRON",
+    "lemma": "ich",
+    "head": 2,
+    "dep": "nsubj"
+   },
+   {
+    "text": "weiß",
+    "start": 4,
+    "end": 8,
+    "pos": "VERB",
+    "lemma": "wissen",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": ",",
+    "start": 8,
+    "end": 9,
+    "pos": "PUNCT",
+    "lemma": ",",
+    "head": 2,
+    "dep": "punct"
+   },
+   {
+    "text": "dass",
+    "start": 10,
+    "end": 14,
+    "pos": "SCONJ",
+    "lemma": "dass",
+    "head": 9,
+    "dep": "mark"
+   },
+   {
+    "text": "es",
+    "start": 15,
+    "end": 17,
+    "pos": "PRON",
+    "lemma": "es",
+    "head": 9,
+    "dep": "nsubj"
+   },
+   {
+    "text": "3",
+    "start": 18,
+    "end": 19,
+    "pos": "NUM",
+    "lemma": "3",
+    "head": 9,
+    "dep": "nummod"
+   },
+   {
+    "text": ",",
+    "start": 19,
+    "end": 20,
+    "pos": "NUM",
+    "lemma": ",",
+    "head": 9,
+    "dep": "nummod"
+   },
+   {
+    "text": "5",
+    "start": 20,
+    "end": 21,
+    "pos": "NUM",
+    "lemma": "5",
+    "head": 9,
+    "dep": "nummod"
+   },
+   {
+    "text": "km",
+    "start": 22,
+    "end": 24,
+    "pos": "NOUN",
+    "lemma": "km",
+    "head": 2,
+    "dep": "ccomp"
+   },
+   {
+    "text": "sind",
+    "start": 25,
+    "end": 29,
+    "pos": "VERB",
+    "lemma": "sein",
+    "head": 9,
+    "dep": "cop"
+   },
+   {
+    "text": ".",
+    "start": 29,
+    "end": 30,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 2,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "eng",
+  "text": "The cats were sleeping.",
+  "tokens": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 3,
+    "pos": "DET",
+    "lemma": "the",
+    "head": 2,
+    "dep": "det"
+   },
+   {
+    "text": "cats",
+    "start": 4,
+    "end": 8,
+    "pos": "NOUN",
+    "lemma": "cat",
+    "head": 4,
+    "dep": "nsubj"
+   },
+   {
+    "text": "were",
+    "start": 9,
+    "end": 13,
+    "pos": "AUX",
+    "lemma": "be",
+    "head": 4,
+    "dep": "aux"
+   },
+   {
+    "text": "sleeping",
+    "start": 14,
+    "end": 22,
+    "pos": "VERB",
+    "lemma": "sleep",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": ".",
+    "start": 22,
+    "end": 23,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 4,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "eng",
+  "text": "She had already finished her homework.",
+  "tokens": [
+   {
+    "text": "She",
+    "start": 0,
+    "end": 3,
+    "pos": "PRON",
+    "lemma": "she",
+    "head": 4,
+    "dep": "nsubj"
+   },
+   {
+    "text": "had",
+    "start": 4,
+    "end": 7,
+    "pos": "AUX",
+    "lemma": "have",
+    "head": 4,
+    "dep": "aux"
+   },
+   {
+    "text": "already",
+    "start": 8,
+    "end": 15,
+    "pos": "ADV",
+    "lemma": "already",
+    "head": 4,
+    "dep": "advmod"
+   },
+   {
+    "text": "finished",
+    "start": 16,
+    "end": 24,
+    "pos": "VERB",
+    "lemma": "finish",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "her",
+    "start": 25,
+    "end": 28,
+    "pos": "DET",
+    "lemma": "her",
+    "head": 6,
+    "dep": "det"
+   },
+   {
+    "text": "homework",
+    "start": 29,
+    "end": 37,
+    "pos": "NOUN",
+    "lemma": "homework",
+    "head": 4,
+    "dep": "obj"
+   },
+   {
+    "text": ".",
+    "start": 37,
+    "end": 38,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 4,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "eng",
+  "text": "Don't touch that — it's mine!",
+  "tokens": [
+   {
+    "text": "Don't",
+    "start": 0,
+    "end": 5,
+    "pos": "AUX",
+    "lemma": "do",
+    "head": 2,
+    "dep": "aux"
+   },
+   {
+    "text": "touch",
+    "start": 6,
+    "end": 11,
+    "pos": "VERB",
+    "lemma": "touch",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "that",
+    "start": 12,
+    "end": 16,
+    "pos": "PRON",
+    "lemma": "that",
+    "head": 2,
+    "dep": "obj"
+   },
+   {
+    "text": "—",
+    "start": 17,
+    "end": 18,
+    "pos": "PUNCT",
+    "lemma": "—",
+    "head": 2,
+    "dep": "punct"
+   },
+   {
+    "text": "it's",
+    "start": 19,
+    "end": 23,
+    "pos": "PRON",
+    "lemma": "it",
+    "head": 6,
+    "dep": "nsubj"
+   },
+   {
+    "text": "mine",
+    "start": 24,
+    "end": 28,
+    "pos": "PRON",
+    "lemma": "mine",
+    "head": 2,
+    "dep": "parataxis"
+   },
+   {
+    "text": "!",
+    "start": 28,
+    "end": 29,
+    "pos": "PUNCT",
+    "lemma": "!",
+    "head": 2,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "fra",
+  "text": "L'homme n'est pas venu, n'est-ce pas ?",
+  "tokens": [
+   {
+    "text": "L'",
+    "start": 0,
+    "end": 2,
+    "pos": "DET",
+    "lemma": "le",
+    "head": 2,
+    "dep": "det"
+   },
+   {
+    "text": "homme",
+    "start": 2,
+    "end": 7,
+    "pos": "NOUN",
+    "lemma": "homme",
+    "head": 6,
+    "dep": "nsubj"
+   },
+   {
+    "text": "n'",
+    "start": 8,
+    "end": 10,
+    "pos": "ADV",
+    "lemma": "ne",
+    "head": 4,
+    "dep": "advmod"
+   },
+   {
+    "text": "est",
+    "start": 10,
+    "end": 13,
+    "pos": "AUX",
+    "lemma": "être",
+    "head": 6,
+    "dep": "aux"
+   },
+   {
+    "text": "pas",
+    "start": 14,
+    "end": 17,
+    "pos": "ADV",
+    "lemma": "pas",
+    "head": 4,
+    "dep": "advmod"
+   },
+   {
+    "text": "venu",
+    "start": 18,
+    "end": 22,
+    "pos": "VERB",
+    "lemma": "venir",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": ",",
+    "start": 22,
+    "end": 23,
+    "pos": "PUNCT",
+    "lemma": ",",
+    "head": 6,
+    "dep": "punct"
+   },
+   {
+    "text": "n'",
+    "start": 24,
+    "end": 26,
+    "pos": "ADV",
+    "lemma": "ne",
+    "head": 9,
+    "dep": "advmod"
+   },
+   {
+    "text": "est",
+    "start": 26,
+    "end": 29,
+    "pos": "VERB",
+    "lemma": "être",
+    "head": 6,
+    "dep": "parataxis"
+   },
+   {
+    "text": "-",
+    "start": 29,
+    "end": 30,
+    "pos": "PUNCT",
+    "lemma": "-",
+    "head": 9,
+    "dep": "punct"
+   },
+   {
+    "text": "ce",
+    "start": 30,
+    "end": 32,
+    "pos": "PRON",
+    "lemma": "ce",
+    "head": 9,
+    "dep": "expl"
+   },
+   {
+    "text": "pas",
+    "start": 33,
+    "end": 36,
+    "pos": "ADV",
+    "lemma": "pas",
+    "head": 9,
+    "dep": "advmod"
+   },
+   {
+    "text": "?",
+    "start": 37,
+    "end": 38,
+    "pos": "PUNCT",
+    "lemma": "?",
+    "head": 6,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "fra",
+  "text": "Les oiseaux chantaient dans les arbres.",
+  "tokens": [
+   {
+    "text": "Les",
+    "start": 0,
+    "end": 3,
+    "pos": "DET",
+    "lemma": "le",
+    "head": 2,
+    "dep": "det"
+   },
+   {
+    "text": "oiseaux",
+    "start": 4,
+    "end": 11,
+    "pos": "NOUN",
+    "lemma": "oiseau",
+    "head": 3,
+    "dep": "nsubj"
+   },
+   {
+    "text": "chantaient",
+    "start": 12,
+    "end": 22,
+    "pos": "VERB",
+    "lemma": "chanter",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "dans",
+    "start": 23,
+    "end": 27,
+    "pos": "ADP",
+    "lemma": "dans",
+    "head": 6,
+    "dep": "case"
+   },
+   {
+    "text": "les",
+    "start": 28,
+    "end": 31,
+    "pos": "DET",
+    "lemma": "le",
+    "head": 6,
+    "dep": "det"
+   },
+   {
+    "text": "arbres",
+    "start": 32,
+    "end": 38,
+    "pos": "NOUN",
+    "lemma": "arbre",
+    "head": 3,
+    "dep": "obl"
+   },
+   {
+    "text": ".",
+    "start": 38,
+    "end": 39,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 3,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "fra",
+  "text": "Je voudrais un café, s'il vous plaît.",
+  "tokens": [
+   {
+    "text": "Je",
+    "start": 0,
+    "end": 2,
+    "pos": "PRON",
+    "lemma": "je",
+    "head": 2,
+    "dep": "nsubj"
+   },
+   {
+    "text": "voudrais",
+    "start": 3,
+    "end": 11,
+    "pos": "VERB",
+    "lemma": "vouloir",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "un",
+    "start": 12,
+    "end": 14,
+    "pos": "DET",
+    "lemma": "un",
+    "head": 4,
+    "dep": "det"
+   },
+   {
+    "text": "café",
+    "start": 15,
+    "end": 19,
+    "pos": "NOUN",
+    "lemma": "café",
+    "head": 2,
+    "dep": "obj"
+   },
+   {
+    "text": ",",
+    "start": 19,
+    "end": 20,
+    "pos": "PUNCT",
+    "lemma": ",",
+    "head": 2,
+    "dep": "punct"
+   },
+   {
+    "text": "s'",
+    "start": 21,
+    "end": 23,
+    "pos": "SCONJ",
+    "lemma": "si",
+    "head": 9,
+    "dep": "mark"
+   },
+   {
+    "text": "il",
+    "start": 23,
+    "end": 25,
+    "pos": "PRON",
+    "lemma": "il",
+    "head": 9,
+    "dep": "nsubj"
+   },
+   {
+    "text": "vous",
+    "start": 26,
+    "end": 30,
+    "pos": "PRON",
+    "lemma": "vous",
+    "head": 9,
+    "dep": "iobj"
+   },
+   {
+    "text": "plaît",
+    "start": 31,
+    "end": 36,
+    "pos": "VERB",
+    "lemma": "plaire",
+    "head": 2,
+    "dep": "discourse"
+   },
+   {
+    "text": ".",
+    "start": 36,
+    "end": 37,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 2,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "spa",
+  "text": "¿Dónde está la biblioteca?",
+  "tokens": [
+   {
+    "text": "¿Dónde",
+    "start": 0,
+    "end": 6,
+    "pos": "PUNCT",
+    "lemma": "¿",
+    "head": 2,
+    "dep": "punct"
+   },
+   {
+    "text": "está",
+    "start": 7,
+    "end": 11,
+    "pos": "VERB",
+    "lemma": "estar",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "la",
+    "start": 12,
+    "end": 14,
+    "pos": "DET",
+    "lemma": "el",
+    "head": 4,
+    "dep": "det"
+   },
+   {
+    "text": "biblioteca",
+    "start": 15,
+    "end": 25,
+    "pos": "NOUN",
+    "lemma": "biblioteca",
+    "head": 2,
+    "dep": "nsubj"
+   },
+   {
+    "text": "?",
+    "start": 25,
+    "end": 26,
+    "pos": "PUNCT",
+    "lemma": "?",
+    "head": 2,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "spa",
+  "text": "Los niños corrieron hacia la playa.",
+  "tokens": [
+   {
+    "text": "Los",
+    "start": 0,
+    "end": 3,
+    "pos": "DET",
+    "lemma": "el",
+    "head": 2,
+    "dep": "det"
+   },
+   {
+    "text": "niños",
+    "start": 4,
+    "end": 9,
+    "pos": "NOUN",
+    "lemma": "niño",
+    "head": 3,
+    "dep": "nsubj"
+   },
+   {
+    "text": "corrieron",
+    "start": 10,
+    "end": 19,
+    "pos": "VERB",
+    "lemma": "correr",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "hacia",
+    "start": 20,
+    "end": 25,
+    "pos": "ADP",
+    "lemma": "hacia",
+    "head": 6,
+    "dep": "case"
+   },
+   {
+    "text": "la",
+    "start": 26,
+    "end": 28,
+    "pos": "DET",
+    "lemma": "el",
+    "head": 6,
+    "dep": "det"
+   },
+   {
+    "text": "playa",
+    "start": 29,
+    "end": 34,
+    "pos": "NOUN",
+    "lemma": "playa",
+    "head": 3,
+    "dep": "obl"
+   },
+   {
+    "text": ".",
+    "start": 34,
+    "end": 35,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 3,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "spa",
+  "text": "Me gustaría viajar a España el año que viene.",
+  "tokens": [
+   {
+    "text": "Me",
+    "start": 0,
+    "end": 2,
+    "pos": "PRON",
+    "lemma": "me",
+    "head": 2,
+    "dep": "iobj"
+   },
+   {
+    "text": "gustaría",
+    "start": 3,
+    "end": 11,
+    "pos": "VERB",
+    "lemma": "gustar",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "viajar",
+    "start": 12,
+    "end": 18,
+    "pos": "VERB",
+    "lemma": "viajar",
+    "head": 2,
+    "dep": "xcomp"
+   },
+   {
+    "text": "a",
+    "start": 19,
+    "end": 20,
+    "pos": "ADP",
+    "lemma": "a",
+    "head": 5,
+    "dep": "case"
+   },
+   {
+    "text": "España",
+    "start": 21,
+    "end": 27,
+    "pos": "PROPN",
+    "lemma": "España",
+    "head": 3,
+    "dep": "obl"
+   },
+   {
+    "text": "el",
+    "start": 28,
+    "end": 30,
+    "pos": "DET",
+    "lemma": "el",
+    "head": 7,
+    "dep": "det"
+   },
+   {
+    "text": "año",
+    "start": 31,
+    "end": 34,
+    "pos": "NOUN",
+    "lemma": "año",
+    "head": 3,
+    "dep": "obl:tmod"
+   },
+   {
+    "text": "que",
+    "start": 35,
+    "end": 38,
+    "pos": "PRON",
+    "lemma": "que",
+    "head": 9,
+    "dep": "nsubj"
+   },
+   {
+    "text": "viene",
+    "start": 39,
+    "end": 44,
+    "pos": "VERB",
+    "lemma": "venir",
+    "head": 7,
+    "dep": "acl:relcl"
+   },
+   {
+    "text": ".",
+    "start": 44,
+    "end": 45,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 2,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "ita",
+  "text": "I gatti dormivano sul divano.",
+  "tokens": [
+   {
+    "text": "I",
+    "start": 0,
+    "end": 1,
+    "pos": "DET",
+    "lemma": "il",
+    "head": 2,
+    "dep": "det"
+   },
+   {
+    "text": "gatti",
+    "start": 2,
+    "end": 7,
+    "pos": "NOUN",
+    "lemma": "gatto",
+    "head": 3,
+    "dep": "nsubj"
+   },
+   {
+    "text": "dormivano",
+    "start": 8,
+    "end": 17,
+    "pos": "VERB",
+    "lemma": "dormire",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "sul",
+    "start": 18,
+    "end": 21,
+    "pos": "ADP",
+    "lemma": "sul",
+    "head": 5,
+    "dep": "case"
+   },
+   {
+    "text": "divano",
+    "start": 22,
+    "end": 28,
+    "pos": "NOUN",
+    "lemma": "divano",
+    "head": 3,
+    "dep": "obl"
+   },
+   {
+    "text": ".",
+    "start": 28,
+    "end": 29,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 3,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "ita",
+  "text": "Domani andremo al mare con gli amici.",
+  "tokens": [
+   {
+    "text": "Domani",
+    "start": 0,
+    "end": 6,
+    "pos": "ADV",
+    "lemma": "domani",
+    "head": 2,
+    "dep": "advmod"
+   },
+   {
+    "text": "andremo",
+    "start": 7,
+    "end": 14,
+    "pos": "VERB",
+    "lemma": "andare",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "al",
+    "start": 15,
+    "end": 17,
+    "pos": "ADP",
+    "lemma": "al",
+    "head": 4,
+    "dep": "case"
+   },
+   {
+    "text": "mare",
+    "start": 18,
+    "end": 22,
+    "pos": "NOUN",
+    "lemma": "mare",
+    "head": 2,
+    "dep": "obl"
+   },
+   {
+    "text": "con",
+    "start": 23,
+    "end": 26,
+    "pos": "ADP",
+    "lemma": "con",
+    "head": 7,
+    "dep": "case"
+   },
+   {
+    "text": "gli",
+    "start": 27,
+    "end": 30,
+    "pos": "DET",
+    "lemma": "il",
+    "head": 7,
+    "dep": "det"
+   },
+   {
+    "text": "amici",
+    "start": 31,
+    "end": 36,
+    "pos": "NOUN",
+    "lemma": "amico",
+    "head": 2,
+    "dep": "obl"
+   },
+   {
+    "text": ".",
+    "start": 36,
+    "end": 37,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 2,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "por",
+  "text": "Vamos à praia amanhã!",
+  "tokens": [
+   {
+    "text": "Vamos",
+    "start": 0,
+    "end": 5,
+    "pos": "VERB",
+    "lemma": "ir",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "à",
+    "start": 6,
+    "end": 7,
+    "pos": "ADP",
+    "lemma": "à",
+    "head": 3,
+    "dep": "case"
+   },
+   {
+    "text": "praia",
+    "start": 8,
+    "end": 13,
+    "pos": "NOUN",
+    "lemma": "praia",
+    "head": 1,
+    "dep": "obl"
+   },
+   {
+    "text": "amanhã",
+    "start": 14,
+    "end": 20,
+    "pos": "ADV",
+    "lemma": "amanhã",
+    "head": 1,
+    "dep": "advmod"
+   },
+   {
+    "text": "!",
+    "start": 20,
+    "end": 21,
+    "pos": "PUNCT",
+    "lemma": "!",
+    "head": 1,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "por",
+  "text": "As crianças brincavam no parque.",
+  "tokens": [
+   {
+    "text": "As",
+    "start": 0,
+    "end": 2,
+    "pos": "DET",
+    "lemma": "as",
+    "head": 2,
+    "dep": "det"
+   },
+   {
+    "text": "crianças",
+    "start": 3,
+    "end": 11,
+    "pos": "NOUN",
+    "lemma": "criança",
+    "head": 3,
+    "dep": "nsubj"
+   },
+   {
+    "text": "brincavam",
+    "start": 12,
+    "end": 21,
+    "pos": "VERB",
+    "lemma": "brincar",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "no",
+    "start": 22,
+    "end": 24,
+    "pos": "ADP",
+    "lemma": "no",
+    "head": 5,
+    "dep": "case"
+   },
+   {
+    "text": "parque",
+    "start": 25,
+    "end": 31,
+    "pos": "NOUN",
+    "lemma": "parque",
+    "head": 3,
+    "dep": "obl"
+   },
+   {
+    "text": ".",
+    "start": 31,
+    "end": 32,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 3,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "rus",
+  "text": "Я им доверяю — правда.",
+  "tokens": [
+   {
+    "text": "Я",
+    "start": 0,
+    "end": 1,
+    "pos": "PRON",
+    "lemma": "я",
+    "head": 3,
+    "dep": "nsubj"
+   },
+   {
+    "text": "им",
+    "start": 2,
+    "end": 4,
+    "pos": "PRON",
+    "lemma": "он",
+    "head": 3,
+    "dep": "iobj"
+   },
+   {
+    "text": "доверяю",
+    "start": 5,
+    "end": 12,
+    "pos": "VERB",
+    "lemma": "доверять",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "—",
+    "start": 13,
+    "end": 14,
+    "pos": "PUNCT",
+    "lemma": "—",
+    "head": 3,
+    "dep": "punct"
+   },
+   {
+    "text": "правда",
+    "start": 15,
+    "end": 21,
+    "pos": "NOUN",
+    "lemma": "правда",
+    "head": 3,
+    "dep": "discourse"
+   },
+   {
+    "text": ".",
+    "start": 21,
+    "end": 22,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 3,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "rus",
+  "text": "Дети играли в парке вчера вечером.",
+  "tokens": [
+   {
+    "text": "Дети",
+    "start": 0,
+    "end": 4,
+    "pos": "NOUN",
+    "lemma": "ребёнок",
+    "head": 2,
+    "dep": "nsubj"
+   },
+   {
+    "text": "играли",
+    "start": 5,
+    "end": 11,
+    "pos": "VERB",
+    "lemma": "играть",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "в",
+    "start": 12,
+    "end": 13,
+    "pos": "ADP",
+    "lemma": "в",
+    "head": 4,
+    "dep": "case"
+   },
+   {
+    "text": "парке",
+    "start": 14,
+    "end": 19,
+    "pos": "NOUN",
+    "lemma": "парк",
+    "head": 2,
+    "dep": "obl"
+   },
+   {
+    "text": "вчера",
+    "start": 20,
+    "end": 25,
+    "pos": "ADV",
+    "lemma": "вчера",
+    "head": 2,
+    "dep": "advmod"
+   },
+   {
+    "text": "вечером",
+    "start": 26,
+    "end": 33,
+    "pos": "NOUN",
+    "lemma": "вечер",
+    "head": 2,
+    "dep": "obl:tmod"
+   },
+   {
+    "text": ".",
+    "start": 33,
+    "end": 34,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 2,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "kor",
+  "text": "고양이가 좋아요.",
+  "tokens": [
+   {
+    "text": "고양이가",
+    "start": 0,
+    "end": 4,
+    "pos": "NOUN",
+    "lemma": "고양이",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": ".",
+    "start": 8,
+    "end": 9,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 0,
+    "dep": "root"
+   }
+  ]
+ },
+ {
+  "lang": "kor",
+  "text": "아이들이 공원에서 놀고 있었어요.",
+  "tokens": [
+   {
+    "text": "공원에서",
+    "start": 5,
+    "end": 9,
+    "pos": "NOUN",
+    "lemma": "공원",
+    "head": 2,
+    "dep": "obl"
+   },
+   {
+    "text": "놀고",
+    "start": 10,
+    "end": 12,
+    "pos": "VERB",
+    "lemma": "놀다",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": ".",
+    "start": 17,
+    "end": 18,
+    "pos": "PUNCT",
+    "lemma": ".",
+    "head": 2,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "hin",
+  "text": "मुझे बिल्लियाँ पसंद हैं।",
+  "tokens": [
+   {
+    "text": "मुझे",
+    "start": 0,
+    "end": 4,
+    "pos": "PRON",
+    "lemma": "मैं",
+    "head": 3,
+    "dep": "obl"
+   },
+   {
+    "text": "बिल्लियाँ",
+    "start": 5,
+    "end": 14,
+    "pos": "NOUN",
+    "lemma": "बिल्ी",
+    "head": 3,
+    "dep": "nsubj"
+   },
+   {
+    "text": "पसंद",
+    "start": 15,
+    "end": 19,
+    "pos": "NOUN",
+    "lemma": "पसंद",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "हैं।",
+    "start": 20,
+    "end": 24,
+    "pos": "AUX",
+    "lemma": "होना",
+    "head": 3,
+    "dep": "cop"
+   }
+  ]
+ },
+ {
+  "lang": "hin",
+  "text": "बच्चे कल बगीचे में खेल रहे थे।",
+  "tokens": [
+   {
+    "text": "बच्चे",
+    "start": 0,
+    "end": 5,
+    "pos": "NOUN",
+    "lemma": "बच्चा",
+    "head": 5,
+    "dep": "nsubj"
+   },
+   {
+    "text": "कल",
+    "start": 6,
+    "end": 8,
+    "pos": "ADV",
+    "lemma": "कल",
+    "head": 5,
+    "dep": "advmod"
+   },
+   {
+    "text": "बगीचे",
+    "start": 9,
+    "end": 14,
+    "pos": "NOUN",
+    "lemma": "बगीचा",
+    "head": 5,
+    "dep": "obl"
+   },
+   {
+    "text": "में",
+    "start": 15,
+    "end": 18,
+    "pos": "ADP",
+    "lemma": "में",
+    "head": 3,
+    "dep": "case"
+   },
+   {
+    "text": "खेल",
+    "start": 19,
+    "end": 22,
+    "pos": "VERB",
+    "lemma": "खेलना",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "रहे",
+    "start": 23,
+    "end": 26,
+    "pos": "AUX",
+    "lemma": "रहना",
+    "head": 5,
+    "dep": "aux"
+   },
+   {
+    "text": "थे।",
+    "start": 27,
+    "end": 30,
+    "pos": "AUX",
+    "lemma": "होना",
+    "head": 5,
+    "dep": "aux"
+   }
+  ]
+ },
+ {
+  "lang": "jpn",
+  "text": "私は猫が好きです。",
+  "tokens": [
+   {
+    "text": "私は猫",
+    "start": 0,
+    "end": 3,
+    "pos": "ADP",
+    "lemma": "私",
+    "head": 1,
+    "dep": "case"
+   },
+   {
+    "text": "が好きです。",
+    "start": 3,
+    "end": 9,
+    "pos": "ADP",
+    "lemma": "が好だ",
+    "head": 0,
+    "dep": "root"
+   }
+  ]
+ },
+ {
+  "lang": "jpn",
+  "text": "子供たちは公園で遊んでいました。",
+  "tokens": [
+   {
+    "text": "子供たちは公園で遊んでいました。",
+    "start": 0,
+    "end": 16,
+    "pos": "NOUN",
+    "lemma": "子供",
+    "head": 0,
+    "dep": "root"
+   }
+  ]
+ }
+]

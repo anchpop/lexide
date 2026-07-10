@@ -7,6 +7,11 @@ edition = "2021"
 name = "lexide"
 path = "src/lib.rs"
 
+[[bin]]
+name = "build-lemma-fst"
+path = "src/bin/build_lemma_fst.rs"
+required-features = ["local"]
+
 [dependencies]
 # Core dependencies
 tokio = { version = "1.42", features = ["full"] }
@@ -18,24 +23,18 @@ futures = "0.3.31"
 regex = "1.0"
 unicode-normalization = "0.1"
 
-# Local inference dependencies (only included with 'local' feature)
-mistralrs = { git = "https://github.com/anchpop/mistral.rs.git", rev = "3c296725d1c8604f0954e3b7453abec0ce09a536", optional = true }
-mistralrs-core = { git = "https://github.com/anchpop/mistral.rs.git", rev = "3c296725d1c8604f0954e3b7453abec0ce09a536", optional = true }
+# Local inference dependencies (only included with 'local' feature):
+# the parsley tagger — ONNX encoder via ort, XLM-R subword tokenization via tokenizers,
+# byte-minGRU segmenter weights via safetensors, Wiktionary lemma tables via fst.
+ort = { version = "2.0.0-rc.10", optional = true }
+tokenizers = { version = "0.21", optional = true }
+safetensors = { version = "0.6", optional = true }
+fst = { version = "0.4", optional = true }
 
 # Remote inference dependencies (only included with 'remote' feature)
 reqwest = { version = "0.12", features = ["json"], optional = true }
 
 [features]
-# Backend selection - choose one
-local = ["dep:mistralrs", "dep:mistralrs-core"]
+# Backend selection - choose one (or both)
+local = ["dep:ort", "dep:tokenizers", "dep:safetensors", "dep:fst"]
 remote = ["dep:reqwest"]
-
-# Hardware acceleration features (only applicable with 'local' feature)
-cuda = ["local", "mistralrs-core/cuda", "mistralrs/cuda"]
-cudnn = ["local", "mistralrs-core/cudnn", "mistralrs/cudnn"]
-metal = ["local", "mistralrs-core/metal", "mistralrs/metal"]
-flash-attn = ["cuda", "mistralrs-core/flash-attn", "mistralrs/flash-attn"]
-accelerate = ["local", "mistralrs-core/accelerate", "mistralrs/accelerate"]
-mkl = ["local", "mistralrs-core/mkl", "mistralrs/mkl"]
-nccl = ["local", "mistralrs-core/nccl", "mistralrs/nccl"]
-ring = ["local", "mistralrs-core/ring", "mistralrs/ring"]
