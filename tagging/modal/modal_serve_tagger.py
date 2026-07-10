@@ -102,7 +102,10 @@ class Parsley:
         if lang not in self._tables:
             from lemma_lookup import LemmaTable
             p = os.path.join(TABLES_DIR, f"wikt_{lang}.json")
-            self._tables[lang] = LemmaTable.load(p) if lang and os.path.exists(p) else None
+            priors = os.path.join(TABLES_DIR, f"wikt_priors_{lang}.json")
+            self._tables[lang] = (
+                LemmaTable.load(p, priors_path=priors) if lang and os.path.exists(p) else None
+            )
         return self._tables[lang]
 
     def _tag_one(self, text, lang):

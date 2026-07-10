@@ -36,8 +36,13 @@ OOV forms.
 - **Layered fallback, never an override** (`lemma_lookup.LemmaTable.resolve`): a confident
   (non-copy) model lemma wins; the table only fills in where the model punted to copy on a
   content form; copy is the last resort. So the table is strictly a floor.
-- **Ambiguous `(form,POS)`:** pick the candidate closest in length to the form (the true base,
-  not a homograph from another paradigm).
+- **Ambiguous `(form,POS)`:** prefer the lemmatization the training data uses
+  (`build_lemma_priors.py` → `wikt_priors_{lang}.json`): first how training lemmatized this
+  exact form, then overall training frequency of the candidate lemma, then the candidate
+  closest in length to the form. Without the priors, closest-length + lexicographic tie-break
+  occasionally picked obsolete homographs (eng `love→lofe`, spa `mejor→mejor` instead of the
+  in-policy `bien`). The same rule runs in the Rust `build-lemma-fst` builder, so the parsley
+  serve and the lexide `local` backend stay token-for-token identical.
 
 ## Two bugs found during validation (both fixed in `parse_wiktextract.py`)
 
@@ -55,8 +60,10 @@ Lesson: validate on a second, typologically different language — German alone 
 
 - `parse_wiktextract.py` — stream kaikki.org Wiktextract JSONL → `{POS: {form: [lemmas]}}`.
   `curl -sL https://kaikki.org/dictionary/<Lang>/kaikki.org-dictionary-<Lang>.jsonl | python3 parse_wiktextract.py out.json <lang_code>`
-- `lemma_lookup.py` — `LemmaTable.load(path).resolve(form, pos, model_lemma)`; wired into
-  `predict.py` via `Pipeline(..., lemma_table_path=...)`.
+- `build_lemma_priors.py` — training-data lemma counts for candidate selection
+  (`wikt_priors_{lang}.json`, next to the tables; rerun after rebuilding tables or training data).
+- `lemma_lookup.py` — `LemmaTable.load(path, priors_path=...).resolve(form, pos, model_lemma)`;
+  wired into `predict.py` via `Pipeline(..., lemma_table_path=...)` and the parsley serve.
 - `validate_ood.py` — the holdout validation above.
 - Tables live in `data/lemma_tables/` (gitignored; regenerate with `parse_wiktextract.py`).
 

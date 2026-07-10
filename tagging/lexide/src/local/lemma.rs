@@ -81,8 +81,16 @@ impl LemmaTable {
 
 /// Build the compact table from parsed Wiktionary JSON (`{pos: {form: [lemmas]}}`),
 /// resolving multi-candidate entries the way `lemma_lookup.LemmaTable.lookup` does:
-/// prefer the candidate closest in char length to the form, ties broken by string order.
-pub fn build_table<W: Write>(json: &serde_json::Value, mut out: W) -> Result<(usize, usize)> {
+/// prefer the lemmatization the training data uses — first how training lemmatized this
+/// exact form, then overall lemma frequency (`priors` =
+/// `{pos: {"forms": {form: {lemma: n}}, "lemmas": {lemma: n}}}` from
+/// `tagger/build_lemma_priors.py`; e.g. eng "love" over the obsolete homograph "lofe") —
+/// then the candidate closest in char length to the form, ties broken by string order.
+pub fn build_table<W: Write>(
+    json: &serde_json::Value,
+    priors: Option<&serde_json::Value>,
+    mut out: W,
+) -> Result<(usize, usize)> {
     let mut entries: BTreeMap<Vec<u8>, (String, u64)> = BTreeMap::new();
     let mut blob: Vec<u8> = Vec::new();
     let mut interned: HashMap<String, u64> = HashMap::new();
@@ -94,6 +102,15 @@ pub fn build_table<W: Write>(json: &serde_json::Value, mut out: W) -> Result<(us
         let Some(forms) = obj.get(pos).and_then(|v| v.as_object()) else {
             continue;
         };
+        let pos_priors = priors.and_then(|p| p.get(pos));
+        let form_priors = pos_priors.and_then(|p| p.get("forms")).and_then(|v| v.as_object());
+        let lemma_priors = pos_priors.and_then(|p| p.get("lemmas")).and_then(|v| v.as_object());
+        let count = |table: Option<&serde_json::Map<String, serde_json::Value>>, key: &str| {
+            table
+                .and_then(|t| t.get(key))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+        };
         for (form, cands) in forms {
             let cands: Vec<&str> = cands
                 .as_array()
@@ -102,10 +119,20 @@ pub fn build_table<W: Write>(json: &serde_json::Value, mut out: W) -> Result<(us
             if cands.is_empty() {
                 continue;
             }
+            let this_form = form_priors
+                .and_then(|f| f.get(form.as_str()))
+                .and_then(|v| v.as_object());
             let form_len = form.chars().count() as i64;
             let lemma = *cands
                 .iter()
-                .min_by_key(|c| ((c.chars().count() as i64 - form_len).abs(), c.as_bytes()))
+                .min_by_key(|c| {
+                    (
+                        -count(this_form, c),
+                        -count(lemma_priors, c),
+                        (c.chars().count() as i64 - form_len).abs(),
+                        c.as_bytes(),
+                    )
+                })
                 .unwrap();
             if lemma.len() > 0xffff {
                 continue; // value packs the byte length into 16 bits; nothing real is this long
@@ -147,12 +174,20 @@ mod tests {
                 "cats": ["cat", "catl", "ca"],       // deltas 1, 0, 2 -> closest length wins: "catl"
                 "chats": ["chat", "chas"],           // equal delta -> lexicographically smaller "chas"
             },
-            "VERB": {"went": ["go"]},
+            "VERB": {
+                "went": ["go"],
+                "love": ["lofe", "love"],            // form prior: training lemmatizes love->love
+                "runs": ["rune", "run"],             // lemma-frequency prior beats closest-length
+            },
             "PROPN": {"Berlin": ["Berlino"]},        // non-content POS: dropped at build
         });
+        let priors = serde_json::json!({"VERB": {
+            "forms": {"love": {"love": 1516}},
+            "lemmas": {"run": 900}
+        }});
         let mut buf = Vec::new();
-        let (n, _) = build_table(&json, &mut buf).unwrap();
-        assert_eq!(n, 4); // PROPN entry excluded
+        let (n, _) = build_table(&json, Some(&priors), &mut buf).unwrap();
+        assert_eq!(n, 6); // PROPN entry excluded
         // round-trip through a temp file to exercise load()
         let dir = std::env::temp_dir().join("lexide-lemma-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -172,6 +207,10 @@ mod tests {
         // equal delta (4 vs 5 for both): tie broken by byte order -> "chas"
         assert_eq!(t.lookup("chats", "NOUN"), Some("chas"));
         assert_eq!(t.lookup("went", "VERB"), Some("go"));
+        // form-level training prior beats the lexicographic rule ("lofe" would otherwise win)
+        assert_eq!(t.lookup("love", "VERB"), Some("love"));
+        // lemma-frequency prior beats closest-length ("rune", delta 0, would otherwise win)
+        assert_eq!(t.lookup("runs", "VERB"), Some("run"));
         assert_eq!(t.lookup("Berlin", "PROPN"), None);
         assert_eq!(t.lookup("unknown", "NOUN"), None);
     }

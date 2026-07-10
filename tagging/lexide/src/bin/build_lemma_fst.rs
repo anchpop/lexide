@@ -39,17 +39,33 @@ fn main() -> Result<()> {
         else {
             continue;
         };
+        if lang.starts_with("priors_") {
+            continue; // companion priors files, not tables
+        }
         let json: serde_json::Value =
             serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(entry.path())?))
                 .with_context(|| format!("failed to parse {name}"))?;
+        // Training-data priors steer multi-candidate selection (build_lemma_priors.py).
+        let priors_path = in_dir.join(format!("wikt_priors_{lang}.json"));
+        let priors: Option<serde_json::Value> = if priors_path.exists() {
+            Some(
+                serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(
+                    &priors_path,
+                )?))
+                .with_context(|| format!("failed to parse wikt_priors_{lang}.json"))?,
+            )
+        } else {
+            None
+        };
         let out_path = out_dir.join(format!("wikt_{lang}.fst"));
         let mut out = std::io::BufWriter::new(std::fs::File::create(&out_path)?);
-        let (n, bytes) = lexide::build_table(&json, &mut out)?;
+        let (n, bytes) = lexide::build_table(&json, priors.as_ref(), &mut out)?;
         let in_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
         println!(
-            "{lang}: {n} entries, {:.1} MB json -> {:.1} MB fst",
+            "{lang}: {n} entries, {:.1} MB json -> {:.1} MB fst{}",
             in_bytes as f64 / 1e6,
-            bytes as f64 / 1e6
+            bytes as f64 / 1e6,
+            if priors.is_some() { " (with priors)" } else { "" }
         );
         built += 1;
     }

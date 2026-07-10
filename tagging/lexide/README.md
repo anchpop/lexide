@@ -66,7 +66,11 @@ cargo run --release --features local --bin build-lemma-fst -- \
     --in ../data/lemma_tables --out ../data/onnx/lemma_fst
 ```
 
-Missing tables are fine — lemmas are then model-only, same as the server without tables.
+Multi-candidate entries are resolved at build time using training-data priors
+(`wikt_priors_{lang}.json`, built by `tagger/build_lemma_priors.py`, picked up automatically
+from the `--in` directory) — training's lemmatization wins over homographs like eng
+`love→lofe`. Missing tables are fine — lemmas are then model-only, same as the server
+without tables.
 
 ## Matching
 

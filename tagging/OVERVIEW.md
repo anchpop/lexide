@@ -55,8 +55,11 @@ a *different* policy — so **don't override in-distribution labels**. But a Wik
 `(form,POS)→lemma` table is an excellent **out-of-distribution floor** (`tagger/lemma_lookup.py`,
 built by `tagger/parse_wiktextract.py`): on out-of-training content-word forms it lifts lemma
 accuracy over copy-the-form by **+23 (deu) / +39 (rus) / +28 (spa) / +21 (fra) / +12 (eng)**,
-agreeing with/correcting Gemma 93–96%. Applied to content POS only (proper nouns copy). Tables
-built for 9 languages (jpn omitted — gated + weakest fit); in `data/lemma_tables/` (gitignored).
+agreeing with/correcting Gemma 93–96%. Applied to content POS only (proper nouns copy).
+Multi-candidate entries are resolved by **training-data priors** (`tagger/build_lemma_priors.py`:
+prefer training's lemmatization of the exact form, then training lemma frequency, then closest
+length — fixes homograph picks like eng `love→lofe`). Tables built for 9 languages (jpn omitted
+— gated + weakest fit); in `data/lemma_tables/` (gitignored).
 
 **Deployment — `parsley` 🌿** (`modal/modal_serve_tagger.py`). CPU Modal serve, scale-to-zero,
 **live** at `https://anchpop--lexide-parsley-parsley-tag.modal.run`. `POST {sentences, lang}` →

@@ -14,6 +14,7 @@ prediction — only fills in where the model would otherwise punt to copy:
     THIS (unseen content forms)         ->  copy the form (last resort)
 """
 import json
+import os
 
 # Open-class POS where lemmatization is a real transformation and Wiktionary helps.
 # Proper nouns / closed-class copy instead (see module docstring).
@@ -21,21 +22,29 @@ CONTENT_POS = {"NOUN", "VERB", "ADJ", "ADV"}
 
 
 class LemmaTable:
-    def __init__(self, table, content_pos=CONTENT_POS):
+    def __init__(self, table, content_pos=CONTENT_POS, priors=None):
         self.table = table  # {pos: {form: [lemmas]}}
         self.content_pos = content_pos
+        # {pos: {"forms": {form: {lemma: n}}, "lemmas": {lemma: n}}} (build_lemma_priors.py)
+        self.priors = priors or {}
 
     @classmethod
-    def load(cls, path, content_pos=CONTENT_POS):
+    def load(cls, path, content_pos=CONTENT_POS, priors_path=None):
+        priors = None
+        if priors_path and os.path.exists(priors_path):
+            with open(priors_path, encoding="utf-8") as f:
+                priors = json.load(f)
         with open(path, encoding="utf-8") as f:
-            return cls(json.load(f), content_pos)
+            return cls(json.load(f), content_pos, priors)
 
     def lookup(self, form, pos):
         """Return a lemma for (form, pos), or None if the table shouldn't fire.
 
-        Only content POS are served. Among multiple candidates, prefer the one closest to the
-        surface form (smallest length delta), which is almost always the correct morphological
-        base rather than a homograph from another paradigm.
+        Only content POS are served. Among multiple candidates, prefer the lemmatization the
+        training data uses: first how training lemmatized this exact form (e.g. eng "love"
+        over the obsolete homograph "lofe"), then overall lemma frequency, and only then the
+        candidate closest to the surface form (smallest length delta), which is almost always
+        the correct morphological base rather than a homograph from another paradigm.
         """
         if pos not in self.content_pos:
             return None
@@ -44,7 +53,11 @@ class LemmaTable:
             return None
         if len(cands) == 1:
             return cands[0]
-        return min(cands, key=lambda c: (abs(len(c) - len(form)), c))
+        priors = self.priors.get(pos, {})
+        form_counts = priors.get("forms", {}).get(form, {})
+        lemma_counts = priors.get("lemmas", {})
+        return min(cands, key=lambda c: (-form_counts.get(c, 0), -lemma_counts.get(c, 0),
+                                         abs(len(c) - len(form)), c))
 
     def resolve(self, form, pos, model_lemma):
         """Layered fallback: keep a confident (non-copy) model lemma; otherwise, for a content
