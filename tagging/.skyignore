@@ -1,0 +1,14 @@
+# Only tagger/ code and data/processed are needed on the training node.
+tagger/.venv
+tagger/output
+data/big
+data/audio
+train
+lexide
+modal
+src
+pyproject.toml
+sky.yaml
+**/__pycache__
+*.pyc
+.git

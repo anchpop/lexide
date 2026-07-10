@@ -1,0 +1,45 @@
+name: lexide-tagger
+
+# Single x86 Ampere+ GPU (bf16 + pip CUDA torch). A6000 (48GB, $1.09/hr) is cheapest;
+# fall back to A10 then A100 if capacity is dry. GH200 excluded on purpose (aarch64 = no
+# pip CUDA torch wheels).
+resources:
+  cloud: lambda
+  # All bf16-capable (Ampere/Ada/Hopper); Turing RTX6000 excluded (no bf16). sky picks
+  # the cheapest available, so a wide set just improves the odds of landing a node while
+  # Lambda capacity is tight. Single-GPU only (:1) — never a multi-GPU box.
+  accelerators:
+    A6000: 1
+    A10: 1
+    L40S: 1
+    A100: 1
+    H100: 1
+  disk_size: 100
+  # autostop/autodown set via CLI (-i 20 --down) so it works across sky versions.
+
+workdir: /data/coding/lexide/tagging   # .skyignore trims this to tagger/ + data/processed
+
+setup: |
+  set -e
+  # Only (re)install torch if the preinstalled one can't see CUDA. Pin to a cu12 build
+  # (matches Lambda's ~570 driver); the default pip wheel is now cu13 and silently falls
+  # back to CPU on these drivers. run_node.sh + train.py hard-assert cuda before training.
+  if ! python3 -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+    pip install --quiet "torch==2.7.0" --index-url https://download.pytorch.org/whl/cu128
+  fi
+  python3 -c "import torch; assert torch.cuda.is_available(), 'torch still cannot see CUDA after setup'"
+  pip install --quiet 'transformers>=4.44' 'tokenizers>=0.19' sentencepiece protobuf \
+    huggingface_hub wandb 'numpy<2'
+
+run: |
+  set -e
+  cd ~/sky_workdir
+  bash tagger/run_node.sh
+
+envs:
+  ENCODER: xlm-roberta-base
+  BATCH: "64"
+  EPOCHS: "2"
+  EVAL_EVERY: "3000"
+  TOK_EPOCHS: "2"
+  WANDB_PROJECT: lexide-tagger

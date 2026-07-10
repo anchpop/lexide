@@ -2,4 +2,6 @@
 
 ## Rules
 
-- Never cancel a job on a cloud server (Lambda, RunPod, etc.) without getting explicit user permission first. Jobs that look "stale" or "stuck" may actually be important long-running work (e.g. a Gemma finetune that takes 12+ hours). The user may have started training jobs outside of Claude sessions, so don't assume unrecognized jobs are orphaned. Always ask before cancelling — the cost of asking is zero, the cost of killing someone's training run is hours of lost compute.
+- Cloud jobs (Lambda, RunPod, etc.):
+  - **When working autonomously** (the user has set you to work on your own and stepped away): you may cancel/restart/manage cloud jobs on your own judgment — no need to ask first. In exchange, you MUST set up automation to check on the work: wake yourself every ~30 minutes while things are getting started (spin-up, first steps), then every ~2 hours once it's cooking steadily, to verify status and results. A silent failure (e.g. a job that's "running" but pinned to CPU) must not go hours unnoticed — a health check should catch a stall within one interval, not when the user next asks.
+  - **When the user is interactively present**: do NOT cancel a job without explicit permission. Jobs that look "stale" or "stuck" may be important long-running work (e.g. a 12+ hour Gemma finetune), and the user may have started jobs outside Claude sessions — don't assume unrecognized jobs are orphaned. Ask first; the cost of asking is zero.
