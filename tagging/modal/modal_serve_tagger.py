@@ -63,12 +63,16 @@ hf_secret = modal.Secret.from_name("huggingface-secret")
     memory=4096,
     volumes={MODEL_CACHE: volume},
     secrets=[hf_secret],
-    scaledown_window=300,   # keep a warm container ~5 min after the last request
-    min_containers=0,       # scale to zero when idle; set to 1 to kill cold starts
+    scaledown_window=300,        # keep a warm container ~5 min after the last request
+    min_containers=0,            # scale to zero when idle; set to 1 to kill cold starts
+    enable_memory_snapshot=True, # snapshot the loaded model so cold starts restore from RAM (~26s -> ~seconds)
     timeout=120,
 )
 class Parsley:
-    @modal.enter()
+    # snap=True: runs once when building the snapshot; the loaded model/tokenizer/tables are
+    # captured in the memory snapshot and restored on every cold start (no reload). CPU-only
+    # here (Pipeline is built with device="cpu"), so no CUDA is touched during snapshotting.
+    @modal.enter(snap=True)
     def load(self):
         import sys
         sys.path.insert(0, APP_SRC)
