@@ -52,6 +52,9 @@ warm container answers in ms. This is the online endpoint for user-submitted sen
 
 Reuses the existing `huggingface-secret` and `lexide-models` volume from the Gemma serve.
 
+**Deployed endpoint** (2026-07-10): `https://anchpop--lexide-parsley-parsley-tag.modal.run`
+Point the Rust lib at it with `Lexide::from_parsley_server(url)`.
+
 ## Deploy
 
 ```bash

@@ -33,8 +33,11 @@ app = modal.App(APP_NAME)
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "torch",                        # CPU wheel — no CUDA needed for serving
-        "transformers>=4.44",
+        # Pinned to the versions validated by the first smoke deploy (2026-07-10). torch is the
+        # default (CUDA) wheel but runs on CPU fine here; a `--index-url .../whl/cpu` torch would
+        # shrink the image / speed cold starts — optimize later if cold start matters.
+        "torch==2.13.0",
+        "transformers==5.13.0",
         "tokenizers>=0.19",
         "sentencepiece",
         "huggingface_hub",
