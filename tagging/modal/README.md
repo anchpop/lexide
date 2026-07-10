@@ -75,16 +75,34 @@ curl -X POST "$PARSLEY_URL" -H 'content-type: application/json' \
 omit it for model-only lemmas. Built-in lemma tables: whatever is in `data/lemma_tables/`
 (currently `deu`, `rus` — generate the rest with `tagger/parse_wiktextract.py`).
 
-## Knobs / notes
+## Cold starts
 
-- **Cost:** `cpu=2, memory=4096`, `min_containers=0` (scale to zero). First request after idle
-  pays a ~15–30s cold start (torch + ~1GB model load); set `min_containers=1` to eliminate it
-  at the cost of one always-warm CPU container.
-- **Modal version:** uses `@modal.fastapi_endpoint` and `add_local_dir(..., ignore=[...])` — on
-  older Modal these are `@modal.web_endpoint` and the `ignore` kwarg may differ; adjust if deploy
-  complains.
+Warm requests are ~0.4s. Cold start (after the 5-min scaledown) is **~26s**, essentially all
+model-load-into-RAM. Things tried, with measured effect:
+
+| change | cold start |
+|--------|-----------|
+| baseline (volume download, all tables loaded) | 26s |
+| **memory snapshots** (`enable_memory_snapshot`) | **56s — reverted** |
+| lazy per-language table loading | 34s |
+| CPU-only torch wheel (smaller image) | **26s** (current) |
+
+**Memory snapshots did not work here** — Modal rebuilt the snapshot on every cold start
+(verified in logs: `Creating CPU memory snapshot` + the model load ran each time) rather than
+restoring it, even with the model baked into the image so `snap=True` was local-only. Net
+negative, so it's off. The tables load lazily (per language, on first use — one table is <0.5s)
+so cold start doesn't parse all ~185MB up front, and torch is the CPU-only wheel to keep the
+image small.
+
+To actually eliminate cold starts: **`min_containers=1`** (one always-warm CPU container — the
+reliable fix, at the cost of one ~$/hr container running 24/7). The deeper way to shrink the
+~26s itself is the int8/ONNX model optimization below.
+
+## Other notes
+
+- **Cost:** `cpu=2, memory=4096`, `min_containers=0` (scale to zero = ~free when idle).
 - **Not shipped:** Japanese (POS/LAS ~85/65) — gate it or keep on Gemma.
-- **Optimization (follow-up):** currently torch-CPU fp32. ONNX-export + int8 dynamic quantization
-  drops the encoder to ~280MB and speeds CPU inference; do it once metrics are confirmed to hold.
+- **Model optimization (follow-up):** the encoder is fp32. ONNX-export + int8 dynamic quantization
+  drops it to ~280MB and speeds CPU load/inference (also shrinks the cold-start floor).
 - **Output format:** returns structured JSON. If the consumer expects the old Gemma tab-separated
   text (`idx⇥token⇥ws⇥POS⇥lemma⇥dep⇥head` with `-----`), add a formatter in `tag()`.

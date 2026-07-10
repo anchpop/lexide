@@ -8,11 +8,12 @@ sentence — no GPU — so idle cost is ~nothing and a warm container answers in
     modal deploy modal/modal_serve_tagger.py     # deploy the web endpoint
     modal run    modal/modal_serve_tagger.py     # smoke-test locally
 
-The model files are pulled from HF at container start into a cached volume; the tagger
-source and the Wiktionary lemma tables are baked into the image at deploy time (so deploy
-from a checkout that has data/lemma_tables/ populated — see tagger/LEMMA_LOOKUP.md).
+The tagger model, its source, and the Wiktionary lemma tables are all baked into the image
+at build/deploy time (the model via a run_function download). This matters for memory
+snapshots: the snapshotted load must read only from local disk — Modal will not reuse a
+snapshot whose snap=True method did network I/O. Deploy from a checkout with
+data/lemma_tables/ populated (see tagger/LEMMA_LOOKUP.md).
 """
-import glob
 import os
 from pathlib import Path
 
@@ -20,7 +21,7 @@ import modal
 
 APP_NAME = "lexide-parsley"
 HF_REPO = "anchpop/lexide-tagger"
-MODEL_CACHE = "/models"                 # volume mount, caches the HF snapshot
+MODEL_DIR = "/model"                    # tagger weights baked into the image (see _download_model)
 APP_SRC = "/root/parsley"               # baked-in tagger source
 TABLES_DIR = "/root/lemma_tables"       # baked-in Wiktionary tables
 
@@ -29,14 +30,27 @@ _tagger_src = _here.parent / "tagger"
 _tables_src = _here.parent / "data" / "lemma_tables"
 
 app = modal.App(APP_NAME)
+hf_secret = modal.Secret.from_name("huggingface-secret")
+
+
+def _download_model():
+    """Bake the tagger weights into the image at build time (needs the HF token; runs once)."""
+    from huggingface_hub import snapshot_download
+    snapshot_download(
+        HF_REPO,
+        allow_patterns=["tagger/best/*", "tokenizer/*"],
+        local_dir=MODEL_DIR,
+        token=os.environ["HF_TOKEN"],
+    )
+
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
+    # CPU-only torch (the default wheel bundles ~2.5GB of unused CUDA libs; this is a CPU serve,
+    # so the smaller image means faster cold-start container provisioning). Installed first so
+    # transformers sees torch already satisfied and doesn't pull the CUDA build.
+    .pip_install("torch==2.13.0", index_url="https://download.pytorch.org/whl/cpu")
     .pip_install(
-        # Pinned to the versions validated by the first smoke deploy (2026-07-10). torch is the
-        # default (CUDA) wheel but runs on CPU fine here; a `--index-url .../whl/cpu` torch would
-        # shrink the image / speed cold starts — optimize later if cold start matters.
-        "torch==2.13.0",
         "transformers==5.13.0",
         "tokenizers>=0.19",
         "sentencepiece",
@@ -52,55 +66,48 @@ image = (
 # without them (model-only lemmas). Populate data/lemma_tables/ before deploy for the floor.
 if _tables_src.exists():
     image = image.add_local_dir(str(_tables_src), TABLES_DIR, copy=True)
-
-volume = modal.Volume.from_name("lexide-models", create_if_missing=True)
-hf_secret = modal.Secret.from_name("huggingface-secret")
+# Bake the model weights into the image so the snapshotted load is local-only.
+image = image.run_function(_download_model, secrets=[hf_secret])
 
 
 @app.cls(
     image=image,
     cpu=2.0,
     memory=4096,
-    volumes={MODEL_CACHE: volume},
-    secrets=[hf_secret],
-    scaledown_window=300,        # keep a warm container ~5 min after the last request
-    min_containers=0,            # scale to zero when idle; set to 1 to kill cold starts
-    enable_memory_snapshot=True, # snapshot the loaded model so cold starts restore from RAM (~26s -> ~seconds)
-    timeout=120,
+    scaledown_window=300,   # keep a warm container ~5 min after the last request
+    # Scale to zero (cheapest) — cold starts pay a model load (~15-20s). For user-facing
+    # latency with no cold starts, set min_containers=1 (one always-warm CPU container).
+    min_containers=0,
+    timeout=180,
 )
 class Parsley:
-    # snap=True: runs once when building the snapshot; the loaded model/tokenizer/tables are
-    # captured in the memory snapshot and restored on every cold start (no reload). CPU-only
-    # here (Pipeline is built with device="cpu"), so no CUDA is touched during snapshotting.
-    @modal.enter(snap=True)
+    @modal.enter()
     def load(self):
         import sys
         sys.path.insert(0, APP_SRC)
-        from huggingface_hub import snapshot_download
-        from lemma_lookup import LemmaTable
         from predict import Pipeline
 
-        local = snapshot_download(
-            HF_REPO,
-            allow_patterns=["tagger/best/*", "tokenizer/*"],
-            local_dir=os.path.join(MODEL_CACHE, "lexide-tagger"),
-            token=os.environ.get("HF_TOKEN"),
-        )
-        # single model in memory; lemma tables are applied per-language in tag() below
+        # Only the model loads at startup; lemma tables load lazily per language (see _table)
+        # so a cold start doesn't parse all ~185MB of table JSON up front.
         self.pipe = Pipeline(
-            tagger_dir=os.path.join(local, "tagger", "best"),
-            tokenizer_path=os.path.join(local, "tokenizer", "tokenizer.pt"),
+            tagger_dir=os.path.join(MODEL_DIR, "tagger", "best"),
+            tokenizer_path=os.path.join(MODEL_DIR, "tokenizer", "tokenizer.pt"),
             device="cpu",
         )
-        self.tables = {}
-        for p in glob.glob(os.path.join(TABLES_DIR, "wikt_*.json")):
-            lang = os.path.basename(p)[len("wikt_"):-len(".json")]
-            self.tables[lang] = LemmaTable.load(p)
-        print(f"[parsley] loaded tagger + tokenizer; lemma tables: {sorted(self.tables)}")
+        self._tables = {}
+        print("[parsley] loaded tagger + tokenizer (lemma tables load lazily per language)")
+
+    def _table(self, lang):
+        """Load (and cache) the lemma table for a language on first use; None if not built."""
+        if lang not in self._tables:
+            from lemma_lookup import LemmaTable
+            p = os.path.join(TABLES_DIR, f"wikt_{lang}.json")
+            self._tables[lang] = LemmaTable.load(p) if lang and os.path.exists(p) else None
+        return self._tables[lang]
 
     def _tag_one(self, text, lang):
         toks = self.pipe(text)                     # char-tokenize -> tag (model lemmas)
-        table = self.tables.get(lang)
+        table = self._table(lang)
         if table is not None:
             for t in toks:
                 t["lemma"] = table.resolve(t["text"], t["pos"], t["lemma"])
