@@ -188,10 +188,14 @@ mod tests {
         let mut buf = Vec::new();
         let (n, _) = build_table(&json, Some(&priors), &mut buf).unwrap();
         assert_eq!(n, 6); // PROPN entry excluded
-        // round-trip through a temp file to exercise load()
+        // round-trip through a temp file to exercise load(). The filename must be unique per
+        // call: tests run in parallel within one process (same PID), so a PID-only name lets
+        // two callers share — and delete — the same file, a flaky "No such file" on load.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join("lexide-lemma-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("t{}.fst", std::process::id()));
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = dir.join(format!("t{}-{}.fst", std::process::id(), unique));
         std::fs::write(&path, &buf).unwrap();
         let table = LemmaTable::load(&path).unwrap();
         std::fs::remove_file(&path).ok();
