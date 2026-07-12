@@ -24,8 +24,10 @@ cd "$(dirname "$0")"
 
 MODAL="${MODAL:-$HOME/.modal-venv/bin/modal}"
 VENV_PY="tagger/.venv/bin/python"          # has huggingface_hub (for the upload)
+SEG_PY="${SEG_PY:-.venv-seg/bin/python}"   # torch+safetensors, for the local segmenter export
 HF_REPO="anchpop/lexide-parsley"
 ENV_FILE="../.env"                         # repo root .env with the write-role HF_TOKEN
+SEG_CKPT="sentence-labeller/output/segmenter.pt"
 
 # cargo: direct if on PATH, else via the yap flake devshell (how this box provides it)
 if command -v cargo >/dev/null; then
@@ -48,6 +50,16 @@ for f in tagger.onnx tokenizer.json vocab.json char_tokenizer.safetensors char_t
     "$MODAL" volume get --force lexide-onnx "$f" data/onnx/
 done
 
+step "3b/10 export sentence segmenter (local) -> data/onnx/"
+# The segmenter trains locally (sentence-labeller/train_segmenter.py), not on Lambda, so
+# its export runs here rather than on Modal. Skips cleanly if no checkpoint is present
+# (e.g. a tagger-only re-release) — the existing data/onnx/ segmenter artifacts are kept.
+if [ -f "$SEG_CKPT" ]; then
+    "$SEG_PY" sentence-labeller/export_segmenter.py --ckpt "$SEG_CKPT" --out-dir data/onnx
+else
+    echo "WARNING: $SEG_CKPT not found — skipping segmenter export (keeping existing artifacts)." >&2
+fi
+
 step "4/10 rebuild training-data lemma priors"
 if [ -f data/processed/train.jsonl ]; then
     PYTHONPATH=tagger python3 tagger/build_lemma_priors.py
@@ -66,9 +78,9 @@ step "6/10 Rust unit tests (incl. char-tokenizer bit-parity vs the fresh fixture
 step "7/10 upload data/onnx/ -> HF ${HF_REPO}/onnx/"
 [ -f "$ENV_FILE" ] || { echo "ERROR: $ENV_FILE with a write-role HF_TOKEN is required" >&2; exit 1; }
 set -a; source "$ENV_FILE"; set +a
-"$VENV_PY" - <<'PY'
+SEG_CKPT="$SEG_CKPT" "$VENV_PY" - <<'PY'
 import os
-from huggingface_hub import upload_folder
+from huggingface_hub import upload_folder, upload_file
 r = upload_folder(
     repo_id="anchpop/lexide-parsley",
     folder_path="data/onnx",
@@ -76,7 +88,19 @@ r = upload_folder(
     token=os.environ["HF_TOKEN"],
     commit_message="release.sh: refresh onnx/ artifacts",
 )
-print("uploaded:", r.commit_url)
+print("uploaded onnx/:", r.commit_url)
+# The serve loads the raw segmenter checkpoint from segmenter/segmenter.pt (the Rust
+# backend uses onnx/sentence_segmenter.safetensors instead). Publish it when present.
+ckpt = os.environ.get("SEG_CKPT", "")
+if ckpt and os.path.exists(ckpt):
+    r2 = upload_file(
+        repo_id="anchpop/lexide-parsley",
+        path_or_fileobj=ckpt,
+        path_in_repo="segmenter/segmenter.pt",
+        token=os.environ["HF_TOKEN"],
+        commit_message="release.sh: refresh sentence segmenter",
+    )
+    print("uploaded segmenter/:", r2.commit_url)
 PY
 
 step "8/10 deploy the parsley serve (Modal)"

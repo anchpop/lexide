@@ -28,6 +28,19 @@ struct ParsleyRequest {
     lang: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SegmentRequest {
+    texts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SegmentResponse {
+    #[serde(default)]
+    results: Vec<Vec<String>>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ParsleyResponse {
     results: Vec<Vec<ParsleyToken>>,
@@ -69,6 +82,10 @@ pub struct RemoteConfig {
     pub pool_idle_timeout_secs: u64,
     /// Response format the endpoint speaks (default: Gemma completions)
     pub format: ResponseFormat,
+    /// parsley `/segment` endpoint URL for [`segment_sentences`](RemoteClient::segment_sentences).
+    /// A separate Modal function URL from `endpoint_url` (the tagger). Defaults to the
+    /// deployed parsley segment endpoint; override with `LEXIDE_SEGMENT_URL`.
+    pub segment_endpoint_url: String,
 }
 
 impl Default for RemoteConfig {
@@ -81,6 +98,9 @@ impl Default for RemoteConfig {
             pool_max_idle_per_host: 256,
             pool_idle_timeout_secs: 300,
             format: ResponseFormat::GemmaCompletions,
+            segment_endpoint_url: std::env::var("LEXIDE_SEGMENT_URL").unwrap_or_else(|_| {
+                "https://anchpop--lexide-parsley-parsley-segment.modal.run".to_string()
+            }),
         }
     }
 }
@@ -158,6 +178,45 @@ impl RemoteClient {
             .unwrap_or_default();
 
         Ok(format!("1\t{}", text))
+    }
+
+    /// Split a passage into its sentences via the parsley `/segment` endpoint
+    /// (`config.segment_endpoint_url`). The gaps between sentences are dropped server-side.
+    pub async fn segment_sentences(&self, text: &str) -> Result<Vec<String>> {
+        let request = SegmentRequest {
+            texts: vec![text.to_string()],
+        };
+        let url = self.config.segment_endpoint_url.trim_end_matches('/');
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send request to parsley segment endpoint")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!("parsley segment endpoint returned error {}: {}", status, error_text);
+        }
+
+        let parsed: SegmentResponse = response
+            .json()
+            .await
+            .context("Failed to parse JSON from parsley segment endpoint")?;
+        if let Some(err) = parsed.error {
+            anyhow::bail!("parsley segment endpoint: {err}");
+        }
+        parsed
+            .results
+            .into_iter()
+            .next()
+            .context("parsley segment endpoint returned no results")
     }
 
     /// Analyze a sentence, dispatching on the configured response format.

@@ -7,3 +7,5 @@ data/processed/
 data/lemma_tables/
 data/onnx/
 tagger/output/
+# local sentence-segmenter training venv (pip torch on this box)
+.venv-seg/

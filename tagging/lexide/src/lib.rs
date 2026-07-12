@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[cfg(feature = "local")]
-pub use local::{build_table, LemmaTable, LocalConfig, LocalLexide};
+pub use local::{build_table, LemmaTable, LocalConfig, LocalLexide, Sentence};
 #[cfg(feature = "remote")]
 pub use remote::{RemoteClient, RemoteConfig, ResponseFormat};
 
@@ -173,6 +173,54 @@ impl Lexide {
             Self::Remote(remote) => remote.analyze(sentence, language).await,
             #[cfg(not(any(feature = "local", feature = "remote")))]
             _ => unreachable!("Type should be uninhabited!"),
+        }
+    }
+
+    /// Split a passage into its sentences, in order, dropping the gaps (whitespace,
+    /// headings, separators) between them. Punctuation and markers that frame a sentence
+    /// (its quotes, a leading dialogue dash) stay attached to it.
+    ///
+    /// Handy for turning a document — or each entry of a list of documents — into the
+    /// individual sentences to feed to [`analyze`](Self::analyze):
+    /// ```no_run
+    /// # async fn f(lexide: &lexide::Lexide) -> anyhow::Result<()> {
+    /// for passage in ["First. Second.", "Uno. Dos."] {
+    ///     for sentence in lexide.segment_sentences(passage)? {
+    ///         let _tok = lexide.analyze(&sentence, lexide::Language::English).await?;
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Only the local backend segments in-process (a cheap byte-minGRU pass, hence sync).
+    /// On the remote backend this returns an error — use the async
+    /// [`RemoteClient::segment_sentences`](crate::RemoteClient::segment_sentences) against a
+    /// parsley `/segment` endpoint instead.
+    #[allow(unreachable_code, unused_variables)]
+    pub fn segment_sentences(&self, text: &str) -> Result<Vec<String>> {
+        match self {
+            #[cfg(feature = "local")]
+            Self::Local(local) => local.segment_sentences(text),
+            #[cfg(feature = "remote")]
+            Self::Remote(_) => anyhow::bail!(
+                "segment_sentences needs the local backend; for a remote parsley serve use \
+                 the async RemoteClient::segment_sentences against its /segment endpoint"
+            ),
+            #[cfg(not(any(feature = "local", feature = "remote")))]
+            _ => unreachable!("Type should be uninhabited!"),
+        }
+    }
+
+    /// Like [`segment_sentences`](Self::segment_sentences) but returns each sentence with
+    /// its `[start, end)` char span in the original passage (local backend only).
+    #[cfg(feature = "local")]
+    pub fn segment_sentences_detailed(&self, text: &str) -> Result<Vec<Sentence>> {
+        match self {
+            Self::Local(local) => local.segment_sentences_detailed(text),
+            #[cfg(feature = "remote")]
+            Self::Remote(_) => anyhow::bail!(
+                "segment_sentences_detailed is only available on the local backend"
+            ),
         }
     }
 }

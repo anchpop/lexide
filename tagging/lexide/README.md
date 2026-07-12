@@ -45,6 +45,27 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Sentence segmentation
+
+`analyze` expects one sentence. To turn a document — or each entry of a list of documents —
+into sentences, use `segment_sentences`, which splits a passage on the byte-level minGRU
+sentence segmenter (B/I/O over bytes, where B = a sentence begins, I = inside a sentence,
+O = a gap). The gaps between sentences are dropped; punctuation/markers that *frame* a
+sentence (its quotes, a leading dialogue dash) stay attached.
+
+```rust
+// local backend only (a cheap in-process pass, hence sync)
+for sentence in lexide.segment_sentences("First. Then second! \"Done,\" he said.")? {
+    let tok = lexide.analyze(&sentence, Language::English).await?;
+    // ...
+}
+// segment_sentences_detailed(..) additionally returns each sentence's [start,end) char span.
+```
+
+On the remote backend, segment against a parsley `/segment` endpoint with the async
+`RemoteClient::segment_sentences` (`POST {texts:[...]} -> {results:[[sentence,...],...]}`).
+See `examples/segment.rs`.
+
 ## Local model artifacts
 
 By default the `local` backend downloads everything it needs from HF
@@ -57,7 +78,8 @@ setup. To use a local directory instead (offline, or artifacts you built yoursel
 | `tagger.onnx` | XLM-R encoder + POS/lemma/biaffine heads, one graph | `tagger/export_onnx.py` |
 | `tokenizer.json` | XLM-R fast tokenizer | (from tagger training) |
 | `vocab.json` | POS / dep / lemma edit-script vocabularies | (from tagger training) |
-| `char_tokenizer.safetensors` | byte-minGRU segmenter weights | `tagger/export_char_modal.py` |
+| `char_tokenizer.safetensors` | byte-minGRU token boundary tagger weights | `tagger/export_char_modal.py` |
+| `sentence_segmenter.safetensors` | byte-minGRU sentence segmenter weights (optional) | `sentence-labeller/export_segmenter.py` |
 | `lemma_fst/wikt_{lang}.fst` | optional per-language lemma tables | `build-lemma-fst` (below) |
 
 To fetch that manually rather than through the crate:

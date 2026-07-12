@@ -38,7 +38,9 @@ def _download_model():
     from huggingface_hub import snapshot_download
     snapshot_download(
         HF_REPO,
-        allow_patterns=["tagger/best/*", "tokenizer/*"],
+        # segmenter/* is optional on older repo snapshots; snapshot_download simply skips
+        # patterns that match nothing, so the serve still builds before it's published.
+        allow_patterns=["tagger/best/*", "tokenizer/*", "segmenter/*"],
         local_dir=MODEL_DIR,
         token=os.environ["HF_TOKEN"],
     )
@@ -89,13 +91,17 @@ class Parsley:
 
         # Only the model loads at startup; lemma tables load lazily per language (see _table)
         # so a cold start doesn't parse all ~185MB of table JSON up front.
+        segmenter_path = os.path.join(MODEL_DIR, "segmenter", "segmenter.pt")
         self.pipe = Pipeline(
             tagger_dir=os.path.join(MODEL_DIR, "tagger", "best"),
             tokenizer_path=os.path.join(MODEL_DIR, "tokenizer", "tokenizer.pt"),
+            segmenter_path=segmenter_path if os.path.exists(segmenter_path) else None,
             device="cpu",
         )
         self._tables = {}
-        print("[parsley] loaded tagger + tokenizer (lemma tables load lazily per language)")
+        have_seg = self.pipe.segmenter is not None
+        print(f"[parsley] loaded tagger + tokenizer{' + segmenter' if have_seg else ''} "
+              "(lemma tables load lazily per language)")
 
     def _table(self, lang):
         """Load (and cache) the lemma table for a language on first use; None if not built."""
@@ -131,6 +137,18 @@ class Parsley:
         sentences = request.get("sentences") or ([request["sentence"]] if request.get("sentence") else [])
         lang = request.get("lang", "")
         return {"results": [self._tag_one(s, lang) for s in sentences]}
+
+    @modal.fastapi_endpoint(method="POST", docs=True)
+    def segment(self, request: dict):
+        """POST {"texts": ["passage", ...]} -> {"results": [["sentence", ...], ...]}.
+
+        Splits each passage into its sentences (gaps between them dropped) with the byte
+        sentence segmenter. `lang` is not needed — the segmenter is multilingual.
+        """
+        if self.pipe.segmenter is None:
+            return {"error": "sentence segmenter not available in this deployment"}
+        texts = request.get("texts") or ([request["text"]] if request.get("text") else [])
+        return {"results": [self.pipe.segment_sentences(t) for t in texts]}
 
 
 @app.local_entrypoint()

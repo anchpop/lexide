@@ -48,7 +48,8 @@ def spans_from_byte_labels(text, byte_labels):
 
 
 class Pipeline:
-    def __init__(self, tagger_dir, tokenizer_path=None, device=None, lemma_table_path=None):
+    def __init__(self, tagger_dir, tokenizer_path=None, device=None, lemma_table_path=None,
+                 segmenter_path=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.lemma_table = None
         if lemma_table_path:
@@ -73,6 +74,13 @@ class Pipeline:
             self.char_tok.load_state_dict(torch.load(tokenizer_path, map_location=self.device))
             self.char_tok.to(self.device).eval()
 
+        # Optional sentence segmenter (same byte-minGRU architecture, sentence-scale O/B/I).
+        self.segmenter = None
+        if segmenter_path and os.path.exists(segmenter_path):
+            self.segmenter = CharBoundaryTagger()
+            self.segmenter.load_state_dict(torch.load(segmenter_path, map_location=self.device))
+            self.segmenter.to(self.device).eval()
+
     @torch.no_grad()
     def segment(self, text):
         """Raw text -> list of (start,end) char spans using the char boundary tagger."""
@@ -85,6 +93,23 @@ class Pipeline:
         x = torch.tensor([byte_ids], device=self.device)
         labels = self.char_tok(x)[0].argmax(-1).tolist()
         return spans_from_byte_labels(text, labels)
+
+    @torch.no_grad()
+    def segment_sentences(self, text):
+        """Split a passage into its sentence strings using the byte sentence segmenter.
+
+        Same B/I/O span recovery as `segment`, but the spans are sentences, so the gaps
+        (whitespace / headings / separators between sentences) are dropped.
+        """
+        if self.segmenter is None:
+            raise RuntimeError("no sentence segmenter loaded")
+        byte_ids = [BOS_BYTE]
+        for ch in text:
+            byte_ids.extend(ch.encode("utf-8"))
+        byte_ids.append(EOS_BYTE)
+        x = torch.tensor([byte_ids], device=self.device)
+        labels = self.segmenter(x)[0].argmax(-1).tolist()
+        return [text[s:e] for s, e in spans_from_byte_labels(text, labels)]
 
     @torch.no_grad()
     def tag(self, text, spans):

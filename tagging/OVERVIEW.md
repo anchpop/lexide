@@ -39,6 +39,19 @@ train/val/test.
 
 Trained on Lambda (single A10, ~2.5h, bf16, 2 epochs). Both pushed to HF `anchpop/lexide-parsley`.
 
+**Sentence segmenter** (`sentence-labeller/`). A *third*, independently-trained byte-minGRU with
+the **same architecture** as the CharBoundaryTagger, but its O/B/I spans are **sentences** not
+tokens (B = sentence begins, I = inside a sentence, O = a gap between sentences). It turns a raw
+passage — or each entry of a list — into its sentences, so callers can feed one-sentence-at-a-time
+to the tagger. Data is LLM/mechanically labelled passages: the Rust `sentence-labeller` binaries
+generate synthetic prose (`generate`) and mechanically compose passages from the tokenization
+sentence pools with varied gaps/wrappers/leaders (`augment`), and an LLM labels real Harry Potter
++ synthetic passages into `sentence`/`gap` sections (`label-sentences`). `sentence_data_prep.py`
+flattens those into per-byte spans (22k train passages / 263k sentences; real held-out val/test),
+`train_segmenter.py` trains locally on the box's GPU (~0.31M params), and `export_segmenter.py`
+dumps `sentence_segmenter.safetensors` + parity fixtures. Exposed as `Lexide::segment_sentences`
+(local, in-process) / the parsley serve `/segment` endpoint (remote).
+
 **Results** — held-out **silver** test (measures agreement with the Gemma teacher, not gold):
 overall POS 98.3 / lemma 97.9 / UAS 93.1 / **LAS 91.7**.
 

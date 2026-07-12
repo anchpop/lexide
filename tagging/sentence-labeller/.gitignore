@@ -1,0 +1,13 @@
+# Build / cache / training artifacts — regenerate, don't commit.
+target/
+.cache/
+output/
+processed/
+.venv*/
+__pycache__/
+*.pyc
+# Labelled corpus + raw samples: heavy (~74MB) and regenerable via the generate/
+# label-sentences/augment binaries (raw passages come from the gitignored data/jkrowling.zip),
+# matching the repo's "regenerate, don't commit" policy for data. Publish to HF to share.
+data/
+

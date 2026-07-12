@@ -19,7 +19,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel
+# NOTE: `transformers` is imported lazily inside MultiTaskTagger.__init__ so that the
+# tiny byte-level CharBoundaryTagger (and its sentence-segmenter twin) can be trained /
+# exported in a minimal torch-only environment without pulling in transformers.
 
 
 # --------------------------------------------------------------------------------------
@@ -142,6 +144,7 @@ class MultiTaskTagger(nn.Module):
                  arc_dim=256, rel_dim=128, dropout=0.2,
                  loss_weights=None):
         super().__init__()
+        from transformers import AutoModel
         self.encoder = AutoModel.from_pretrained(encoder_name)
         H = self.encoder.config.hidden_size
         self.drop = nn.Dropout(dropout)
