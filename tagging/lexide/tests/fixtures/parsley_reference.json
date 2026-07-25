@@ -138,7 +138,7 @@
     "end": 14,
     "pos": "SCONJ",
     "lemma": "dass",
-    "head": 9,
+    "head": 8,
     "dep": "mark"
    },
    {
@@ -147,7 +147,7 @@
     "end": 17,
     "pos": "PRON",
     "lemma": "es",
-    "head": 9,
+    "head": 8,
     "dep": "nsubj"
    },
    {
@@ -156,25 +156,16 @@
     "end": 19,
     "pos": "NUM",
     "lemma": "3",
-    "head": 9,
+    "head": 8,
     "dep": "nummod"
    },
    {
-    "text": ",",
+    "text": ",5",
     "start": 19,
-    "end": 20,
-    "pos": "NUM",
-    "lemma": ",",
-    "head": 9,
-    "dep": "nummod"
-   },
-   {
-    "text": "5",
-    "start": 20,
     "end": 21,
     "pos": "NUM",
-    "lemma": "5",
-    "head": 9,
+    "lemma": ",5",
+    "head": 8,
     "dep": "nummod"
    },
    {
@@ -192,7 +183,7 @@
     "end": 29,
     "pos": "VERB",
     "lemma": "sein",
-    "head": 9,
+    "head": 8,
     "dep": "cop"
    },
    {
@@ -730,13 +721,22 @@
   "text": "¿Dónde está la biblioteca?",
   "tokens": [
    {
-    "text": "¿Dónde",
+    "text": "¿",
     "start": 0,
-    "end": 6,
+    "end": 1,
     "pos": "PUNCT",
     "lemma": "¿",
-    "head": 2,
+    "head": 3,
     "dep": "punct"
+   },
+   {
+    "text": "Dónde",
+    "start": 1,
+    "end": 6,
+    "pos": "ADV",
+    "lemma": "dónde",
+    "head": 3,
+    "dep": "advmod"
    },
    {
     "text": "está",
@@ -753,7 +753,7 @@
     "end": 14,
     "pos": "DET",
     "lemma": "el",
-    "head": 4,
+    "head": 5,
     "dep": "det"
    },
    {
@@ -762,7 +762,7 @@
     "end": 25,
     "pos": "NOUN",
     "lemma": "biblioteca",
-    "head": 2,
+    "head": 3,
     "dep": "nsubj"
    },
    {
@@ -771,7 +771,7 @@
     "end": 26,
     "pos": "PUNCT",
     "lemma": "?",
-    "head": 2,
+    "head": 3,
     "dep": "punct"
    }
   ]
@@ -1324,11 +1324,38 @@
   "text": "고양이가 좋아요.",
   "tokens": [
    {
-    "text": "고양이가",
+    "text": "고양",
     "start": 0,
-    "end": 4,
+    "end": 2,
     "pos": "NOUN",
-    "lemma": "고양이",
+    "lemma": "고양",
+    "head": 4,
+    "dep": "nsubj"
+   },
+   {
+    "text": "이",
+    "start": 2,
+    "end": 3,
+    "pos": "NOUN",
+    "lemma": "이",
+    "head": 4,
+    "dep": "nsubj"
+   },
+   {
+    "text": "가",
+    "start": 3,
+    "end": 4,
+    "pos": "ADP",
+    "lemma": "가",
+    "head": 1,
+    "dep": "case"
+   },
+   {
+    "text": "좋아요",
+    "start": 5,
+    "end": 8,
+    "pos": "ADJ",
+    "lemma": "좋다",
     "head": 0,
     "dep": "root"
    },
@@ -1338,8 +1365,8 @@
     "end": 9,
     "pos": "PUNCT",
     "lemma": ".",
-    "head": 0,
-    "dep": "root"
+    "head": 4,
+    "dep": "punct"
    }
   ]
  },
@@ -1348,13 +1375,40 @@
   "text": "아이들이 공원에서 놀고 있었어요.",
   "tokens": [
    {
-    "text": "공원에서",
+    "text": "아이들",
+    "start": 0,
+    "end": 3,
+    "pos": "NOUN",
+    "lemma": "아이",
+    "head": 5,
+    "dep": "nsubj"
+   },
+   {
+    "text": "이",
+    "start": 3,
+    "end": 4,
+    "pos": "ADP",
+    "lemma": "이",
+    "head": 1,
+    "dep": "case"
+   },
+   {
+    "text": "공원",
     "start": 5,
-    "end": 9,
+    "end": 7,
     "pos": "NOUN",
     "lemma": "공원",
-    "head": 2,
+    "head": 5,
     "dep": "obl"
+   },
+   {
+    "text": "에서",
+    "start": 7,
+    "end": 9,
+    "pos": "ADP",
+    "lemma": "에서",
+    "head": 3,
+    "dep": "case"
    },
    {
     "text": "놀고",
@@ -1366,12 +1420,21 @@
     "dep": "root"
    },
    {
+    "text": "있었어요",
+    "start": 13,
+    "end": 17,
+    "pos": "AUX",
+    "lemma": "있다",
+    "head": 5,
+    "dep": "aux"
+   },
+   {
     "text": ".",
     "start": 17,
     "end": 18,
     "pos": "PUNCT",
     "lemma": ".",
-    "head": 2,
+    "head": 5,
     "dep": "punct"
    }
   ]
@@ -1408,13 +1471,22 @@
     "dep": "root"
    },
    {
-    "text": "हैं।",
+    "text": "हैं",
     "start": 20,
-    "end": 24,
+    "end": 23,
     "pos": "AUX",
     "lemma": "होना",
     "head": 3,
     "dep": "cop"
+   },
+   {
+    "text": "।",
+    "start": 23,
+    "end": 24,
+    "pos": "PUNCT",
+    "lemma": "।",
+    "head": 3,
+    "dep": "punct"
    }
   ]
  },
@@ -1477,13 +1549,22 @@
     "dep": "aux"
    },
    {
-    "text": "थे।",
+    "text": "थे",
     "start": 27,
-    "end": 30,
+    "end": 29,
     "pos": "AUX",
     "lemma": "होना",
     "head": 5,
     "dep": "aux"
+   },
+   {
+    "text": "।",
+    "start": 29,
+    "end": 30,
+    "pos": "PUNCT",
+    "lemma": "।",
+    "head": 5,
+    "dep": "punct"
    }
   ]
  },
@@ -1492,22 +1573,67 @@
   "text": "私は猫が好きです。",
   "tokens": [
    {
-    "text": "私は猫",
+    "text": "私",
     "start": 0,
-    "end": 3,
+    "end": 1,
     "pos": "ADP",
     "lemma": "私",
     "head": 1,
     "dep": "case"
    },
    {
-    "text": "が好きです。",
-    "start": 3,
-    "end": 9,
+    "text": "は",
+    "start": 1,
+    "end": 2,
     "pos": "ADP",
-    "lemma": "が好だ",
-    "head": 0,
-    "dep": "root"
+    "lemma": "は",
+    "head": 1,
+    "dep": "case"
+   },
+   {
+    "text": "猫",
+    "start": 2,
+    "end": 3,
+    "pos": "NOUN",
+    "lemma": "猫",
+    "head": 4,
+    "dep": "nsubj"
+   },
+   {
+    "text": "が",
+    "start": 3,
+    "end": 4,
+    "pos": "ADP",
+    "lemma": "が",
+    "head": 3,
+    "dep": "case"
+   },
+   {
+    "text": "好き",
+    "start": 4,
+    "end": 6,
+    "pos": "ADP",
+    "lemma": "好きだ",
+    "head": 3,
+    "dep": "case"
+   },
+   {
+    "text": "です",
+    "start": 6,
+    "end": 8,
+    "pos": "AUX",
+    "lemma": "だ",
+    "head": 4,
+    "dep": "aux"
+   },
+   {
+    "text": "。",
+    "start": 8,
+    "end": 9,
+    "pos": "PUNCT",
+    "lemma": "。",
+    "head": 4,
+    "dep": "punct"
    }
   ]
  },
@@ -1516,13 +1642,103 @@
   "text": "子供たちは公園で遊んでいました。",
   "tokens": [
    {
-    "text": "子供たちは公園で遊んでいました。",
+    "text": "子供",
     "start": 0,
-    "end": 16,
+    "end": 2,
     "pos": "NOUN",
     "lemma": "子供",
+    "head": 6,
+    "dep": "nsubj"
+   },
+   {
+    "text": "たち",
+    "start": 2,
+    "end": 4,
+    "pos": "PART",
+    "lemma": "たち",
+    "head": 1,
+    "dep": "compound"
+   },
+   {
+    "text": "は",
+    "start": 4,
+    "end": 5,
+    "pos": "ADP",
+    "lemma": "は",
+    "head": 1,
+    "dep": "case"
+   },
+   {
+    "text": "公園",
+    "start": 5,
+    "end": 7,
+    "pos": "NOUN",
+    "lemma": "公園",
+    "head": 6,
+    "dep": "obl"
+   },
+   {
+    "text": "で",
+    "start": 7,
+    "end": 8,
+    "pos": "ADP",
+    "lemma": "で",
+    "head": 4,
+    "dep": "case"
+   },
+   {
+    "text": "遊ん",
+    "start": 8,
+    "end": 10,
+    "pos": "VERB",
+    "lemma": "遊ぶ",
     "head": 0,
     "dep": "root"
+   },
+   {
+    "text": "で",
+    "start": 10,
+    "end": 11,
+    "pos": "VERB",
+    "lemma": "でぶ",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "い",
+    "start": 11,
+    "end": 12,
+    "pos": "AUX",
+    "lemma": "いる",
+    "head": 6,
+    "dep": "aux"
+   },
+   {
+    "text": "まし",
+    "start": 12,
+    "end": 14,
+    "pos": "AUX",
+    "lemma": "まる",
+    "head": 6,
+    "dep": "aux"
+   },
+   {
+    "text": "た",
+    "start": 14,
+    "end": 15,
+    "pos": "AUX",
+    "lemma": "たる",
+    "head": 6,
+    "dep": "aux"
+   },
+   {
+    "text": "。",
+    "start": 15,
+    "end": 16,
+    "pos": "PUNCT",
+    "lemma": "。",
+    "head": 6,
+    "dep": "punct"
    }
   ]
  }

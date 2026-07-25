@@ -144,6 +144,11 @@ def build(args):
         big = big_root / lang / "target_language_sentences_tokenization.jsonl"
         if big.exists():
             sources.append((lang, big, "silver"))
+        # Abbreviation/MWE-dense sentences labelled by the teacher (see
+        # augment_tokenization_sentences.py) — same schema, same silver treatment.
+        aug = big_root / lang / "target_language_sentences_tokenization_augmented.jsonl"
+        if aug.exists():
+            sources.append((lang, aug, "silver"))
         gold = gold_root / f"cleaned_{lang}.jsonl"
         if gold.exists() and gold.stat().st_size > 0:
             sources.append((lang, gold, "gold"))

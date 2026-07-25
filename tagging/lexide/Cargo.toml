@@ -12,6 +12,11 @@ name = "build-lemma-fst"
 path = "src/bin/build_lemma_fst.rs"
 required-features = ["local"]
 
+[[bin]]
+name = "label-tokenization"
+path = "src/bin/label_tokenization.rs"
+required-features = ["remote"]
+
 [dependencies]
 # Core dependencies
 tokio = { version = "1.42", features = ["full"] }

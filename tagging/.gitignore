@@ -12,3 +12,5 @@ data/harry-potter-extra/
 data/jkrowling.zip
 # local sentence-segmenter training venv (pip torch on this box)
 .venv-seg/
+# generated augmentation inputs (regenerate via tagger/augment_tokenization_sentences.py)
+data/aug_sentences/
