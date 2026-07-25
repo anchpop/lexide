@@ -115,7 +115,9 @@ class Parsley:
         return self._tables[lang]
 
     def _tag_one(self, text, lang):
-        toks = self.pipe(text)                     # char-tokenize -> tag (model lemmas)
+        # lang conditions the byte tokenizer (lang-token checkpoints; harmless no-op on
+        # older ones) and selects the Wiktionary lemma floor below.
+        toks = self.pipe(text, lang or None)       # char-tokenize -> tag (model lemmas)
         table = self._table(lang)
         if table is not None:
             for t in toks:
@@ -140,15 +142,17 @@ class Parsley:
 
     @modal.fastapi_endpoint(method="POST", docs=True)
     def segment(self, request: dict):
-        """POST {"texts": ["passage", ...]} -> {"results": [["sentence", ...], ...]}.
+        """POST {"texts": ["passage", ...], "lang": "deu"} -> {"results": [["sentence", ...], ...]}.
 
         Splits each passage into its sentences (gaps between them dropped) with the byte
-        sentence segmenter. `lang` is not needed — the segmenter is multilingual.
+        sentence segmenter. `lang` is optional: the segmenter is multilingual, but on
+        lang-token checkpoints the hint improves ambiguous boundaries (abbreviations etc.).
         """
         if self.pipe.segmenter is None:
             return {"error": "sentence segmenter not available in this deployment"}
         texts = request.get("texts") or ([request["text"]] if request.get("text") else [])
-        return {"results": [self.pipe.segment_sentences(t) for t in texts]}
+        lang = request.get("lang") or None
+        return {"results": [self.pipe.segment_sentences(t, lang) for t in texts]}
 
 
 @app.local_entrypoint()

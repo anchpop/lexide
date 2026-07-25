@@ -30,18 +30,22 @@ image = (
                    ignore=["output/**", ".venv/**", "__pycache__/**", "wandb/**", "*.pyc"])
 )
 
-# Multilingual reference strings — exercise multibyte scripts, apostrophes, digits, dashes.
+# Multilingual reference strings — exercise multibyte scripts, apostrophes, digits,
+# dashes, and (v2) abbreviations / multi-word names. Each is recorded language-free and,
+# for lang-token checkpoints, with its language token.
 FIXTURE_TEXTS = [
-    "Eine Fundgrube.",
-    "The cats were sleeping.",
-    "L'homme n'est pas venu, n'est-ce pas ?",
-    "¿Dónde está la biblioteca?",
-    "Я им доверяю — правда.",
-    "私は猫が好きです。",
-    "고양이가 좋아요.",
-    "मुझे बिल्लियाँ पसंद हैं।",
-    "Ich weiß, dass es 3,5 km sind.",
-    "Vamos à praia amanhã!",
+    ("deu", "Eine Fundgrube."),
+    ("eng", "The cats were sleeping."),
+    ("fra", "L'homme n'est pas venu, n'est-ce pas ?"),
+    ("spa", "¿Dónde está la biblioteca?"),
+    ("rus", "Я им доверяю — правда."),
+    ("jpn", "私は猫が好きです。"),
+    ("kor", "고양이가 좋아요."),
+    ("hin", "मुझे बिल्लियाँ पसंद हैं।"),
+    ("deu", "Ich weiß, dass es 3,5 km sind."),
+    ("por", "Vamos à praia amanhã!"),
+    ("eng", "Mr. Dursley visited the Eiffel Tower at 3 p.m."),
+    ("fra", "M. Dupont a vu la tour Eiffel hier."),
 ]
 
 
@@ -57,14 +61,21 @@ def export():
     from safetensors.torch import save_file
 
     sys.path.insert(0, "/root/tagger")
-    from dataset import BOS_BYTE, EOS_BYTE
+    from dataset import BOS_BYTE, EOS_BYTE, LANG_BOS
     from model import CharBoundaryTagger
     from predict import spans_from_byte_labels
 
     pt = hf_hub_download("anchpop/lexide-parsley", "tokenizer/tokenizer.pt",
                          token=os.environ["HF_TOKEN"])
     state = torch.load(pt, map_location="cpu")
-    model = CharBoundaryTagger()
+    # Every dimension is recoverable from tensor shapes, so old 259-vocab and new
+    # lang-token checkpoints both load without config guesswork.
+    vocab, emb_dim = state["emb.weight"].shape
+    hidden = state["layers.0.fwd.to_z.weight"].shape[0]
+    layers = sum(1 for k in state if k.endswith(".fwd.to_z.weight"))
+    print(f"[load] vocab={vocab} emb={emb_dim} hidden={hidden} layers={layers}")
+    model = CharBoundaryTagger(vocab_size=vocab, emb_dim=emb_dim,
+                               hidden_dim=hidden, layers=layers)
     model.load_state_dict(state)
     model.eval()
 
@@ -73,24 +84,27 @@ def export():
     n = sum(v.numel() for v in flat.values())
     print(f"[export] char_tokenizer.safetensors: {len(flat)} tensors, {n/1e6:.2f}M params")
 
+    has_lang_tokens = model.emb.num_embeddings > 259
     fixtures = []
     with torch.no_grad():
-        for text in FIXTURE_TEXTS:
-            byte_ids = [BOS_BYTE]
-            for ch in text:
-                byte_ids.extend(ch.encode("utf-8"))
-            byte_ids.append(EOS_BYTE)
-            logits = model(torch.tensor([byte_ids]))[0]
-            labels = logits.argmax(-1).tolist()
-            spans = spans_from_byte_labels(text, labels)
-            fixtures.append({
-                "text": text,
-                "byte_labels": labels,
-                "spans": [[s, e] for s, e in spans],
-                # first-row logits let the Rust test check numerics, not just argmax
-                "first_logits": [round(x, 6) for x in logits[1].tolist()],
-            })
-            print(f"[fixture] {text!r}: {len(spans)} tokens")
+        for lang, text in FIXTURE_TEXTS:
+            for use_lang in ([None, lang] if has_lang_tokens else [None]):
+                byte_ids = [LANG_BOS.get(use_lang, BOS_BYTE)]
+                for ch in text:
+                    byte_ids.extend(ch.encode("utf-8"))
+                byte_ids.append(EOS_BYTE)
+                logits = model(torch.tensor([byte_ids]))[0]
+                labels = logits.argmax(-1).tolist()
+                spans = spans_from_byte_labels(text, labels)
+                fixtures.append({
+                    "text": text,
+                    "lang": use_lang,
+                    "byte_labels": labels,
+                    "spans": [[s, e] for s, e in spans],
+                    # first-row logits let the Rust test check numerics, not just argmax
+                    "first_logits": [round(x, 6) for x in logits[1].tolist()],
+                })
+                print(f"[fixture] lang={use_lang} {text!r}: {len(spans)} tokens")
     with open("/vol/char_tokenizer_fixtures.json", "w", encoding="utf-8") as f:
         json.dump(fixtures, f, ensure_ascii=False, indent=1)
     onnx_vol.commit()

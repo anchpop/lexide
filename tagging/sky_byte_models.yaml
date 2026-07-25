@@ -1,0 +1,56 @@
+# Train the two byte-minGRU models (char tokenizer + sentence segmenter) — the v2
+# lang-token, bigger-architecture run. CPU-heavy sequential scan, so any small Ampere+
+# GPU is fine; the tokenizer's 2.9M-sentence dataset is the long pole.
+#
+#   export HF_TOKEN=<write token from lexide/.env>
+#   sky launch -c parsley-byte tagging/sky_byte_models.yaml \
+#       --secret HF_TOKEN -i 20 --down -y --retry-until-up
+#
+# Checkpoints + metrics upload to HF anchpop/lexide-parsley under training-runs/byte-v2/
+# as each model finishes; pull them locally for export + release (see tagger/README.md).
+name: parsley-byte
+
+resources:
+  cloud: lambda
+  accelerators:
+    A6000: 1
+    A10: 1
+    L40S: 1
+    A100: 1
+  disk_size: 100
+
+workdir: /data/coding/lexide/tagging   # .skyignore trims this to code + processed data
+
+setup: |
+  set -e
+  if ! python3 -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+    pip install --quiet "torch==2.7.0" --index-url https://download.pytorch.org/whl/cu128
+  fi
+  python3 -c "import torch; assert torch.cuda.is_available(), 'torch still cannot see CUDA after setup'"
+  pip install --quiet huggingface_hub 'numpy<2'
+
+run: |
+  set -e
+  cd ~/sky_workdir
+
+  if [ "${SKIP_SEG}" != "1" ]; then
+    echo "=== sentence segmenter (quick) ==="
+    python3 sentence-labeller/train_segmenter.py \
+        --data-dir sentence-labeller/processed --out-dir output/segmenter \
+        --epochs "${SEG_EPOCHS}" --workers 8
+    python3 tagger/hf_upload_run.py output/segmenter segmenter
+  fi
+
+  echo "=== char tokenizer (long) ==="
+  python3 tagger/train_tokenizer.py \
+      --data-dir data/processed --out-dir output/tokenizer \
+      --epochs "${TOK_EPOCHS}" --batch-size "${TOK_BATCH}" --workers 8
+  python3 tagger/hf_upload_run.py output/tokenizer tokenizer
+
+  echo "=== all done ==="
+
+envs:
+  SEG_EPOCHS: "3"
+  TOK_EPOCHS: "2"
+  TOK_BATCH: "256"
+  SKIP_SEG: "0"

@@ -198,9 +198,25 @@ impl Lexide {
     /// parsley `/segment` endpoint instead.
     #[allow(unreachable_code, unused_variables)]
     pub fn segment_sentences(&self, text: &str) -> Result<Vec<String>> {
+        self.segment_sentences_impl(text, None)
+    }
+
+    /// Like [`segment_sentences`](Self::segment_sentences) with a language hint. On
+    /// lang-token segmenter checkpoints the hint improves ambiguous boundaries
+    /// (abbreviations like "Mr.", quote attributions); on older checkpoints it's a no-op.
+    pub fn segment_sentences_in(&self, text: &str, language: Language) -> Result<Vec<String>> {
+        self.segment_sentences_impl(text, Some(language))
+    }
+
+    #[allow(unreachable_code, unused_variables)]
+    fn segment_sentences_impl(
+        &self,
+        text: &str,
+        language: Option<Language>,
+    ) -> Result<Vec<String>> {
         match self {
             #[cfg(feature = "local")]
-            Self::Local(local) => local.segment_sentences(text),
+            Self::Local(local) => local.segment_sentences(text, language),
             #[cfg(feature = "remote")]
             Self::Remote(_) => anyhow::bail!(
                 "segment_sentences needs the local backend; for a remote parsley serve use \
@@ -213,10 +229,15 @@ impl Lexide {
 
     /// Like [`segment_sentences`](Self::segment_sentences) but returns each sentence with
     /// its `[start, end)` char span in the original passage (local backend only).
+    /// `language` is the optional boundary-disambiguation hint.
     #[cfg(feature = "local")]
-    pub fn segment_sentences_detailed(&self, text: &str) -> Result<Vec<Sentence>> {
+    pub fn segment_sentences_detailed(
+        &self,
+        text: &str,
+        language: Option<Language>,
+    ) -> Result<Vec<Sentence>> {
         match self {
-            Self::Local(local) => local.segment_sentences_detailed(text),
+            Self::Local(local) => local.segment_sentences_detailed(text, language),
             #[cfg(feature = "remote")]
             Self::Remote(_) => anyhow::bail!(
                 "segment_sentences_detailed is only available on the local backend"

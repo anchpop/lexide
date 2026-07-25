@@ -1,0 +1,4 @@
+# WASM SIMD (supported by all evergreen browsers since 2021) — the byte-minGRU dot
+# products vectorize 4-wide with it.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

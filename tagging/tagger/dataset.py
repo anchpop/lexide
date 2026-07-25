@@ -6,6 +6,7 @@ the subword that its first character falls in. Downstream the model gathers exac
 one vector per word, so gold token boundaries never need to agree with subword boundaries.
 """
 import json
+import random
 
 import torch
 from torch.utils.data import Dataset
@@ -148,13 +149,22 @@ def pad_collate(batch, pad_id):
 # --------------------------------------------------------------------------------------
 PAD_BYTE, BOS_BYTE, EOS_BYTE = 256, 257, 258
 
+# Language-conditioned BOS: the sequence's first token is either the generic BOS
+# (language unknown) or a per-language variant, telling the model the language without
+# shifting any byte offsets. Order is fixed (alphabetical); the safetensors export and
+# the Rust byte_bio reimplementation rely on these exact ids.
+LANG_ORDER = ["deu", "eng", "fra", "hin", "ita", "jpn", "kor", "por", "rus", "spa"]
+LANG_BOS = {lang: 259 + i for i, lang in enumerate(LANG_ORDER)}
+CHAR_VOCAB_SIZE = 259 + len(LANG_ORDER)  # 269
 
-def encode_bytes_and_labels(text, tokens, max_bytes=512):
+
+def encode_bytes_and_labels(text, tokens, max_bytes=512, lang=None):
     """Return (byte_ids, char_labels) where labels are over the UTF-8 byte stream.
 
     A token span [start,end) in characters is projected onto bytes; the first byte of a
     token is B, remaining bytes of that token are I, bytes outside any token are O.
     Labelling on bytes (not chars) keeps it aligned with the byte-level model input.
+    `lang` (a code from LANG_ORDER, or None) selects the language-conditioned BOS.
     """
     # char index -> label, then expand to bytes
     char_label = ["O"] * len(text)
@@ -165,7 +175,7 @@ def encode_bytes_and_labels(text, tokens, max_bytes=512):
         char_label[s] = "B"
         for c in range(s + 1, min(e, len(text))):
             char_label[c] = "I"
-    byte_ids = [BOS_BYTE]
+    byte_ids = [LANG_BOS.get(lang, BOS_BYTE)]
     labels = [0]  # O for BOS
     lab_map = {"O": 0, "B": 1, "I": 2}
     for ch, lab in zip(text, char_label):
@@ -180,16 +190,23 @@ def encode_bytes_and_labels(text, tokens, max_bytes=512):
 
 
 class CharBoundaryDataset(Dataset):
-    def __init__(self, records, max_bytes=512):
+    def __init__(self, records, max_bytes=512, lang_dropout=None):
+        """lang_dropout=None trains language-blind (generic BOS always, the pre-lang
+        behavior); a float p trains language-conditioned, replacing the record's lang
+        with the generic BOS with probability p so the model also works lang-free."""
         self.records = records
         self.max_bytes = max_bytes
+        self.lang_dropout = lang_dropout
 
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, i):
         r = self.records[i]
-        byte_ids, labels = encode_bytes_and_labels(r["text"], r["tokens"], self.max_bytes)
+        lang = None
+        if self.lang_dropout is not None and random.random() >= self.lang_dropout:
+            lang = r.get("lang")
+        byte_ids, labels = encode_bytes_and_labels(r["text"], r["tokens"], self.max_bytes, lang)
         return {"byte_ids": byte_ids, "labels": labels}
 
 

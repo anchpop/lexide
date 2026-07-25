@@ -202,7 +202,7 @@ impl LocalLexide {
     /// Analyze a sentence: segment into tokens, tag POS/lemma/dependencies, and apply the
     /// language's Wiktionary lemma floor. Mirrors the parsley server token-for-token.
     pub fn analyze(&self, sentence: &str, language: Language) -> Result<Tokenization> {
-        let spans = self.chartok.segment(sentence);
+        let spans = self.chartok.segment(sentence, Some(language.code()));
         let tagged = self.tagger.tag(sentence, &spans)?;
         let table = self.table(language);
         let rtoks: Vec<RawToken> = tagged
@@ -226,27 +226,34 @@ impl LocalLexide {
         Ok(tokens_from_raw(&rtoks, sentence))
     }
 
-    /// Split a passage into its sentences (gaps between sentences dropped), each with its
-    /// char span. Errors if the segmenter artifact wasn't available at load time.
-    pub fn segment_sentences_detailed(&self, text: &str) -> Result<Vec<Sentence>> {
-        let seg = self.segmenter.as_ref().ok_or_else(|| {
+    fn require_segmenter(&self) -> Result<&sentence::SentenceSegmenter> {
+        self.segmenter.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "sentence segmenter not loaded (sentence_segmenter.safetensors missing from \
                  the model dir / HF repo)"
             )
-        })?;
-        Ok(seg.segment(text))
+        })
+    }
+
+    /// Split a passage into its sentences (gaps between sentences dropped), each with its
+    /// char span. Errors if the segmenter artifact wasn't available at load time.
+    /// `language` improves ambiguous boundaries on lang-token checkpoints; pass None when
+    /// the language isn't known.
+    pub fn segment_sentences_detailed(
+        &self,
+        text: &str,
+        language: Option<Language>,
+    ) -> Result<Vec<Sentence>> {
+        Ok(self
+            .require_segmenter()?
+            .segment(text, language.map(|l| l.code())))
     }
 
     /// Split a passage into its sentence strings, in order.
-    pub fn segment_sentences(&self, text: &str) -> Result<Vec<String>> {
-        let seg = self.segmenter.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "sentence segmenter not loaded (sentence_segmenter.safetensors missing from \
-                 the model dir / HF repo)"
-            )
-        })?;
-        Ok(seg.sentences(text))
+    pub fn segment_sentences(&self, text: &str, language: Option<Language>) -> Result<Vec<String>> {
+        Ok(self
+            .require_segmenter()?
+            .sentences(text, language.map(|l| l.code())))
     }
 }
 

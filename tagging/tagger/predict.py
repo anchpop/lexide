@@ -15,8 +15,36 @@ import os
 import torch
 
 from data_prep import apply_script
-from dataset import BOS_BYTE, EOS_BYTE
+from dataset import BOS_BYTE, EOS_BYTE, LANG_BOS
 from model import CharBoundaryTagger, MultiTaskTagger
+
+
+def load_char_model(path, device):
+    """Load a byte-minGRU checkpoint, recovering every dimension (vocab incl. language
+    tokens, emb, hidden, layers) from tensor shapes — old 259-vocab and new lang-token
+    checkpoints both load."""
+    state = torch.load(path, map_location=device)
+    vocab, emb_dim = state["emb.weight"].shape
+    hidden = state["layers.0.fwd.to_z.weight"].shape[0]
+    layers = sum(1 for k in state if k.endswith(".fwd.to_z.weight"))
+    model = CharBoundaryTagger(vocab_size=vocab, emb_dim=emb_dim,
+                               hidden_dim=hidden, layers=layers)
+    model.load_state_dict(state)
+    return model.to(device).eval()
+
+
+def byte_encode(text, lang=None, model=None):
+    """[LANG_xxx or BOS] + utf8(text) + [EOS] byte ids. Unknown lang codes — or any lang
+    when `model` is a pre-lang-token checkpoint (259-row embedding) — fall back to the
+    generic BOS, so callers can pass whatever they have."""
+    first = LANG_BOS.get(lang, BOS_BYTE)
+    if model is not None and first >= model.emb.num_embeddings:
+        first = BOS_BYTE
+    byte_ids = [first]
+    for ch in text:
+        byte_ids.extend(ch.encode("utf-8"))
+    byte_ids.append(EOS_BYTE)
+    return byte_ids
 
 
 def spans_from_byte_labels(text, byte_labels):
@@ -70,32 +98,24 @@ class Pipeline:
 
         self.char_tok = None
         if tokenizer_path and os.path.exists(tokenizer_path):
-            self.char_tok = CharBoundaryTagger()
-            self.char_tok.load_state_dict(torch.load(tokenizer_path, map_location=self.device))
-            self.char_tok.to(self.device).eval()
+            self.char_tok = load_char_model(tokenizer_path, self.device)
 
         # Optional sentence segmenter (same byte-minGRU architecture, sentence-scale O/B/I).
         self.segmenter = None
         if segmenter_path and os.path.exists(segmenter_path):
-            self.segmenter = CharBoundaryTagger()
-            self.segmenter.load_state_dict(torch.load(segmenter_path, map_location=self.device))
-            self.segmenter.to(self.device).eval()
+            self.segmenter = load_char_model(segmenter_path, self.device)
 
     @torch.no_grad()
-    def segment(self, text):
+    def segment(self, text, lang=None):
         """Raw text -> list of (start,end) char spans using the char boundary tagger."""
         if self.char_tok is None:
             raise RuntimeError("no char tokenizer loaded; pass gold spans instead")
-        byte_ids = [BOS_BYTE]
-        for ch in text:
-            byte_ids.extend(ch.encode("utf-8"))
-        byte_ids.append(EOS_BYTE)
-        x = torch.tensor([byte_ids], device=self.device)
+        x = torch.tensor([byte_encode(text, lang, self.char_tok)], device=self.device)
         labels = self.char_tok(x)[0].argmax(-1).tolist()
         return spans_from_byte_labels(text, labels)
 
     @torch.no_grad()
-    def segment_sentences(self, text):
+    def segment_sentences(self, text, lang=None):
         """Split a passage into its sentence strings using the byte sentence segmenter.
 
         Same B/I/O span recovery as `segment`, but the spans are sentences, so the gaps
@@ -103,11 +123,7 @@ class Pipeline:
         """
         if self.segmenter is None:
             raise RuntimeError("no sentence segmenter loaded")
-        byte_ids = [BOS_BYTE]
-        for ch in text:
-            byte_ids.extend(ch.encode("utf-8"))
-        byte_ids.append(EOS_BYTE)
-        x = torch.tensor([byte_ids], device=self.device)
+        x = torch.tensor([byte_encode(text, lang, self.segmenter)], device=self.device)
         labels = self.segmenter(x)[0].argmax(-1).tolist()
         return [text[s:e] for s, e in spans_from_byte_labels(text, labels)]
 
@@ -163,8 +179,8 @@ class Pipeline:
             })
         return result
 
-    def __call__(self, text):
-        spans = self.segment(text)
+    def __call__(self, text, lang=None):
+        spans = self.segment(text, lang)
         return self.tag(text, spans)
 
 

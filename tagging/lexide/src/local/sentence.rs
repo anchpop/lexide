@@ -35,22 +35,25 @@ impl SentenceSegmenter {
         })
     }
 
-    /// Per-position O/B/I logits for `[BOS] + utf8(text) + [EOS]` (exposed for parity tests).
+    /// Per-position O/B/I logits for `[LANG or BOS] + utf8(text) + [EOS]` (exposed for
+    /// parity tests).
     #[allow(dead_code)] // used by the parity test; not on any production path
-    pub fn logits(&self, text: &str) -> Vec<[f32; 3]> {
-        self.model.logits(text)
+    pub fn logits(&self, text: &str, lang: Option<&str>) -> Vec<[f32; 3]> {
+        self.model.logits(text, lang)
     }
 
-    /// Sentence `[start, end)` char spans within `text`.
-    pub fn spans(&self, text: &str) -> Vec<(usize, usize)> {
-        self.model.segment(text)
+    /// Sentence `[start, end)` char spans within `text`. The optional language hint
+    /// improves ambiguous boundaries (abbreviations, quote attributions) on lang-token
+    /// checkpoints; harmless no-op on older ones.
+    pub fn spans(&self, text: &str, lang: Option<&str>) -> Vec<(usize, usize)> {
+        self.model.segment(text, lang)
     }
 
     /// Split a passage into its sentences, dropping the gaps between them. Char indexing
     /// is by code point, matching the span recovery.
-    pub fn segment(&self, text: &str) -> Vec<Sentence> {
+    pub fn segment(&self, text: &str, lang: Option<&str>) -> Vec<Sentence> {
         let chars: Vec<char> = text.chars().collect();
-        self.spans(text)
+        self.spans(text, lang)
             .into_iter()
             .map(|(start, end)| Sentence {
                 text: chars[start..end].iter().collect(),
@@ -61,8 +64,8 @@ impl SentenceSegmenter {
     }
 
     /// Convenience: just the sentence strings, in order.
-    pub fn sentences(&self, text: &str) -> Vec<String> {
-        self.segment(text).into_iter().map(|s| s.text).collect()
+    pub fn sentences(&self, text: &str, lang: Option<&str>) -> Vec<String> {
+        self.segment(text, lang).into_iter().map(|s| s.text).collect()
     }
 }
 
@@ -88,6 +91,8 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(fixtures).unwrap()).unwrap();
         for fx in fixtures.as_array().unwrap() {
             let text = fx["text"].as_str().unwrap();
+            // Older fixture files predate language conditioning and carry no lang key.
+            let lang = fx.get("lang").and_then(|v| v.as_str());
             let want_labels: Vec<u8> = fx["byte_labels"]
                 .as_array()
                 .unwrap()
@@ -107,11 +112,15 @@ mod tests {
                 .map(|v| v.as_str().unwrap().to_string())
                 .collect();
 
-            let logits = seg.logits(text);
+            let logits = seg.logits(text, lang);
             let labels: Vec<u8> = logits.iter().map(argmax3).collect();
             assert_eq!(labels, want_labels, "byte labels diverge for {text:?}");
-            assert_eq!(seg.spans(text), want_spans, "spans diverge for {text:?}");
-            assert_eq!(seg.sentences(text), want_sentences, "sentences diverge for {text:?}");
+            assert_eq!(seg.spans(text, lang), want_spans, "spans diverge for {text:?}");
+            assert_eq!(
+                seg.sentences(text, lang),
+                want_sentences,
+                "sentences diverge for {text:?}"
+            );
 
             let want_first: Vec<f32> = fx["first_logits"]
                 .as_array()

@@ -26,7 +26,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tagger"))
-from dataset import CharBoundaryDataset, char_collate, encode_bytes_and_labels  # noqa: E402
+from dataset import (CHAR_VOCAB_SIZE, CharBoundaryDataset, char_collate,  # noqa: E402
+                     encode_bytes_and_labels)
 from model import CharBoundaryTagger  # noqa: E402
 
 
@@ -47,13 +48,14 @@ def spans_from_labels(labels):
 
 
 @torch.no_grad()
-def evaluate(model, records, device, max_bytes=4096):
+def evaluate(model, records, device, max_bytes=4096, use_lang=True):
     """Micro-averaged sentence-span F1 overall and per language."""
     model.eval()
     agg = dict(tp=0, fp=0, fn=0, bc=0, bt=0)
     per = {}
     for r in records:
-        byte_ids, labels = encode_bytes_and_labels(r["text"], r["tokens"], max_bytes)
+        lang = r.get("lang") if use_lang else None
+        byte_ids, labels = encode_bytes_and_labels(r["text"], r["tokens"], max_bytes, lang)
         x = torch.tensor([byte_ids], device=device)
         pred = model(x)[0].argmax(-1).tolist()
         gold, got = spans_from_labels(labels), spans_from_labels(pred)
@@ -83,9 +85,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default="processed")
     ap.add_argument("--out-dir", default="output")
-    ap.add_argument("--hidden", type=int, default=128)
-    ap.add_argument("--layers", type=int, default=3)
-    ap.add_argument("--emb-dim", type=int, default=64)
+    ap.add_argument("--hidden", type=int, default=192)
+    ap.add_argument("--layers", type=int, default=4)
+    ap.add_argument("--emb-dim", type=int, default=96)
+    ap.add_argument("--lang-dropout", type=float, default=0.15,
+                    help="fraction of training examples encoded with the generic BOS "
+                         "instead of their language token (keeps lang-free use working)")
     ap.add_argument("--max-bytes", type=int, default=768)
     ap.add_argument("--epochs", type=float, default=8.0)
     ap.add_argument("--batch-size", type=int, default=64)
@@ -115,11 +120,12 @@ def main():
     val_records = read("val")
     print(f"train={len(train_records)} val={len(val_records)}", flush=True)
 
-    model = CharBoundaryTagger(emb_dim=args.emb_dim, hidden_dim=args.hidden, layers=args.layers).to(device)
+    model = CharBoundaryTagger(vocab_size=CHAR_VOCAB_SIZE, emb_dim=args.emb_dim,
+                               hidden_dim=args.hidden, layers=args.layers).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"segmenter params: {n_params/1e6:.3f}M", flush=True)
 
-    ds = CharBoundaryDataset(train_records, args.max_bytes)
+    ds = CharBoundaryDataset(train_records, args.max_bytes, lang_dropout=args.lang_dropout)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
                         collate_fn=char_collate, pin_memory=True, drop_last=True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -172,6 +178,8 @@ def main():
     v_overall, v_per = evaluate(model, val_records, device)
     print(f"[final/val] overall={v_overall}")
     print(f"[final/val] per-lang={json.dumps(v_per, indent=2)}")
+    nl_overall, _ = evaluate(model, val_records, device, use_lang=False)
+    print(f"[final/val/lang-free] overall={nl_overall}")
     test_path = os.path.join(args.data_dir, "test.jsonl")
     if os.path.exists(test_path):
         t_overall, t_per = evaluate(model, read("test"), device)

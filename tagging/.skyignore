@@ -1,12 +1,20 @@
-# Only tagger/ code and data/processed are needed on the training node.
+# Only tagger/ + sentence-labeller/ code and their processed training data are needed
+# on the training node.
 tagger/.venv
 tagger/output
 data/big
 data/audio
+data/onnx
+data/lemma_tables
 train
 lexide
 modal
 src
+web-demo
+sentence-labeller/data
+sentence-labeller/output
+sentence-labeller/target
+.venv-seg
 pyproject.toml
 sky.yaml
 **/__pycache__

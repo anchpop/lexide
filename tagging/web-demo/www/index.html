@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>parsley segmenter</title>
+<script>
+  // no-flash theme: localStorage override, else system preference
+  const t = localStorage.theme;
+  if (t === "dark" || (!t && matchMedia("(prefers-color-scheme: dark)").matches))
+    document.documentElement.classList.add("dark");
+</script>
+<style>
+  :root {
+    --bg: #fff;
+    --card: oklch(0.975 0 0);
+    --fg: oklch(0.145 0 0);
+    --muted: oklch(0.556 0 0);
+    --border: oklch(0 0 0 / 10%);
+    color-scheme: light;
+  }
+  html.dark {
+    --bg: oklch(0.145 0 0);
+    --card: oklch(0.205 0 0);
+    --fg: oklch(0.985 0 0);
+    --muted: oklch(0.708 0 0);
+    --border: oklch(1 0 0 / 10%);
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  main { max-width: 42rem; margin: 0 auto; padding: 0 1.25rem 3rem; }
+  header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 1.1rem 0 0.4rem;
+  }
+  header h1 { font-size: 15px; font-weight: 500; }
+  header h1, nav, .meta, .stats, footer, textarea, .gap-row, .empty {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  nav { display: flex; gap: 1rem; font-size: 13px; }
+  nav a, nav button, nav select {
+    background: none; border: 0; padding: 0; cursor: pointer;
+    color: var(--muted); font: inherit; text-decoration: none;
+  }
+  nav a:hover, nav button:hover, nav select:hover { color: var(--fg); }
+  nav select { appearance: none; -webkit-appearance: none; }
+  .stats {
+    font-size: 11px; color: var(--muted);
+    letter-spacing: 0.02em;
+    padding-bottom: 1rem; border-bottom: 1px solid var(--border);
+  }
+  textarea {
+    width: 100%;
+    margin-top: 1.25rem;
+    background: var(--card);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 0.6rem;
+    padding: 0.75rem 0.9rem;
+    font-size: 13px;
+    line-height: 1.55;
+    min-height: 9.5rem;
+    resize: vertical;
+    outline: none;
+  }
+  textarea:focus { border-color: oklch(0.556 0 0 / 45%); }
+  #out { margin-top: 0.5rem; }
+  #out > div { padding: 0.7rem 0; border-bottom: 1px solid var(--border); }
+  .meta {
+    font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-bottom: 0.35rem;
+  }
+  .sent { white-space: pre-wrap; word-break: break-word; }
+  .tok {
+    background: var(--card);
+    box-shadow: 0 0 0 1px var(--border);
+    border-radius: 4px;
+    padding: 0 1px;
+  }
+  .gap-row { font-size: 11px; color: var(--muted); }
+  .gap-row .g { opacity: 0.75; }
+  .empty { font-size: 13px; color: var(--muted); padding: 1.5rem 0; }
+  footer {
+    display: flex; justify-content: space-between;
+    font-size: 11px; color: var(--muted);
+    padding-top: 0.7rem;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>parsley segmenter</h1>
+    <nav>
+      <select id="lang" title="language hint for segmentation">
+        <option value="">lang: auto</option>
+        <option value="deu">lang: deu</option>
+        <option value="eng">lang: eng</option>
+        <option value="fra">lang: fra</option>
+        <option value="hin">lang: hin</option>
+        <option value="ita">lang: ita</option>
+        <option value="jpn">lang: jpn</option>
+        <option value="kor">lang: kor</option>
+        <option value="por">lang: por</option>
+        <option value="rus">lang: rus</option>
+        <option value="spa">lang: spa</option>
+      </select>
+      <a href="https://huggingface.co/anchpop/lexide-parsley" target="_blank" rel="noreferrer">model</a>
+      <button id="theme"></button>
+    </nav>
+  </header>
+  <div class="stats" id="stats">loading weights · 2.6mb</div>
+  <textarea id="input" spellcheck="false" placeholder="paste a passage"></textarea>
+  <div id="out"></div>
+  <footer>
+    <span>byte-minGRU ×2 · 1.0m + 0.3m params · in-browser, no server</span>
+    <span id="timing"></span>
+  </footer>
+</main>
+
+<script type="module">
+import init, { Parsley } from "./pkg/parsley_web_demo.js";
+
+const $ = (id) => document.getElementById(id);
+
+// theme toggle shows the mode you'd switch TO
+const themeBtn = $("theme");
+const paintTheme = () => {
+  themeBtn.textContent = document.documentElement.classList.contains("dark") ? "light" : "dark";
+};
+themeBtn.onclick = () => {
+  const dark = document.documentElement.classList.toggle("dark");
+  localStorage.theme = dark ? "dark" : "light";
+  paintTheme();
+};
+paintTheme();
+
+// weights: local copy first (build.sh drops them here), HF as fallback
+const HF = "https://huggingface.co/anchpop/lexide-parsley/resolve/main/onnx";
+async function fetchWeights(name) {
+  for (const url of [`./${name}`, `${HF}/${name}`]) {
+    try {
+      const r = await fetch(url);
+      if (r.ok) return new Uint8Array(await r.arrayBuffer());
+    } catch { /* try next */ }
+  }
+  throw new Error(`could not fetch ${name} locally or from hf`);
+}
+
+const DEFAULT_TEXT = `Dr. Smith arrived at 3 p.m. — he wasn't late. "Is this the place?" she asked.
+
+Chapter Two
+
+Mr. Dursley was the director of a firm called Grunnings, which made drills. Es war einmal ein Mädchen, das in den Wald ging. Он посмотрел на неё и улыбнулся.`;
+
+let parsley = null;
+
+const esc = (s) => s.replace(/ /g, "␣").replace(/\n/g, "⏎").replace(/\t/g, "⇥");
+
+function render() {
+  const out = $("out");
+  out.textContent = "";
+  const text = $("input").value;
+  if (!parsley) return;
+  if (!text.trim()) {
+    out.innerHTML = `<div class="empty">no text — paste a passage to segment</div>`;
+    $("timing").textContent = "";
+    return;
+  }
+
+  const lang = $("lang").value || null;
+  const t0 = performance.now();
+  const sentSpans = JSON.parse(parsley.sentence_spans(text, lang));
+  const t1 = performance.now();
+
+  const cps = Array.from(text);
+  let tokTime = 0, nTok = 0, cursor = 0;
+
+  const gapRow = (from, to) => {
+    if (to <= from) return;
+    const div = document.createElement("div");
+    div.className = "gap-row";
+    const g = document.createElement("span");
+    g.className = "g";
+    g.textContent = esc(cps.slice(from, to).join(""));
+    div.append("gap · ", g);
+    out.append(div);
+  };
+
+  sentSpans.forEach(([start, end], i) => {
+    gapRow(cursor, start);
+    cursor = end;
+    const sentence = cps.slice(start, end).join("");
+
+    const tk0 = performance.now();
+    const tokSpans = JSON.parse(parsley.token_spans(sentence, lang));
+    tokTime += performance.now() - tk0;
+    nTok += tokSpans.length;
+
+    const div = document.createElement("div");
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `s${i + 1} · [${start},${end}) · ${tokSpans.length} tokens`;
+    const p = document.createElement("div");
+    p.className = "sent";
+    const scps = Array.from(sentence);
+    let pos = 0;
+    for (const [ts, te] of tokSpans) {
+      if (ts > pos) p.append(scps.slice(pos, ts).join(""));
+      const span = document.createElement("span");
+      span.className = "tok";
+      span.textContent = scps.slice(ts, te).join("");
+      p.append(span);
+      pos = te;
+    }
+    if (pos < scps.length) p.append(scps.slice(pos).join(""));
+    div.append(meta, p);
+    out.append(div);
+  });
+  gapRow(cursor, cps.length);
+
+  $("timing").textContent =
+    `segment ${(t1 - t0).toFixed(1)}ms · tokenize ${tokTime.toFixed(1)}ms`;
+  $("stats").textContent =
+    `${sentSpans.length} sentences · ${nTok} tokens · ${cps.length} chars`;
+}
+
+let timer = null;
+$("input").oninput = () => {
+  clearTimeout(timer);
+  timer = setTimeout(render, 150);
+};
+$("lang").onchange = render;
+
+try {
+  const [, tokW, segW] = await Promise.all([
+    init(),
+    fetchWeights("char_tokenizer.safetensors"),
+    fetchWeights("sentence_segmenter.safetensors"),
+  ]);
+  parsley = new Parsley(tokW, segW);
+  $("input").value = DEFAULT_TEXT;
+  render();
+} catch (e) {
+  $("stats").textContent = `failed to load model — ${String(e.message || e).toLowerCase()}`;
+}
+</script>
+</body>
+</html>

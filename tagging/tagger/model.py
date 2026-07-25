@@ -39,15 +39,22 @@ class MinGRU(nn.Module):
     def forward(self, x, reverse=False):
         # x: [B, L, D]
         z = torch.sigmoid(self.to_z(x))
-        h_cand = self.to_h(x)
-        B, L, H = z.shape
-        idx = range(L - 1, -1, -1) if reverse else range(L)
-        h = x.new_zeros(B, H)
-        outs = [None] * L
-        for t in idx:
-            h = (1 - z[:, t]) * h + z[:, t] * h_cand[:, t]
-            outs[t] = h
-        return torch.stack(outs, dim=1)
+        a = 1.0 - z
+        b = z * self.to_h(x)
+        if reverse:
+            a = a.flip(1)
+            b = b.flip(1)
+        # Hillis-Steele doubling scan of the affine recurrence h_t = a_t*h_{t-1} + b_t
+        # (h_0 = 0): log2(L) rounds of full-size elementwise kernels. The per-timestep
+        # python loop this replaces was kernel-launch-bound (~0.06 it/s on an A10 at
+        # L=768); the math is identical up to fp reassociation.
+        L = b.shape[1]
+        s = 1
+        while s < L:
+            b = b + a * F.pad(b[:, :-s], (0, 0, s, 0))
+            a = a * F.pad(a[:, :-s], (0, 0, s, 0), value=1.0)
+            s *= 2
+        return b.flip(1) if reverse else b
 
 
 class BiMinGRU(nn.Module):

@@ -31,6 +31,8 @@ struct ParsleyRequest {
 #[derive(Debug, Clone, Serialize)]
 struct SegmentRequest {
     texts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lang: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -183,8 +185,27 @@ impl RemoteClient {
     /// Split a passage into its sentences via the parsley `/segment` endpoint
     /// (`config.segment_endpoint_url`). The gaps between sentences are dropped server-side.
     pub async fn segment_sentences(&self, text: &str) -> Result<Vec<String>> {
+        self.segment_sentences_impl(text, None).await
+    }
+
+    /// Like [`segment_sentences`](Self::segment_sentences) with a language hint, which
+    /// improves ambiguous boundaries on lang-token segmenter deployments.
+    pub async fn segment_sentences_in(
+        &self,
+        text: &str,
+        language: crate::Language,
+    ) -> Result<Vec<String>> {
+        self.segment_sentences_impl(text, Some(language)).await
+    }
+
+    async fn segment_sentences_impl(
+        &self,
+        text: &str,
+        language: Option<crate::Language>,
+    ) -> Result<Vec<String>> {
         let request = SegmentRequest {
             texts: vec![text.to_string()],
+            lang: language.map(|l| l.code().to_string()),
         };
         let url = self.config.segment_endpoint_url.trim_end_matches('/');
 

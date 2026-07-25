@@ -15,8 +15,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from dataset import (CharBoundaryDataset, char_collate, encode_bytes_and_labels,
-                     read_jsonl)
+from dataset import (CHAR_VOCAB_SIZE, CharBoundaryDataset, char_collate,
+                     encode_bytes_and_labels, read_jsonl)
 from model import CharBoundaryTagger
 
 
@@ -38,12 +38,13 @@ def spans_from_labels(labels):
 
 
 @torch.no_grad()
-def evaluate(model, records, device, max_items=2000, max_bytes=512):
+def evaluate(model, records, device, max_items=2000, max_bytes=512, use_lang=True):
     model.eval()
     tp = fp = fn = 0
     byte_correct = byte_total = 0
     for r in records[:max_items]:
-        byte_ids, labels = encode_bytes_and_labels(r["text"], r["tokens"], max_bytes)
+        lang = r.get("lang") if use_lang else None
+        byte_ids, labels = encode_bytes_and_labels(r["text"], r["tokens"], max_bytes, lang)
         x = torch.tensor([byte_ids], device=device)
         logits = model(x)[0]
         pred = logits.argmax(-1).tolist()
@@ -69,9 +70,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default="data/processed")
     ap.add_argument("--out-dir", default="output/tokenizer")
-    ap.add_argument("--hidden", type=int, default=128)
-    ap.add_argument("--layers", type=int, default=3)
-    ap.add_argument("--emb-dim", type=int, default=64)
+    ap.add_argument("--hidden", type=int, default=192)
+    ap.add_argument("--layers", type=int, default=4)
+    ap.add_argument("--emb-dim", type=int, default=96)
+    ap.add_argument("--lang-dropout", type=float, default=0.15,
+                    help="fraction of training examples encoded with the generic BOS "
+                         "instead of their language token (keeps lang-free use working)")
     ap.add_argument("--max-bytes", type=int, default=512)
     ap.add_argument("--epochs", type=float, default=2.0)
     ap.add_argument("--batch-size", type=int, default=128)
@@ -92,11 +96,12 @@ def main():
     val_records = read_jsonl(os.path.join(args.data_dir, "val.jsonl"))
     print(f"train={len(train_records)} val={len(val_records)}")
 
-    model = CharBoundaryTagger(emb_dim=args.emb_dim, hidden_dim=args.hidden, layers=args.layers).to(device)
+    model = CharBoundaryTagger(vocab_size=CHAR_VOCAB_SIZE, emb_dim=args.emb_dim,
+                               hidden_dim=args.hidden, layers=args.layers).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"char tokenizer params: {n_params/1e6:.2f}M")
 
-    ds = CharBoundaryDataset(train_records, args.max_bytes)
+    ds = CharBoundaryDataset(train_records, args.max_bytes, lang_dropout=args.lang_dropout)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
                         collate_fn=char_collate, pin_memory=True, drop_last=True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -156,6 +161,8 @@ def main():
     print(f"[tok] final {m}", flush=True)
     if m["token_f1"] >= best:
         torch.save(model.state_dict(), os.path.join(args.out_dir, "tokenizer.pt"))
+    nl = evaluate(model, val_records, device, use_lang=False)
+    print(f"[tok] final lang-free {nl}", flush=True)
     print("done")
 
 

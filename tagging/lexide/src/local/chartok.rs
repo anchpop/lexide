@@ -21,15 +21,16 @@ impl CharTokenizer {
         })
     }
 
-    /// Per-position O/B/I logits for `[BOS] + utf8(text) + [EOS]`.
+    /// Per-position O/B/I logits for `[LANG or BOS] + utf8(text) + [EOS]`.
     #[allow(dead_code)] // used by the parity test; not on any production path
-    pub fn logits(&self, text: &str) -> Vec<[f32; 3]> {
-        self.model.logits(text)
+    pub fn logits(&self, text: &str, lang: Option<&str>) -> Vec<[f32; 3]> {
+        self.model.logits(text, lang)
     }
 
-    /// Raw text -> token (start, end) char spans.
-    pub fn segment(&self, text: &str) -> Vec<(usize, usize)> {
-        self.model.segment(text)
+    /// Raw text -> token (start, end) char spans. The optional language hint improves
+    /// ambiguous boundaries on lang-token checkpoints; harmless no-op on older ones.
+    pub fn segment(&self, text: &str, lang: Option<&str>) -> Vec<(usize, usize)> {
+        self.model.segment(text, lang)
     }
 }
 
@@ -63,6 +64,8 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(fixtures).unwrap()).unwrap();
         for fx in fixtures.as_array().unwrap() {
             let text = fx["text"].as_str().unwrap();
+            // Older fixture files predate language conditioning and carry no lang key.
+            let lang = fx.get("lang").and_then(|v| v.as_str());
             let want_labels: Vec<u8> = fx["byte_labels"]
                 .as_array()
                 .unwrap()
@@ -76,10 +79,10 @@ mod tests {
                 .map(|s| (s[0].as_u64().unwrap() as usize, s[1].as_u64().unwrap() as usize))
                 .collect();
 
-            let logits = tok.logits(text);
+            let logits = tok.logits(text, lang);
             let labels: Vec<u8> = logits.iter().map(argmax3).collect();
             assert_eq!(labels, want_labels, "byte labels diverge for {text:?}");
-            assert_eq!(tok.segment(text), want_spans, "spans diverge for {text:?}");
+            assert_eq!(tok.segment(text, lang), want_spans, "spans diverge for {text:?}");
 
             let want_first: Vec<f32> = fx["first_logits"]
                 .as_array()

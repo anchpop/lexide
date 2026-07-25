@@ -19,8 +19,20 @@ const EOS_BYTE: usize = 258;
 const VOCAB: usize = 259; // 256 byte values + PAD(256) + BOS + EOS
 const LN_EPS: f32 = 1e-5; // torch LayerNorm default
 
+/// Language-conditioned BOS rows appended after the base vocab, in this fixed order
+/// (matches `tagger/dataset.py::LANG_ORDER`). A checkpoint with 259 embedding rows is
+/// language-blind; one with 259+10 accepts a language hint via its first token.
+pub const LANG_ORDER: [&str; 10] = [
+    "deu", "eng", "fra", "hin", "ita", "jpn", "kor", "por", "rus", "spa",
+];
+
+fn lang_index(code: &str) -> Option<usize> {
+    LANG_ORDER.iter().position(|&l| l == code)
+}
+
 struct Linear {
-    w: Vec<f32>, // [out, in] row-major, as torch stores it
+    w: Vec<f32>,  // [out, in] row-major, as torch stores it
+    wt: Vec<f32>, // [in, out] transpose — for the vectorizable axpy path in apply_all
     b: Vec<f32>,
     in_dim: usize,
     out_dim: usize,
@@ -38,6 +50,35 @@ impl Linear {
             *out_o = acc;
         }
     }
+
+    /// [len, in] -> [len, out] for a whole sequence. Axpy formulation over the transposed
+    /// weights: `out[t] += x[t][i] * wt[i]` — contiguous writes with no reduction, so it
+    /// vectorizes, and tiling over timesteps keeps each weight column's traffic to once
+    /// per tile (at ~1M params the weights no longer fit in cache; the naive per-timestep
+    /// order was memory-bound). Per-element accumulation order (bias + ascending i) is
+    /// identical to `apply`, so results are bit-for-bit the same.
+    fn apply_all(&self, xs: &[f32], len: usize) -> Vec<f32> {
+        const TILE: usize = 32;
+        let (in_d, out_d) = (self.in_dim, self.out_dim);
+        let mut out = Vec::with_capacity(len * out_d);
+        for _ in 0..len {
+            out.extend_from_slice(&self.b);
+        }
+        for t0 in (0..len).step_by(TILE) {
+            let t1 = (t0 + TILE).min(len);
+            for i in 0..in_d {
+                let col = &self.wt[i * out_d..(i + 1) * out_d];
+                for t in t0..t1 {
+                    let xi = xs[t * in_d + i];
+                    let row = &mut out[t * out_d..(t + 1) * out_d];
+                    for (oj, cj) in row.iter_mut().zip(col) {
+                        *oj += xi * cj;
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 /// minGRU (Feng et al.): z = sigmoid(Wz x), h_cand = Wh x, h = (1-z)*h + z*h_cand.
@@ -54,17 +95,17 @@ impl MinGru {
 
     /// xs: [L, in_dim] flattened. Writes each step's hidden state into
     /// out[t * stride + offset ..][..hidden] (so fwd/bwd can interleave into one buffer).
+    /// Projections are batched over the whole sequence (they don't depend on the hidden
+    /// state); only the cheap elementwise recurrence runs sequentially.
     fn scan(&self, xs: &[f32], len: usize, reverse: bool, out: &mut [f32], stride: usize, offset: usize) {
         let h_dim = self.hidden();
-        let in_dim = self.to_z.in_dim;
+        let z_all = self.to_z.apply_all(xs, len);
+        let cand_all = self.to_h.apply_all(xs, len);
         let mut h = vec![0.0f32; h_dim];
-        let mut z = vec![0.0f32; h_dim];
-        let mut cand = vec![0.0f32; h_dim];
         for i in 0..len {
             let t = if reverse { len - 1 - i } else { i };
-            let x = &xs[t * in_dim..(t + 1) * in_dim];
-            self.to_z.apply(x, &mut z);
-            self.to_h.apply(x, &mut cand);
+            let z = &z_all[t * h_dim..(t + 1) * h_dim];
+            let cand = &cand_all[t * h_dim..(t + 1) * h_dim];
             for j in 0..h_dim {
                 let zj = 1.0 / (1.0 + (-z[j]).exp());
                 h[j] = (1.0 - zj) * h[j] + zj * cand[j];
@@ -92,8 +133,9 @@ impl BiMinGru {
 
 /// The full byte tagger: embedding, N BiMinGRU layers, LayerNorm, linear to O/B/I logits.
 pub struct ByteBioModel {
-    emb: Vec<f32>, // [VOCAB, emb_dim]
+    emb: Vec<f32>, // [VOCAB (+ n_langs), emb_dim]
     emb_dim: usize,
+    n_langs: usize, // 0 = language-blind checkpoint
     layers: Vec<BiMinGru>,
     norm_w: Vec<f32>,
     norm_b: Vec<f32>,
@@ -104,7 +146,12 @@ impl ByteBioModel {
     pub fn load(path: &Path) -> Result<Self> {
         let data = std::fs::read(path)
             .with_context(|| format!("failed to read byte-minGRU weights at {}", path.display()))?;
-        let st = safetensors::SafeTensors::deserialize(&data)
+        Self::from_bytes(&data)
+    }
+
+    /// Load from in-memory safetensors bytes (e.g. fetched over HTTP in the wasm demo).
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        let st = safetensors::SafeTensors::deserialize(data)
             .context("failed to parse byte-minGRU safetensors")?;
 
         let tensor = |name: &str| -> Result<(Vec<usize>, Vec<f32>)> {
@@ -124,18 +171,32 @@ impl ByteBioModel {
         let linear = |prefix: &str| -> Result<Linear> {
             let (wshape, w) = tensor(&format!("{prefix}.weight"))?;
             let (_, b) = tensor(&format!("{prefix}.bias"))?;
+            let (out_dim, in_dim) = (wshape[0], wshape[1]);
+            let mut wt = vec![0.0f32; w.len()];
+            for o in 0..out_dim {
+                for i in 0..in_dim {
+                    wt[i * out_dim + o] = w[o * in_dim + i];
+                }
+            }
             Ok(Linear {
-                in_dim: wshape[1],
-                out_dim: wshape[0],
+                in_dim,
+                out_dim,
                 w,
+                wt,
                 b,
             })
         };
 
         let (emb_shape, emb) = tensor("emb.weight")?;
-        if emb_shape[0] != VOCAB {
-            bail!("unexpected byte vocab size {} (expected {VOCAB})", emb_shape[0]);
+        if emb_shape[0] < VOCAB || emb_shape[0] > VOCAB + LANG_ORDER.len() {
+            bail!(
+                "unexpected byte vocab size {} (expected {VOCAB}..={} — base vocab plus \
+                 optional language tokens)",
+                emb_shape[0],
+                VOCAB + LANG_ORDER.len()
+            );
         }
+        let n_langs = emb_shape[0] - VOCAB;
         let mut layers = Vec::new();
         for i in 0.. {
             if st.tensor(&format!("layers.{i}.fwd.to_z.weight")).is_err() {
@@ -162,6 +223,7 @@ impl ByteBioModel {
         Ok(Self {
             emb_dim: emb_shape[1],
             emb,
+            n_langs,
             layers,
             norm_w,
             norm_b,
@@ -169,10 +231,17 @@ impl ByteBioModel {
         })
     }
 
-    /// Per-position O/B/I logits for `[BOS] + utf8(text) + [EOS]`.
-    pub fn logits(&self, text: &str) -> Vec<[f32; 3]> {
+    /// Per-position O/B/I logits for `[LANG or BOS] + utf8(text) + [EOS]`. `lang` is a
+    /// three-letter code from [`LANG_ORDER`]; unknown codes — or any code on a
+    /// language-blind checkpoint — fall back to the generic BOS.
+    pub fn logits(&self, text: &str, lang: Option<&str>) -> Vec<[f32; 3]> {
+        let first = lang
+            .and_then(lang_index)
+            .filter(|&i| i < self.n_langs)
+            .map(|i| VOCAB + i)
+            .unwrap_or(BOS_BYTE);
         let mut ids: Vec<usize> = Vec::with_capacity(text.len() + 2);
-        ids.push(BOS_BYTE);
+        ids.push(first);
         ids.extend(text.as_bytes().iter().map(|&b| b as usize));
         ids.push(EOS_BYTE);
         let len = ids.len();
@@ -205,8 +274,8 @@ impl ByteBioModel {
     }
 
     /// Raw text -> (start, end) char spans (each B and its trailing I run).
-    pub fn segment(&self, text: &str) -> Vec<(usize, usize)> {
-        let labels: Vec<u8> = self.logits(text).iter().map(argmax3).collect();
+    pub fn segment(&self, text: &str, lang: Option<&str>) -> Vec<(usize, usize)> {
+        let labels: Vec<u8> = self.logits(text, lang).iter().map(argmax3).collect();
         spans_from_byte_labels(text, &labels)
     }
 }

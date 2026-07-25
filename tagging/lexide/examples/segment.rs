@@ -35,7 +35,9 @@ async fn main() -> Result<()> {
 
         for (passage, lang) in passages {
             println!("\n=== passage ({lang}) ===\n{passage}");
-            let sentences = lexide.segment_sentences(passage)?;
+            // The language hint sharpens ambiguous boundaries (abbreviations, quote
+            // attributions) on lang-token checkpoints; segment_sentences() works without it.
+            let sentences = lexide.segment_sentences_in(passage, lang)?;
             println!("-> {} sentences:", sentences.len());
             for (i, sentence) in sentences.iter().enumerate() {
                 // Each sentence can now be tagged individually.

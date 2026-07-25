@@ -7,5 +7,8 @@ data/processed/
 data/lemma_tables/
 data/onnx/
 tagger/output/
+# local source corpora (copyrighted; never commit)
+data/harry-potter-extra/
+data/jkrowling.zip
 # local sentence-segmenter training venv (pip torch on this box)
 .venv-seg/

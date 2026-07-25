@@ -47,10 +47,34 @@ to the tagger. Data is LLM/mechanically labelled passages: the Rust `sentence-la
 generate synthetic prose (`generate`) and mechanically compose passages from the tokenization
 sentence pools with varied gaps/wrappers/leaders (`augment`), and an LLM labels real Harry Potter
 + synthetic passages into `sentence`/`gap` sections (`label-sentences`). `sentence_data_prep.py`
-flattens those into per-byte spans (22k train passages / 263k sentences; real held-out val/test),
-`train_segmenter.py` trains locally on the box's GPU (~0.31M params), and `export_segmenter.py`
-dumps `sentence_segmenter.safetensors` + parity fixtures. Exposed as `Lexide::segment_sentences`
-(local, in-process) / the parsley serve `/segment` endpoint (remote).
+flattens those into per-byte spans (real held-out val/test), `train_segmenter.py` trains it, and
+`export_segmenter.py` dumps `sentence_segmenter.safetensors` + parity fixtures. Exposed as
+`Lexide::segment_sentences[_in]` (local, in-process) / the parsley serve `/segment` endpoint
+(remote, optional `lang`).
+
+**Segmenter v2 (2026-07-24, deployed).** The 0.31M v1 split abbreviations ("Mr." became its own
+sentence), ate quote attributions, and choked on headings — its train set had ~245 abbreviation
+counter-examples in 263k sentences. v2 fixes this with (a) `augment` v2: per-language
+abbreviation-sentence templates, quote-attribution wrappers ("…?" she asked. + analogues), and
+heading-like gaps, scaled to 12k passages/lang from the silver pools (122k passages / 1.17M
+sentences); (b) a **language-conditioned BOS** — ids 259-268 replace BOS when the language is
+known (15% dropout keeps lang-free use working; old 259-row checkpoints still load everywhere);
+(c) a bigger net: emb 96 / hidden 192 / 4 layers ≈ **0.99M params**. Val F1 **82.6 vs 80.6**
+(real held-out; lang-free 82.56), test 84.2; all targeted abbreviation/attribution/heading cases
+verified fixed. Trained on Lambda (`sky_byte_models.yaml`) in ~35 min after rewriting the minGRU
+scan as a **Hillis-Steele doubling scan** (`model.py` — the sequential python loop was
+kernel-launch-bound: 0.06 → 2.7 it/s). The Rust `byte_bio.rs` forward was likewise rewritten
+(axpy over transposed weights, timestep tiling) — bit-identical output, ~3x faster native, ~8x in
+wasm. A **bigger char tokenizer** was trained the same way twice but never beat v1
+(99.70 vs 99.78 token F1); v1 stays shipped — its residual weakness (rare dropped words in
+abbreviation-dense sentences) needs abbreviation coverage in the *tokenization* silver data,
+i.e. teacher-labelling augmented sentences (follow-up).
+
+**Web demo** (`web-demo/`, live at <https://anchpop.github.io/lexide/>). The two byte-minGRUs
+compiled to wasm (~200KB + 5.2MB weights), running fully in-browser: paste a passage, see
+sentences/gaps/token spans live, with a `lang:` hint selector. Reuses `byte_bio.rs` verbatim via
+`#[path]`; parity-tested in Node against the Python fixtures. Deployed from the `gh-pages`
+branch (`build.sh` + copy `www/` there).
 
 **Results** — held-out **silver** test (measures agreement with the Gemma teacher, not gold):
 overall POS 98.3 / lemma 97.9 / UAS 93.1 / **LAS 91.7**.

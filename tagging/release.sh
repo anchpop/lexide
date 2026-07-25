@@ -58,7 +58,7 @@ if [ -f "$SEG_CKPT" ]; then
     # The pip torch wheel needs libstdc++ (and, for CUDA, the driver) on LD_LIBRARY_PATH on
     # this NixOS box, or `import torch` fails. Honor SEG_LD_LIBRARY_PATH if set; else locate
     # a gcc-*-lib with libstdc++.so.6 in the nix store. Export is CPU-only.
-    : "${SEG_LD_LIBRARY_PATH:=$(dirname "$(find /nix/store -maxdepth 2 -name libstdc++.so.6 -path '*-gcc-*-lib/lib/*' 2>/dev/null | head -1)")}"
+    : "${SEG_LD_LIBRARY_PATH:=$(dirname "$(find /nix/store -maxdepth 3 -name libstdc++.so.6 -path '*-gcc-*-lib/lib/*' 2>/dev/null | head -1)")}"
     LD_LIBRARY_PATH="${SEG_LD_LIBRARY_PATH}:/run/opengl-driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         "$SEG_PY" sentence-labeller/export_segmenter.py --ckpt "$SEG_CKPT" --out-dir data/onnx
 else
