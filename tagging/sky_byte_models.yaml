@@ -34,18 +34,25 @@ run: |
   cd ~/sky_workdir
 
   if [ "${SKIP_SEG}" != "1" ]; then
-    echo "=== sentence segmenter (quick) ==="
-    python3 sentence-labeller/train_segmenter.py \
-        --data-dir sentence-labeller/processed --out-dir output/segmenter \
-        --epochs "${SEG_EPOCHS}" --workers 8
-    echo "=== pattern eval: NEW checkpoint ==="
-    python3 sentence-labeller/eval_patterns.py --ckpt output/segmenter/segmenter.pt
-    echo "=== pattern eval: OLD (shipped byte-v2) checkpoint ==="
+    echo "=== sentence segmenter: seed sweep [${SEG_SEEDS}] ==="
+    for SEED in ${SEG_SEEDS}; do
+      echo "=== seed ${SEED} ==="
+      python3 sentence-labeller/train_segmenter.py \
+          --data-dir sentence-labeller/processed --out-dir "output/segmenter-s${SEED}" \
+          --epochs "${SEG_EPOCHS}" --workers 8 --seed "${SEED}"
+      echo "=== pattern eval: seed ${SEED} ==="
+      python3 sentence-labeller/eval_patterns.py \
+          --ckpt "output/segmenter-s${SEED}/segmenter.pt" \
+          --json-out "output/segmenter-s${SEED}/patterns.json"
+    done
+    echo "=== select winner (pattern pass rate, then val F1) ==="
+    python3 sentence-labeller/select_best_seed.py
+    echo "=== pattern eval: SHIPPED (byte-v3) reference ==="
     python3 -c "from huggingface_hub import hf_hub_download; print(hf_hub_download(
-        'anchpop/lexide-parsley', 'training-runs/byte-v2/segmenter/segmenter.pt',
+        'anchpop/lexide-parsley', 'training-runs/byte-v3/segmenter/segmenter.pt',
         local_dir='old-segmenter'))"
     python3 sentence-labeller/eval_patterns.py \
-        --ckpt old-segmenter/training-runs/byte-v2/segmenter/segmenter.pt
+        --ckpt old-segmenter/training-runs/byte-v3/segmenter/segmenter.pt
     python3 tagger/hf_upload_run.py output/segmenter segmenter "${RUN_NAME}"
   fi
 
@@ -60,6 +67,7 @@ run: |
   echo "=== all done ==="
 
 envs:
+  SEG_SEEDS: "1 2 3"
   SEG_EPOCHS: "3"
   TOK_EPOCHS: "2"
   TOK_BATCH: "256"

@@ -39,6 +39,8 @@ def main():
     ap.add_argument("--patterns", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "eval-patterns.jsonl"))
     ap.add_argument("--max-bytes", type=int, default=4096)
+    ap.add_argument("--json-out", default=None,
+                    help="also write {pass, total, by_category} as JSON (for sweep selection)")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -63,6 +65,11 @@ def main():
 
     total_pass = sum(p for p, _ in by_cat.values())
     total = sum(t for _, t in by_cat.values())
+    if args.json_out:
+        with open(args.json_out, "w") as f:
+            json.dump({"pass": total_pass, "total": total,
+                       "by_category": {k: {"pass": p, "total": t}
+                                       for k, (p, t) in sorted(by_cat.items())}}, f, indent=2)
     print(f"exact-case pass rate: {total_pass}/{total}")
     for cat, (p, t) in sorted(by_cat.items()):
         print(f"  {cat:14s} {p}/{t}")

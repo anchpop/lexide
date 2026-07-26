@@ -99,8 +99,14 @@ def main():
     ap.add_argument("--log-every", type=int, default=100)
     ap.add_argument("--eval-every", type=int, default=1000)
     ap.add_argument("--train-limit", type=int, default=None)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="seed torch RNG (init + batch order); at this scale seed variance "
+                         "dominates marginal cases, so sweeps train several and pick by "
+                         "eval_patterns.py score")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
 
     os.makedirs(args.out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"

@@ -91,15 +91,15 @@ fn lang_pack(lang: &str) -> LangPack {
         "eng" => LangPack {
             abbr_templates: &[
                 "Mr. {N} met Mrs. {N} at 3 p.m. on Friday.",
-                "Dr. {N} works at the N.A.S.A. laboratory on Elm St. near the river.",
+                "Dr. {N} works at the N.A.S.A. laboratory on {N} St. near the river.",
                 "Prof. {N} cited pp. 12–14, i.e. the appendix.",
-                "{N} joined Acme Inc. in 1998, e.g. as a clerk.",
+                "{N} joined {N} Inc. in 1998, e.g. as a clerk.",
                 "St. {N} was born ca. 300 A.D. in a small town.",
                 "Capt. {N} and Sgt. {N} arrived at 6 a.m. sharp.",
                 "The U.S.A. sent Dr. {N} to the U.N. summit.",
                 "See Fig. 3 and Vol. II, ch. 4, for details.",
                 "{N} earned a Ph.D. under Prof. {N} last year.",
-                "They live at No. 22 Baker St., near Mt. Hope.",
+                "They live at No. 22 {N} St., near Mt. {N}.",
                 "Mr. and Mrs. {N} of number four were proud to say that they were normal.",
                 "The F.B.I. interviewed {N} for approx. two hours.",
             ],
@@ -125,12 +125,12 @@ fn lang_pack(lang: &str) -> LangPack {
                 "It weighs about 3.5 kg, more or less.",
             ],
             abbr_final_templates: &[
-                "They moved to No. 22 Baker St.",
-                "He drove all the way down Oak St.",
-                "The office sits on Fifth Ave.",
+                "They moved to No. 22 {N} St.",
+                "He drove all the way down {N} St.",
+                "The office sits on {N} Ave.",
                 "He finally earned his Ph.D.",
                 "{N} defended her Ph.D.",
-                "The parcel came from Acme Inc.",
+                "The parcel came from {N} Inc.",
                 "She sold the shares of {N} Corp.",
                 "He signed with {N} Bros.",
                 "The lecture covered the history of the U.S.A.",
@@ -158,7 +158,7 @@ fn lang_pack(lang: &str) -> LangPack {
             abbr_templates: &[
                 "Dr. {N} traf Hrn. {N} um 15 Uhr, d. h. am Nachmittag.",
                 "Prof. {N} zitierte S. 12 ff., vgl. Abb. 3.",
-                "Sie wohnt in der Hauptstr. 5, Nr. 12, bei Fr. {N}.",
+                "Sie wohnt in der {N}str. 5, Nr. 12, bei Fr. {N}.",
                 "Das kostet ca. 20 Euro, z. B. im Supermarkt.",
                 "Wir brauchen Mehl, Zucker, Eier usw. für den Kuchen.",
                 "Die Fa. {N} GmbH liefert u. a. nach Österreich.",
@@ -185,7 +185,7 @@ fn lang_pack(lang: &str) -> LangPack {
                 "Der Termin ist am 3. Okt.",
                 "Er kommt am Mo. oder Di.",
                 "Wir brauchen Mehl, Zucker, Eier usw.",
-                "Sie wohnt in der Bahnhofstr.",
+                "Sie wohnt in der {N}str.",
                 "Das Paket kam von der {N} GmbH & Co.",
                 "Der Kurs beginnt um 9 Uhr vorm.",
             ],
@@ -201,7 +201,7 @@ fn lang_pack(lang: &str) -> LangPack {
         "fra" => LangPack {
             abbr_templates: &[
                 "M. {N} a rencontré Mme {N} à 15 h, c.-à-d. l'après-midi.",
-                "Le Dr {N} habite au n° 5, av. de la République.",
+                "Le Dr {N} habite au n° 5, av. de la {N}.",
                 "Voir p. ex. les pp. 12-14, cf. chap. 3.",
                 "L'événement date du IIIe s. av. J.-C. environ.",
                 "M. {N} travaille chez {N} S.A. depuis 1998.",
@@ -241,7 +241,7 @@ fn lang_pack(lang: &str) -> LangPack {
         "ita" => LangPack {
             abbr_templates: &[
                 "Il sig. {N} ha incontrato la sig.ra {N} alle 15.",
-                "Il dott. {N} lavora in via Roma n. 5.",
+                "Il dott. {N} lavora in via {N} n. 5.",
                 "Vedi ad es. le pagg. 12-14, cfr. cap. 3.",
                 "Il prof. {N} cita il vol. II, pag. 44, ecc.",
                 "La ditta {N} S.p.A. consegna il 3 ott. circa.",
@@ -263,7 +263,7 @@ fn lang_pack(lang: &str) -> LangPack {
             ],
             abbr_final_templates: &[
                 "La ditta si chiama {N} S.p.A.",
-                "La sede è in via Roma n. 5.",
+                "La sede è in via {N} n. 5.",
                 "Portò pane, vino, olio, ecc.",
                 "La riunione è alle 9 a.m.",
             ],
@@ -279,7 +279,7 @@ fn lang_pack(lang: &str) -> LangPack {
         "spa" => LangPack {
             abbr_templates: &[
                 "El Sr. {N} saludó a la Sra. {N} a las 3 p. m.",
-                "La Dra. {N} vive en la avda. Mayor, núm. 5.",
+                "La Dra. {N} vive en la avda. {N}, núm. 5.",
                 "Véase p. ej. las págs. 12-14, cf. cap. 3.",
                 "EE. UU. envió al Dr. {N} a la cumbre.",
                 "El prof. {N} llegó a las 9 a. m. aprox.",
@@ -304,7 +304,7 @@ fn lang_pack(lang: &str) -> LangPack {
                 "La cita es a las 9 a. m.",
                 "La tienda cierra a las 6 p. m.",
                 "Trajo pan, vino, aceite, etc.",
-                "La oficina está en la avda. Mayor, n.º 3, 2.º izq.",
+                "La oficina está en la avda. {N}, n.º 3, 2.º izq.",
             ],
             attributions: &[
                 ("«", "», preguntó ella."),
@@ -318,7 +318,7 @@ fn lang_pack(lang: &str) -> LangPack {
         "por" => LangPack {
             abbr_templates: &[
                 "O Sr. {N} encontrou a Sra. {N} às 15 h.",
-                "O Dr. {N} mora na Av. Paulista, n.º 5.",
+                "O Dr. {N} mora na Av. {N}, n.º 5.",
                 "Veja p. ex. as págs. 12-14, cf. cap. 3.",
                 "A Cia. de teatro chegou às 20 h, i.e. atrasada.",
                 "O prof. {N} nasceu no séc. XIX, em S. Paulo.",
@@ -339,7 +339,7 @@ fn lang_pack(lang: &str) -> LangPack {
                 "Esperou... e esperou... e nada aconteceu.",
             ],
             abbr_final_templates: &[
-                "Ele mora na Av. Paulista.",
+                "Ele mora na Av. {N}.",
                 "A empresa chama-se {N} Ltda.",
                 "Trouxe pão, vinho, azeite, etc.",
                 "A loja fecha às 6 p.m.",
@@ -355,7 +355,7 @@ fn lang_pack(lang: &str) -> LangPack {
         "rus" => LangPack {
             abbr_templates: &[
                 "Г-н {N} встретил г-жу {N} в 15 ч., т. е. днём.",
-                "Д-р {N} живёт на ул. Ленина, д. 5, кв. 12.",
+                "Д-р {N} живёт на ул. {N}, д. 5, кв. 12.",
                 "Он купил хлеб, молоко и т. д. в магазине.",
                 "В 1998 г. компания выросла до 5 тыс. человек.",
                 "См. напр. стр. 12–14 и др. источники.",
@@ -376,7 +376,7 @@ fn lang_pack(lang: &str) -> LangPack {
                 "Он ждал... и ждал... и ничего не происходило.",
             ],
             abbr_final_templates: &[
-                "Он живёт на ул. Ленина, д. 5.",
+                "Он живёт на ул. {N}, д. 5.",
                 "Компания выросла до 5 тыс.",
                 "Он купил хлеб, молоко и т. д.",
                 "Встреча назначена на 19 ч.",
