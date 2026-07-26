@@ -120,11 +120,11 @@
       <button id="theme"></button>
     </nav>
   </header>
-  <div class="stats" id="stats">loading weights · 2.6mb</div>
+  <div class="stats" id="stats">loading weights · 8mb</div>
   <textarea id="input" spellcheck="false" placeholder="paste a passage"></textarea>
   <div id="out"></div>
   <footer>
-    <span>byte-minGRU ×2 · 1.0m + 0.3m params</span>
+    <span>byte-minGRU ×2 · 1m params each</span>
     <span id="timing"></span>
   </footer>
 </main>
@@ -158,11 +158,7 @@ async function fetchWeights(name) {
   throw new Error(`could not fetch ${name} locally or from hf`);
 }
 
-const DEFAULT_TEXT = `Dr. Smith arrived at 3 p.m. — he wasn't late. "Is this the place?" she asked.
-
-Chapter Two
-
-Mr. Dursley was the director of a firm called Grunnings, which made drills. Es war einmal ein Mädchen, das in den Wald ging. Он посмотрел на неё и улыбнулся.`;
+const DEFAULT_TEXT = `Dr. Smith arrived at 3 p.m. — he wasn't late. "Is this the place?" she asked. ¿Por qué se menciona "¿Dónde está la biblioteca?" en tantas películas/series de televisión?`;
 
 let parsley = null;
 
