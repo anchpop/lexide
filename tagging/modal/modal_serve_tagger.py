@@ -34,10 +34,17 @@ hf_secret = modal.Secret.from_name("huggingface-secret")
 
 
 def _download_model():
-    """Bake the tagger weights into the image at build time (needs the HF token; runs once)."""
+    """Bake the tagger weights into the image at build time (needs the HF token; runs once).
+
+    LEXIDE_MODEL_REVISION (set as an image env layer at deploy time) pins the HF repo
+    commit AND busts Modal's layer cache: without it, a redeploy after uploading new
+    weights silently reuses the image layer holding the old ones (bit us on the segmenter
+    v4 release — run_function args do NOT participate in the cache key, env layers do).
+    """
     from huggingface_hub import snapshot_download
     snapshot_download(
         HF_REPO,
+        revision=os.environ.get("LEXIDE_MODEL_REVISION") or None,
         # segmenter/* is optional on older repo snapshots; snapshot_download simply skips
         # patterns that match nothing, so the serve still builds before it's published.
         allow_patterns=["tagger/best/*", "tokenizer/*", "segmenter/*"],
@@ -68,7 +75,15 @@ image = (
 # without them (model-only lemmas). Populate data/lemma_tables/ before deploy for the floor.
 if _tables_src.exists():
     image = image.add_local_dir(str(_tables_src), TABLES_DIR, copy=True)
-# Bake the model weights into the image so the snapshotted load is local-only.
+# Bake the model weights into the image so the snapshotted load is local-only. The repo's
+# current commit sha is resolved on the deploying machine into an env layer, so the model
+# layer is rebuilt exactly when the model repo has changed (empty only in non-local
+# contexts, where the image expression is never built).
+_model_revision = ""
+if modal.is_local():
+    from huggingface_hub import HfApi
+    _model_revision = HfApi().model_info(HF_REPO).sha
+image = image.env({"LEXIDE_MODEL_REVISION": _model_revision})
 image = image.run_function(_download_model, secrets=[hf_secret])
 
 
@@ -128,6 +143,18 @@ class Parsley:
     def run(self, text, lang=""):
         """Callable path for `modal run` smoke tests (the HTTP path is tag() below)."""
         return self._tag_one(text, lang)
+
+    @modal.method()
+    def baked_model_info(self):
+        """Debug: md5 + revision of the weights actually baked into this image."""
+        import hashlib
+        out = {"revision_env": os.environ.get("LEXIDE_MODEL_REVISION", "<unset>")}
+        for name in ["segmenter/segmenter.pt", "tokenizer/tokenizer.pt"]:
+            p = os.path.join(MODEL_DIR, name)
+            out[name] = (
+                hashlib.md5(open(p, "rb").read()).hexdigest() if os.path.exists(p) else "<absent>"
+            )
+        return out
 
     @modal.fastapi_endpoint(method="POST", docs=True)
     def tag(self, request: dict):
