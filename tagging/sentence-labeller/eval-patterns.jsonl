@@ -38,3 +38,7 @@
 {"id": "pat-eng-11", "lang": "eng", "category": "abbr_final", "text": "She works at Apex Inc. Their offices are downtown.", "tokens": [{"start": 0, "end": 22}, {"start": 23, "end": 50}]}
 {"id": "pat-eng-12", "lang": "eng", "category": "abbr_final", "text": "The bakery opens at 8 a.m. It closes at noon.", "tokens": [{"start": 0, "end": 26}, {"start": 27, "end": 45}]}
 {"id": "pat-rus-04", "lang": "rus", "category": "dash_paren", "text": "Дорога — как ни странно! — была пуста.", "tokens": [{"start": 0, "end": 38}]}
+{"id": "pat-jpn-06", "lang": "jpn", "category": "quote_narration", "text": "「ピーブズ」ハリーは声を殺した。", "tokens": [{"start": 0, "end": 6}, {"start": 6, "end": 16}]}
+{"id": "pat-jpn-07", "lang": "jpn", "category": "quote_narration", "text": "「たいしたことないだろ」とロンが言った。", "tokens": [{"start": 0, "end": 20}]}
+{"id": "pat-kor-04", "lang": "kor", "category": "quote_narration", "text": "“조용히 해.” 해리가 말했다.", "tokens": [{"start": 0, "end": 8}, {"start": 9, "end": 17}]}
+{"id": "pat-kor-05", "lang": "kor", "category": "quote_narration", "text": "“알았어”라고 그가 답했다.", "tokens": [{"start": 0, "end": 15}]}

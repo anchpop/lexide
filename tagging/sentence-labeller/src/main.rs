@@ -13,13 +13,19 @@ Return the passage as an ordered list of sections:
 - `sentence`: exactly one complete sentence, including all punctuation that frames it: opening and closing quotation marks, and dialogue dashes or other dialogue markers.
 - `gap`: text that belongs to no sentence, especially whitespace between sentences, headings, and document separators. Do not put quotation marks or dialogue markers in a gap when they frame a sentence.
 
-Preserve every character exactly. Do not correct, normalize, translate, add, or remove anything. Never return an empty section. Copy content directly from the input, paying special attention to spaces around quotation marks and dashes. Concatenating every section's `content` in order MUST reproduce the input exactly. Spaces within a sentence belong to that sentence; spaces and newlines between sentences are gaps. Quotations are ordinary sentence content and require no special treatment. Before responding, verify the concatenation character-for-character.
+Quotation policy — apply it the same way every time:
+- A quote containing several sentences is split at its internal terminators; the opening mark goes with the first sentence and the closing mark with the last: `「おったまげた。` then `どうやって助かった？」`
+- Latin-script dialogue: a quote plus its attribution clause is ONE sentence: `"Is this the place?" she asked.` Dash dialogue too: `—Ya voy —dijo Valdés—.` is one sentence; a multi-sentence dash turn splits at internal terminators, the dash staying with the first: `—No.` then `También contiene sales.`
+- Japanese and Korean: the quote and what follows form ONE sentence only when a quotative binder attaches them (と, って, 라고, 하고): `「一人分しかないね」とハリーが言った。` With no binder the quote is its own sentence, even when what follows is an attribution: `「ピーブズ」` then `ハリーは声を殺した。` — and `“조용히 해.”` then `해리가 말했다.` Do not judge by the verb; check only for the binder.
+- In scripts, a speaker label frames the sentence it introduces (`TOMÁS.— Atención, cabina.` is one sentence; a multi-sentence speech still splits after the first terminator). A bracketed stage direction is its own sentence, brackets included.
+
+Preserve every character exactly. Do not correct, normalize, translate, add, or remove anything. Never return an empty section. Copy content directly from the input, paying special attention to spaces around quotation marks and dashes. Concatenating every section's `content` in order MUST reproduce the input exactly. Spaces within a sentence belong to that sentence; spaces and newlines between sentences are gaps. Before responding, verify the concatenation character-for-character.
 
 Example input:
-He said, "Hi!"  Then he left.
+He said, "Hi! Come in."  Then he left.
 
 Example output:
-{"sections":[{"type":"sentence","content":"He said, \"Hi!\""},{"type":"gap","content":"  "},{"type":"sentence","content":"Then he left."}]}"#;
+{"sections":[{"type":"sentence","content":"He said, \"Hi!"},{"type":"gap","content":" "},{"type":"sentence","content":"Come in.\""},{"type":"gap","content":"  "},{"type":"sentence","content":"Then he left."}]}"#;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct InputRecord {

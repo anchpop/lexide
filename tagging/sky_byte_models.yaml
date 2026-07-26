@@ -47,12 +47,12 @@ run: |
     done
     echo "=== select winner (pattern pass rate, then val F1) ==="
     python3 sentence-labeller/select_best_seed.py
-    echo "=== pattern eval: SHIPPED (byte-v3) reference ==="
+    echo "=== pattern eval: SHIPPED (byte-v4) reference ==="
     python3 -c "from huggingface_hub import hf_hub_download; print(hf_hub_download(
-        'anchpop/lexide-parsley', 'training-runs/byte-v3/segmenter/segmenter.pt',
+        'anchpop/lexide-parsley', 'training-runs/byte-v4/segmenter/segmenter.pt',
         local_dir='old-segmenter'))"
     python3 sentence-labeller/eval_patterns.py \
-        --ckpt old-segmenter/training-runs/byte-v3/segmenter/segmenter.pt
+        --ckpt old-segmenter/training-runs/byte-v4/segmenter/segmenter.pt
     python3 tagger/hf_upload_run.py output/segmenter segmenter "${RUN_NAME}"
   fi
 
@@ -73,4 +73,4 @@ envs:
   TOK_BATCH: "256"
   SKIP_SEG: "0"
   SKIP_TOK: "0"
-  RUN_NAME: "byte-v2"
+  RUN_NAME: "byte-v5"
