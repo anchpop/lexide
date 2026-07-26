@@ -256,7 +256,7 @@ function rustSnippet(text, lang, sentSpans, cps) {
   const sentences = sentSpans
     .map(([s, e]) => "            " + rustStr(cps.slice(s, e).join("")) + ",")
     .join("\n");
-  return `// Cargo.toml: lexide = { git = "https://github.com/anchpop/lexide", features = ["segment"] }
+  return `// cargo add lexide --features segment
 use lexide::${imports};
 
 fn main() -> anyhow::Result<()> {

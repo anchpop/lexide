@@ -1,26 +1,58 @@
 # Lexide
 
-A Rust library for multilingual NLP analysis: tokenization, POS tagging, lemmatization,
-and dependency parsing for 10 languages (deu eng fra hin ita jpn kor por rus spa).
+**[Live demo](https://anchpop.github.io/lexide/)** — the sentence segmenter + tokenizer
+running in your browser, generating the equivalent Rust as you type.
 
-Two backends, selected by cargo feature:
+A Rust library for multilingual NLP analysis: sentence segmentation, tokenization,
+POS tagging, lemmatization, and dependency parsing for 10 languages
+(deu eng fra hin ita jpn kor por rus spa).
 
-- **`local`** — runs the parsley tagger in-process on CPU: a byte-level minGRU segmenter
-  (pure Rust), the multi-task XLM-R encoder via ONNX Runtime (`ort`), and Wiktionary lemma
+Three backends, selected by cargo feature:
+
+- **`segment`** — just the sentence segmenter: a 1M-param byte-level minGRU, pure Rust,
+  one ~4 MB model download. The lightest entry point (see below).
+- **`local`** — the full parsley tagger in-process on CPU: the byte-minGRU models, the
+  multi-task XLM-R encoder via ONNX Runtime (`ort`), and Wiktionary lemma
   tables in a compact `fst` format. Analyzes a sentence in tens of milliseconds, no network;
   loading is disk-bound on the 1.1 GB fp32 graph (~seconds; int8 quantization will shrink it).
 - **`remote`** — an HTTP client for the Modal endpoints: the parsley CPU serve
   (`Lexide::from_parsley_server`, JSON tokens) or the legacy Gemma vLLM serve
   (`Lexide::from_server`, tab-separated completions).
 
-Both produce identical `Tokenization`s — the local pipeline is verified token-for-token
-against the parsley serve (`tests/parsley_parity.rs`).
+Local and remote produce identical `Tokenization`s — the local pipeline is verified
+token-for-token against the parsley serve (`tests/parsley_parity.rs`).
 
-## Usage
+## Sentence segmentation
+
+```bash
+cargo add lexide --features segment
+```
+
+```rust
+let parsley = lexide::Segmenter::from_pretrained()?; // ~4 MB download, cached
+assert_eq!(
+    parsley.segment_in(
+        "Dr. Smith arrived at 3 p.m. — he wasn't late. \"Is this the place?\" she asked.",
+        lexide::Language::English,
+    ),
+    vec![
+        "Dr. Smith arrived at 3 p.m. — he wasn't late.",
+        "\"Is this the place?\" she asked.",
+    ],
+);
+```
+
+Gaps between sentences (whitespace, headings, separators) are dropped; punctuation that
+*frames* a sentence (its quotes, a leading dialogue dash) stays attached.
+`segment` skips the language hint, `segment_detailed` also returns each sentence's
+`[start, end)` char span. See `examples/segment.rs`. (On the remote backend, use the async
+`RemoteClient::segment_sentences` against a parsley `/segment` endpoint.)
+
+## Tagging
 
 ```toml
 [dependencies]
-lexide = { git = "https://github.com/anchpop/lexide.git", features = ["remote"] }
+lexide = { version = "0.1", features = ["remote"] }
 ```
 
 ```rust
@@ -45,26 +77,8 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-## Sentence segmentation
-
-`analyze` expects one sentence. To turn a document — or each entry of a list of documents —
-into sentences, use `segment_sentences`, which splits a passage on the byte-level minGRU
-sentence segmenter (B/I/O over bytes, where B = a sentence begins, I = inside a sentence,
-O = a gap). The gaps between sentences are dropped; punctuation/markers that *frame* a
-sentence (its quotes, a leading dialogue dash) stay attached.
-
-```rust
-// local backend only (a cheap in-process pass, hence sync)
-for sentence in lexide.segment_sentences("First. Then second! \"Done,\" he said.")? {
-    let tok = lexide.analyze(&sentence, Language::English).await?;
-    // ...
-}
-// segment_sentences_detailed(..) additionally returns each sentence's [start,end) char span.
-```
-
-On the remote backend, segment against a parsley `/segment` endpoint with the async
-`RemoteClient::segment_sentences` (`POST {texts:[...]} -> {results:[[sentence,...],...]}`).
-See `examples/segment.rs`.
+`analyze` expects one sentence — use `Segmenter` (above) to turn documents into sentences
+first.
 
 ## Local model artifacts
 

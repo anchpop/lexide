@@ -1,5 +1,8 @@
 # Lexide - Multilingual Linguistic Analysis with Gemma
 
+**[Live demo](https://anchpop.github.io/lexide/)** — the parsley sentence segmenter +
+tokenizer running in your browser · [`lexide` on crates.io](https://crates.io/crates/lexide)
+
 Fine-tuning Gemma 3 for multilingual part-of-speech tagging, lemmatization, and dependency parsing.
 
 This repository contains the training code, the training data, and a REX library that can be used to actually use the model with a convenient API.
