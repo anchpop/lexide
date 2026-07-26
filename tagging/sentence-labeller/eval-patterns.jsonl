@@ -35,3 +35,6 @@
 {"id": "pat-kor-01", "lang": "kor", "category": "dash_abbr", "text": "박 박사는 저녁 7시에 도착했다 - 아무도 기다리지 않았다.", "tokens": [{"start": 0, "end": 33}]}
 {"id": "pat-kor-02", "lang": "kor", "category": "quote_copula", "text": "돌아온 대답은 \"안 간다\"였다.", "tokens": [{"start": 0, "end": 17}]}
 {"id": "pat-kor-03", "lang": "kor", "category": "dash_paren", "text": "재판은 — 누가 믿겠냐마는 — 자정에 끝났다.", "tokens": [{"start": 0, "end": 25}]}
+{"id": "pat-eng-11", "lang": "eng", "category": "abbr_final", "text": "She works at Apex Inc. Their offices are downtown.", "tokens": [{"start": 0, "end": 22}, {"start": 23, "end": 50}]}
+{"id": "pat-eng-12", "lang": "eng", "category": "abbr_final", "text": "The bakery opens at 8 a.m. It closes at noon.", "tokens": [{"start": 0, "end": 26}, {"start": 27, "end": 45}]}
+{"id": "pat-rus-04", "lang": "rus", "category": "dash_paren", "text": "Дорога — как ни странно! — была пуста.", "tokens": [{"start": 0, "end": 38}]}

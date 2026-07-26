@@ -126,10 +126,19 @@ fn lang_pack(lang: &str) -> LangPack {
             ],
             abbr_final_templates: &[
                 "They moved to No. 22 Baker St.",
+                "He drove all the way down Oak St.",
+                "The office sits on Fifth Ave.",
                 "He finally earned his Ph.D.",
+                "{N} defended her Ph.D.",
                 "The parcel came from Acme Inc.",
+                "She sold the shares of {N} Corp.",
+                "He signed with {N} Bros.",
                 "The lecture covered the history of the U.S.A.",
                 "She was born around 300 A.D.",
+                "The shop opens at 9 a.m.",
+                "The train leaves at 6 p.m.",
+                "He weighed the parcel: 3 lbs.",
+                "He listed pens, ink, brushes, etc.",
             ],
             attributions: &[
                 ("\"", "\" she asked."),
@@ -176,6 +185,9 @@ fn lang_pack(lang: &str) -> LangPack {
                 "Der Termin ist am 3. Okt.",
                 "Er kommt am Mo. oder Di.",
                 "Wir brauchen Mehl, Zucker, Eier usw.",
+                "Sie wohnt in der Bahnhofstr.",
+                "Das Paket kam von der {N} GmbH & Co.",
+                "Der Kurs beginnt um 9 Uhr vorm.",
             ],
             attributions: &[
                 ("„", "“, sagte sie."),
@@ -214,6 +226,8 @@ fn lang_pack(lang: &str) -> LangPack {
             abbr_final_templates: &[
                 "Il travaille pour la société {N} S.A.",
                 "L'accord date du IIIe s. av. J.-C.",
+                "Elle habite au 5, bd. St-Michel, esc.",
+                "Voir la liste des pièces jointes, etc.",
             ],
             attributions: &[
                 ("«\u{a0}", "\u{a0}» demanda-t-elle."),
@@ -250,6 +264,8 @@ fn lang_pack(lang: &str) -> LangPack {
             abbr_final_templates: &[
                 "La ditta si chiama {N} S.p.A.",
                 "La sede è in via Roma n. 5.",
+                "Portò pane, vino, olio, ecc.",
+                "La riunione è alle 9 a.m.",
             ],
             attributions: &[
                 ("«", "» chiese lei."),
@@ -286,6 +302,9 @@ fn lang_pack(lang: &str) -> LangPack {
             abbr_final_templates: &[
                 "Él trabaja en los EE. UU.",
                 "La cita es a las 9 a. m.",
+                "La tienda cierra a las 6 p. m.",
+                "Trajo pan, vino, aceite, etc.",
+                "La oficina está en la avda. Mayor, n.º 3, 2.º izq.",
             ],
             attributions: &[
                 ("«", "», preguntó ella."),
@@ -322,6 +341,8 @@ fn lang_pack(lang: &str) -> LangPack {
             abbr_final_templates: &[
                 "Ele mora na Av. Paulista.",
                 "A empresa chama-se {N} Ltda.",
+                "Trouxe pão, vinho, azeite, etc.",
+                "A loja fecha às 6 p.m.",
             ],
             attributions: &[
                 ("«", "», perguntou ela."),
@@ -358,6 +379,9 @@ fn lang_pack(lang: &str) -> LangPack {
                 "Он живёт на ул. Ленина, д. 5.",
                 "Компания выросла до 5 тыс.",
                 "Он купил хлеб, молоко и т. д.",
+                "Встреча назначена на 19 ч.",
+                "Список продолжается и т. п.",
+                "Город основан в V в. до н. э.",
             ],
             attributions: &[
                 ("«", "» — спросила она."),
@@ -622,7 +646,7 @@ fn main() -> Result<()> {
                     push(&mut sections, "sentence", format!("{open}{a}"));
                     push(&mut sections, "gap", " ".to_owned());
                     format!("{b}{close}")
-                } else if roll < 56 && abbr_final_ok {
+                } else if roll < 60 && abbr_final_ok {
                     let t = pack.abbr_final_templates[rng.usize(pack.abbr_final_templates.len())];
                     let filled = fill(t, &names, &mut rng);
                     push(&mut sections, "sentence", filled);
