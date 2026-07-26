@@ -610,7 +610,8 @@ fn main() -> Result<()> {
                 // multi-sentence quote (two sentences sharing one wrapper pair,
                 // split mid-quote — matches how the LLM labels them), ~5% sentence
                 // ENDING in an abbreviation (followed by a forced plain gap: with
-                // an empty/zero-width gap the boundary would be unknowable), else
+                // an empty/zero-width gap the boundary would be unknowable), ~8%
+                // script/screenplay block (speaker labels, stage directions), else
                 // the v1 leader/wrapper composition (5% of which get one internal
                 // hard-wrap \n, mirroring wrapped prose in the real data). The
                 // templates are the counter-examples the LLM data barely covers
@@ -652,6 +653,55 @@ fn main() -> Result<()> {
                     push(&mut sections, "sentence", filled);
                     if index + 1 < sentence_count {
                         push(&mut sections, "gap", if rng.usize(2) == 0 { " " } else { "\n" }.to_owned());
+                    }
+                    continue;
+                } else if roll < 68 {
+                    // Script/screenplay block — the format the spa field eval showed had
+                    // ~zero training signal (8 of 122k passages): a speaker label frames
+                    // the first sentence of its speech, multi-sentence speeches split at
+                    // internal terminators, bracketed stage directions are their own
+                    // sentence. Styles and casing vary (theater "NAME.—", chat "Name:",
+                    // jpn NAME「」, occasional shouted ALL-CAPS lines) so the model
+                    // learns the shape, not one surface form.
+                    let cased = !matches!(lang, "jpn" | "kor" | "hin");
+                    let theater = rng.usize(2) == 0; // per-block style: NAME.— vs Name:
+                    let turns = 2 + rng.usize(3);
+                    for turn in 0..turns {
+                        if rng.usize(100) < 22 {
+                            let s = &pool[rng.usize(pool.len())];
+                            push(&mut sections, "sentence", format!("[{s}]"));
+                            push(&mut sections, "gap", "\n\n".to_owned());
+                        }
+                        let name = &names[rng.usize(names.len())];
+                        let label =
+                            if cased && theater { name.to_uppercase() } else { name.clone() };
+                        let mut speech = pool[rng.usize(pool.len())].clone();
+                        if cased && rng.usize(100) < 10 {
+                            speech = speech.to_uppercase();
+                        }
+                        if lang == "jpn" {
+                            if rng.usize(100) < 30 {
+                                // multi-sentence speech splits inside the 「」
+                                let second = &pool[rng.usize(pool.len())];
+                                push(&mut sections, "sentence", format!("{label}「{speech}"));
+                                push(&mut sections, "sentence", format!("{second}」"));
+                            } else {
+                                push(&mut sections, "sentence", format!("{label}「{speech}」"));
+                            }
+                        } else {
+                            let sep = if cased && theater { ".— " } else { ": " };
+                            push(&mut sections, "sentence", format!("{label}{sep}{speech}"));
+                            if rng.usize(100) < 30 {
+                                push(&mut sections, "gap", " ".to_owned());
+                                push(&mut sections, "sentence", pool[rng.usize(pool.len())].clone());
+                            }
+                        }
+                        if turn + 1 < turns {
+                            push(&mut sections, "gap", "\n\n".to_owned());
+                        }
+                    }
+                    if index + 1 < sentence_count {
+                        push(&mut sections, "gap", "\n\n".to_owned());
                     }
                     continue;
                 } else {
@@ -699,7 +749,7 @@ fn main() -> Result<()> {
             let record = Record {
                 id: format!("mechanical-{lang}-{sample:05}"),
                 lang: lang.to_owned(),
-                source: "mechanical-sentence-composition-v3",
+                source: "mechanical-sentence-composition-v4",
                 text,
                 sections,
             };

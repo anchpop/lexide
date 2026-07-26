@@ -7,7 +7,10 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc};
 use tokio::{fs, sync::Mutex};
 use tysm::chat_completions::ChatClient;
 
-const SYSTEM_PROMPT: &str = r#"Split the provided passage into sentences and gaps.
+// The prompt is assembled per-record: HEAD + (ELLIPSIS_BULLET if the text has one) + TAIL.
+// The bullet is conditional so that records without an ellipsis keep the exact prompt
+// string of previous runs and stay hits in the tysm response cache.
+const PROMPT_HEAD: &str = r#"Split the provided passage into sentences and gaps.
 
 Return the passage as an ordered list of sections:
 - `sentence`: exactly one complete sentence, including all punctuation that frames it: opening and closing quotation marks, and dialogue dashes or other dialogue markers.
@@ -17,7 +20,12 @@ Quotation policy — apply it the same way every time:
 - A quote containing several sentences is split at its internal terminators; the opening mark goes with the first sentence and the closing mark with the last: `「おったまげた。` then `どうやって助かった？」`
 - Latin-script dialogue: a quote plus its attribution clause is ONE sentence: `"Is this the place?" she asked.` Dash dialogue too: `—Ya voy —dijo Valdés—.` is one sentence; a multi-sentence dash turn splits at internal terminators, the dash staying with the first: `—No.` then `También contiene sales.`
 - Japanese and Korean: the quote and what follows form ONE sentence only when a quotative binder attaches them (と, って, 라고, 하고): `「一人分しかないね」とハリーが言った。` With no binder the quote is its own sentence, even when what follows is an attribution: `「ピーブズ」` then `ハリーは声を殺した。` — and `“조용히 해.”` then `해리가 말했다.` Do not judge by the verb; check only for the binder.
-- In scripts, a speaker label frames the sentence it introduces (`TOMÁS.— Atención, cabina.` is one sentence; a multi-sentence speech still splits after the first terminator). A bracketed stage direction is its own sentence, brackets included.
+- In scripts, a speaker label frames the sentence it introduces (`TOMÁS.— Atención, cabina.` is one sentence; a multi-sentence speech still splits after the first terminator). A bracketed stage direction is its own sentence, brackets included."#;
+
+const ELLIPSIS_BULLET: &str = r#"
+- Ellipsis: `…`/`...` followed by a new clause starting with a capital (or a new dialogue turn) is a sentence boundary: `—Ya voy. Espere…` then `Hay un sonido.` Followed by a lowercase continuation of the same clause it is mid-sentence: `esperó… y nada pasó.` In Japanese and Korean an ellipsis is mid-sentence unless a sentence terminator or a new turn follows it."#;
+
+const PROMPT_TAIL: &str = r#"
 
 Preserve every character exactly. Do not correct, normalize, translate, add, or remove anything. Never return an empty section. Copy content directly from the input, paying special attention to spaces around quotation marks and dashes. Concatenating every section's `content` in order MUST reproduce the input exactly. Spaces within a sentence belong to that sentence; spaces and newlines between sentences are gaps. Before responding, verify the concatenation character-for-character.
 
@@ -86,8 +94,10 @@ fn validate(text: &str, sections: &[Section]) -> Result<()> {
 }
 
 async fn annotate(client: &ChatClient, record: InputRecord) -> Result<OutputRecord> {
+    let ellipsis = record.text.contains('…') || record.text.contains("...");
+    let bullet = if ellipsis { ELLIPSIS_BULLET } else { "" };
     let mut response: Annotation = client
-        .chat_with_system_prompt(SYSTEM_PROMPT.to_owned(), record.text.clone())
+        .chat_with_system_prompt(format!("{PROMPT_HEAD}{bullet}{PROMPT_TAIL}"), record.text.clone())
         .await
         .with_context(|| format!("label {}", record.id))?;
     response
