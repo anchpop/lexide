@@ -44,7 +44,7 @@ run: |
     --audio-degrade \
     --vad-weight 0.05 \
     --save-dir checkpoints-vad-clean-sidechannel-degrade \
-    --hf-repo anchpop/lexide-pronunciation-vad-clean-sidechannel-degrade
+    --hf-repo anchpop/lexide-pronunciation   # the champion (renamed from -vad-clean-sidechannel-degrade)
 
 secrets:
   HF_TOKEN: null

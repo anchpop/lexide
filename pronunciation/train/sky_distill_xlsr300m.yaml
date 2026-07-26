@@ -27,8 +27,9 @@ run: |
   echo "data langs: $(ls ~/data | tr '\n' ' ')"
 
   # DISTILLATION → small on-device student. Knowledge-distill the xls-r-2b
-  # champion (anchpop/lexide-pronunciation-unified-vad-clean @ 2926e06, the
-  # plain mode=off phoneme head) into a 6.5x smaller xls-r-300m student.
+  # teacher (anchpop/lexide-pronunciation-unified-vad-clean @ 2926e06, the plain
+  # mode=off phoneme head — the former champion, now a retained private repo)
+  # into a 6.5x smaller xls-r-300m student.
   #
   # Both backbones share the wav2vec2 conv feature extractor (50 fps), so the
   # teacher's per-frame posterior aligns frame-for-frame with the student's and

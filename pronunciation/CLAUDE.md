@@ -73,9 +73,15 @@ These are hard-won and override generic ML instincts. Violating them has burned 
   `phoneme_head` (which phone?), plus a separate `stress_head`. A `regularized_heads`
   variant learns a soft mixture over encoder layers; the simpler `mode=off` variant is
   the "vad-clean" model. VAD loss is confidence-weighted.
-- **Published model**: `anchpop/lexide-pronunciation-unified-vad-clean` (HF). When
-  anything force-aligns or measures against "the model," **pin the exact commit** —
-  alignment depends on the weights (see `espeak_audit/modal_aligner.py`).
+- **Published model (champion)**: `anchpop/lexide-pronunciation` (HF), pinned at commit
+  `00a661934cdd`. This is the **mel-sidechannel + MLP-heads, degrade-augmented** recipe
+  (`train/sky_vad_clean_sidechannel_degrade.yaml`); it beat the older `mode=off`
+  `unified-vad-clean` model on the minimal-pair eval and was promoted to production
+  2026-06-18. When anything force-aligns or measures against "the model," **pin the
+  exact commit** — alignment depends on the weights (see `espeak_audit/modal_aligner.py`).
+  - *Lineage*: the previous champion `unified-vad-clean` @`2926e06` is retained as a
+    **private** HF repo (it's the distillation teacher), as is the tiny on-device student
+    `distill-distilhubert`. All the other old pronunciation experiment repos were deleted.
 - **Languages**: 7 core (deu eng fra ita por rus spa) with FLEURS+Tatoeba+TTS+Pimsleur;
   several Pimsleur-only langs (ara ces dan fas …) ride along.
 - **Labels**: espeak-ng (the maintainer's **fork**, see gotchas) → `phonemes.jsonl`

@@ -26,8 +26,8 @@ model), but it is NOT dead code — it remains load-bearing in three ways:
 
 ## Status / decommissioning
 
-The Modal serves (a gemma-3 and a gemma-4 app are both still deployed) are
-**scale-to-zero**, so keeping them deployed costs ~nothing while idle. Retire the serve
+The gemma-4-31b Modal serve is **scale-to-zero**, so keeping it deployed costs ~nothing
+while idle. (The older gemma-3-27b serve was retired and its HF repo deleted.) Retire this serve
 only when both are true: (a) downstream consumers (yap — note the lexide crate's
 `RemoteConfig` default URL is still this endpoint) have switched to parsley, and
 (b) Japanese is either fixed in parsley or explicitly gated. The training code + gold

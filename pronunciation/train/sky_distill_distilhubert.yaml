@@ -1,4 +1,5 @@
-# Distill the xls-r-2b champion into a TINY ~24M DistilHuBERT student — the
+# Distill the xls-r-2b teacher (unified-vad-clean @2926e06, the former champion,
+# now a retained private repo) into a TINY ~24M DistilHuBERT student — the
 # genuinely phone-real target (~25MB int8, 2 transformer layers, real-time on
 # device). Highest-risk/highest-reward: a 2-layer English-pretrained encoder has
 # to learn faithful narrow multilingual IPA. The isolated minimal-pair eval is

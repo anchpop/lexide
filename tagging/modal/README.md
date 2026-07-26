@@ -50,8 +50,8 @@ modal deploy modal/modal_serve.py
 - **LoRA adapter**: `anchpop/lexide-gemma-4-31B-it`
 - **Merged model path**: `/models/merged-gemma4` (on the `lexide-models` Modal volume)
 - **Endpoint**: `https://anchpop--lexide-gemma-4-31b-vllm-serve.modal.run` (also the lexide
-  crate's `RemoteConfig` default; the older gemma-3 app is still deployed too, both
-  scale-to-zero)
+  crate's `RemoteConfig` default; scale-to-zero). The older gemma-3-27b serve was retired
+  and its HF repo deleted — only this gemma-4-31b serve remains.
 
 ---
 
