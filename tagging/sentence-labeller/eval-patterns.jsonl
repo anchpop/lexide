@@ -42,3 +42,8 @@
 {"id": "pat-jpn-07", "lang": "jpn", "category": "quote_narration", "text": "「たいしたことないだろ」とロンが言った。", "tokens": [{"start": 0, "end": 20}]}
 {"id": "pat-kor-04", "lang": "kor", "category": "quote_narration", "text": "“조용히 해.” 해리가 말했다.", "tokens": [{"start": 0, "end": 8}, {"start": 9, "end": 17}]}
 {"id": "pat-kor-05", "lang": "kor", "category": "quote_narration", "text": "“알았어”라고 그가 답했다.", "tokens": [{"start": 0, "end": 15}]}
+{"id": "pat-eng-attr-01", "lang": "eng", "category": "quote_attr", "text": "\"Go to Professor McGonagall!\" Hermione urged Neville.", "tokens": [{"start": 0, "end": 53}]}
+{"id": "pat-eng-attr-02", "lang": "eng", "category": "quote_attr", "text": "“Don’t breathe on it,” Dr. Venn said.", "tokens": [{"start": 0, "end": 37}]}
+{"id": "pat-deu-prequote-01", "lang": "deu", "category": "pre_quote", "text": "Ben erstarrte. „Ich möchte festhalten, dass ich recht hatte.“", "tokens": [{"start": 0, "end": 14}, {"start": 15, "end": 61}]}
+{"id": "pat-rus-dash-01", "lang": "rus", "category": "dash_turn", "text": "— Любоваться будем позже. Время отключения?", "tokens": [{"start": 0, "end": 25}, {"start": 26, "end": 43}]}
+{"id": "pat-rus-dash-02", "lang": "rus", "category": "dash_turn", "text": "— Да, — ответил Денис. — Чайники, плиты.", "tokens": [{"start": 0, "end": 22}, {"start": 23, "end": 40}]}

@@ -25,6 +25,15 @@ Quotation policy — apply it the same way every time:
 const ELLIPSIS_BULLET: &str = r#"
 - Ellipsis: `…`/`...` followed by a new clause starting with a capital (or a new dialogue turn) is a sentence boundary: `—Ya voy. Espere…` then `Hay un sonido.` Followed by a lowercase continuation of the same clause it is mid-sentence: `esperó… y nada pasó.` In Japanese and Korean an ellipsis is mid-sentence unless a sentence terminator or a new turn follows it."#;
 
+const PRE_QUOTE_BULLET: &str = r#"
+- A clause BEFORE a quote binds to it only when it leads in with a comma or colon (`He said, "Hi!"` / `sagte sie: „Ja.“`). A preceding clause that ends with its own terminator is a separate sentence: `Ben erstarrte.` then `„Ich möchte festhalten, dass ich recht hatte.“`"#;
+
+const DASH_TURN_BULLET: &str = r#"
+- Dash turns in every language split at internal terminators: `— Любоваться будем позже.` then `Время отключения?` Speech resumed after an inline attribution starts a new sentence at the resuming dash: `— Да, — ответил Денис.` then `— Чайники, плиты.`"#;
+
+const HINDI_BULLET: &str = r#"
+- Hindi: like Japanese and Korean, a quote and what follows are ONE sentence only when bound (e.g. by कि or a comma); a bare attribution after the closing quote is a separate sentence: `“क्या आप कुछ ढूँढ़ रहे हैं?”` then `बूढ़े ने पूछा।`"#;
+
 const PROMPT_TAIL: &str = r#"
 
 Preserve every character exactly. Do not correct, normalize, translate, add, or remove anything. Never return an empty section. Copy content directly from the input, paying special attention to spaces around quotation marks and dashes. Concatenating every section's `content` in order MUST reproduce the input exactly. Spaces within a sentence belong to that sentence; spaces and newlines between sentences are gaps. Before responding, verify the concatenation character-for-character.
@@ -94,10 +103,23 @@ fn validate(text: &str, sections: &[Section]) -> Result<()> {
 }
 
 async fn annotate(client: &ChatClient, record: InputRecord) -> Result<OutputRecord> {
-    let ellipsis = record.text.contains('…') || record.text.contains("...");
-    let bullet = if ellipsis { ELLIPSIS_BULLET } else { "" };
+    // Conditional bullets: each is appended only when the passage can trigger it, so
+    // records outside its scope keep a byte-identical prompt (and their cache entry).
+    let mut bullets = String::new();
+    if record.text.chars().any(|c| "\"“”„«»「『“".contains(c)) {
+        bullets.push_str(PRE_QUOTE_BULLET);
+    }
+    if record.text.contains('—') || record.text.contains('–') {
+        bullets.push_str(DASH_TURN_BULLET);
+    }
+    if record.text.contains('…') || record.text.contains("...") {
+        bullets.push_str(ELLIPSIS_BULLET);
+    }
+    if record.lang == "hin" {
+        bullets.push_str(HINDI_BULLET);
+    }
     let mut response: Annotation = client
-        .chat_with_system_prompt(format!("{PROMPT_HEAD}{bullet}{PROMPT_TAIL}"), record.text.clone())
+        .chat_with_system_prompt(format!("{PROMPT_HEAD}{bullets}{PROMPT_TAIL}"), record.text.clone())
         .await
         .with_context(|| format!("label {}", record.id))?;
     response
