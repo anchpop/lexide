@@ -1,9 +1,9 @@
 [package]
 name = "lexide"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Multilingual sentence segmentation, tokenization, and POS/lemma/dependency tagging for 10 languages"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/anchpop/lexide"
 
 [lib]
