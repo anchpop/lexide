@@ -1,51 +1,23 @@
-//! Segment passages into sentences, then analyze each sentence.
+//! The whole sentence-segmentation API — no tagger, no ONNX, one ~4 MB download:
 //!
-//!     cargo run --example segment --no-default-features --features local
+//!     cargo run --example segment --no-default-features --features segment
 //!
-//! This is the "segment sentences out from a list" workflow: for each passage in a list,
-//! split it into its sentences (dropping the gaps between them) and hand each sentence to
-//! the tagger. Segmentation runs the in-process byte-minGRU segmenter (local backend).
+//! To go on and tag the sentences (POS/lemma/dependencies), load `Lexide` with the
+//! `local` feature and call `analyze(&sentence, lang)` on each — see `simple.rs`.
 
-use anyhow::Result;
-use lexide::{Language, Lexide};
-#[cfg(feature = "local")]
-use lexide::LocalConfig;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Local parsley: downloads the ONNX + segmenter artifacts from HF on first use
-    // (cached afterwards); set LEXIDE_MODEL_DIR to use a local directory instead.
-    #[cfg(feature = "local")]
-    let lexide = Lexide::from_pretrained(LocalConfig::default()).await?;
-
-    #[cfg(not(feature = "local"))]
-    {
-        eprintln!("This example needs the `local` feature (segmentation is local-only).");
-        return Ok(());
-    }
-
-    #[cfg(feature = "local")]
-    {
-        // A list of documents, each with several sentences and varied gaps/quotes.
-        let passages = [
-            ("First things first. Then, second—if there's time. \"Finally!\" she said.", Language::English),
-            ("Guten Morgen. Wie geht es dir?\n\nMir geht es gut, danke!", Language::German),
-            ("« Bonjour ! » dit-il. Puis il partit.", Language::French),
-        ];
-
-        for (passage, lang) in passages {
-            println!("\n=== passage ({lang}) ===\n{passage}");
-            // The language hint sharpens ambiguous boundaries (abbreviations, quote
-            // attributions) on lang-token checkpoints; segment_sentences() works without it.
-            let sentences = lexide.segment_sentences_in(passage, lang)?;
-            println!("-> {} sentences:", sentences.len());
-            for (i, sentence) in sentences.iter().enumerate() {
-                // Each sentence can now be tagged individually.
-                let tok = lexide.analyze(sentence, lang).await?;
-                println!("  [{i}] {sentence:?}  ({} tokens)", tok.tokens.len());
-            }
-        }
-    }
-
+fn main() -> anyhow::Result<()> {
+    let parsley = lexide::Segmenter::from_pretrained()?; // ~4 MB download, cached
+    let sentences = parsley.segment_in(
+        "Dr. Smith arrived at 3 p.m. — he wasn't late. \"Is this the place?\" she asked.",
+        lexide::Language::English,
+    );
+    assert_eq!(
+        sentences,
+        vec![
+            "Dr. Smith arrived at 3 p.m. — he wasn't late.",
+            "\"Is this the place?\" she asked.",
+        ],
+    );
+    println!("{sentences:#?}");
     Ok(())
 }

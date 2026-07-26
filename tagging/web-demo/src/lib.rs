@@ -6,7 +6,7 @@
 //! Rust/Python pipelines — JS callers must index by code point (`Array.from(text)`),
 //! not UTF-16 unit.
 
-#[path = "../../lexide/src/local/byte_bio.rs"]
+#[path = "../../lexide/src/segment/byte_bio.rs"]
 #[allow(dead_code)]
 mod byte_bio;
 

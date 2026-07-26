@@ -1,10 +1,10 @@
 //! Byte-level sentence segmenter. A thin wrapper over the shared [`ByteBioModel`]
-//! (super::byte_bio) whose O/B/I spans are *sentences*: B = a sentence begins here,
+//! whose O/B/I spans are *sentences*: B = a sentence begins here,
 //! I = inside a sentence, O = a gap (whitespace, headings, separators between sentences).
 //!
 //! Trained by `sentence-labeller/train_segmenter.py` on LLM/mechanically labelled
 //! passages; the same architecture, weight layout, and export path as the token
-//! [`CharTokenizer`](super::chartok). Given a passage it recovers each sentence's char
+//! boundary tagger (`local::chartok`). Given a passage it recovers each sentence's char
 //! span, so a raw text (or a list of texts) can be split into its sentences with the
 //! gaps between them dropped — the whitespace/markers a sentence *frames* (its own quotes,
 //! leading dashes) stay attached because they were labelled as part of the sentence.
@@ -72,8 +72,8 @@ impl SentenceSegmenter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::byte_bio::argmax3;
-    use crate::local::test_support::model_file;
+    use crate::segment::byte_bio::argmax3;
+    use crate::segment::test_support::model_file;
 
     /// Bit-for-bit parity with the Python segmenter on multilingual multi-sentence
     /// fixtures. Skips when the segmenter artifacts aren't present locally.

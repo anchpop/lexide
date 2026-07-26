@@ -7,6 +7,8 @@ pub mod pos;
 
 #[cfg(feature = "local")]
 mod local;
+#[cfg(feature = "segment")]
+mod segment;
 #[cfg(any(feature = "local", feature = "remote"))]
 mod raw;
 #[cfg(feature = "remote")]
@@ -20,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[cfg(feature = "local")]
-pub use local::{build_table, LemmaTable, LocalConfig, LocalLexide, Sentence};
+pub use local::{build_table, LemmaTable, LocalConfig, LocalLexide};
+#[cfg(feature = "segment")]
+pub use segment::{Segmenter, Sentence};
 #[cfg(feature = "remote")]
 pub use remote::{RemoteClient, RemoteConfig, ResponseFormat};
 
@@ -99,29 +103,6 @@ impl Tokenization {
     }
 }
 
-/// Configuration for the Lexide model
-#[derive(Debug, Clone)]
-pub enum LexideConfig {
-    #[cfg(feature = "local")]
-    Local(LocalConfig),
-    #[cfg(feature = "remote")]
-    Remote(RemoteConfig),
-}
-
-#[cfg(feature = "local")]
-impl Default for LexideConfig {
-    fn default() -> Self {
-        Self::Local(LocalConfig::default())
-    }
-}
-
-#[cfg(all(feature = "remote", not(feature = "local")))]
-impl Default for LexideConfig {
-    fn default() -> Self {
-        Self::Remote(RemoteConfig::default())
-    }
-}
-
 /// Main struct for running NLP inference
 pub enum Lexide {
     #[cfg(feature = "local")]
@@ -173,75 +154,6 @@ impl Lexide {
             Self::Remote(remote) => remote.analyze(sentence, language).await,
             #[cfg(not(any(feature = "local", feature = "remote")))]
             _ => unreachable!("Type should be uninhabited!"),
-        }
-    }
-
-    /// Split a passage into its sentences, in order, dropping the gaps (whitespace,
-    /// headings, separators) between them. Punctuation and markers that frame a sentence
-    /// (its quotes, a leading dialogue dash) stay attached to it.
-    ///
-    /// Handy for turning a document — or each entry of a list of documents — into the
-    /// individual sentences to feed to [`analyze`](Self::analyze):
-    /// ```no_run
-    /// # async fn f(lexide: &lexide::Lexide) -> anyhow::Result<()> {
-    /// for passage in ["First. Second.", "Uno. Dos."] {
-    ///     for sentence in lexide.segment_sentences(passage)? {
-    ///         let _tok = lexide.analyze(&sentence, lexide::Language::English).await?;
-    ///     }
-    /// }
-    /// # Ok(()) }
-    /// ```
-    ///
-    /// Only the local backend segments in-process (a cheap byte-minGRU pass, hence sync).
-    /// On the remote backend this returns an error — use the async
-    /// [`RemoteClient::segment_sentences`](crate::RemoteClient::segment_sentences) against a
-    /// parsley `/segment` endpoint instead.
-    #[allow(unreachable_code, unused_variables)]
-    pub fn segment_sentences(&self, text: &str) -> Result<Vec<String>> {
-        self.segment_sentences_impl(text, None)
-    }
-
-    /// Like [`segment_sentences`](Self::segment_sentences) with a language hint. On
-    /// lang-token segmenter checkpoints the hint improves ambiguous boundaries
-    /// (abbreviations like "Mr.", quote attributions); on older checkpoints it's a no-op.
-    pub fn segment_sentences_in(&self, text: &str, language: Language) -> Result<Vec<String>> {
-        self.segment_sentences_impl(text, Some(language))
-    }
-
-    #[allow(unreachable_code, unused_variables)]
-    fn segment_sentences_impl(
-        &self,
-        text: &str,
-        language: Option<Language>,
-    ) -> Result<Vec<String>> {
-        match self {
-            #[cfg(feature = "local")]
-            Self::Local(local) => local.segment_sentences(text, language),
-            #[cfg(feature = "remote")]
-            Self::Remote(_) => anyhow::bail!(
-                "segment_sentences needs the local backend; for a remote parsley serve use \
-                 the async RemoteClient::segment_sentences against its /segment endpoint"
-            ),
-            #[cfg(not(any(feature = "local", feature = "remote")))]
-            _ => unreachable!("Type should be uninhabited!"),
-        }
-    }
-
-    /// Like [`segment_sentences`](Self::segment_sentences) but returns each sentence with
-    /// its `[start, end)` char span in the original passage (local backend only).
-    /// `language` is the optional boundary-disambiguation hint.
-    #[cfg(feature = "local")]
-    pub fn segment_sentences_detailed(
-        &self,
-        text: &str,
-        language: Option<Language>,
-    ) -> Result<Vec<Sentence>> {
-        match self {
-            Self::Local(local) => local.segment_sentences_detailed(text, language),
-            #[cfg(feature = "remote")]
-            Self::Remote(_) => anyhow::bail!(
-                "segment_sentences_detailed is only available on the local backend"
-            ),
         }
     }
 }

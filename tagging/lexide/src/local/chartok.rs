@@ -8,7 +8,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::byte_bio::ByteBioModel;
+use crate::segment::byte_bio::ByteBioModel;
 
 pub struct CharTokenizer {
     model: ByteBioModel,
@@ -37,8 +37,8 @@ impl CharTokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::byte_bio::{argmax3, spans_from_byte_labels};
-    use crate::local::test_support::model_file;
+    use crate::segment::byte_bio::{argmax3, spans_from_byte_labels};
+    use crate::segment::test_support::model_file;
 
     #[test]
     fn segment_uses_shared_span_recovery() {

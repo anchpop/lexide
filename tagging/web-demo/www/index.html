@@ -90,6 +90,12 @@
   }
   .gap-row { font-size: 11px; color: var(--muted); }
   .gap-row .g { opacity: 0.75; }
+  #rust {
+    margin-top: 1.4rem; padding-top: 0.9rem; border-top: 1px solid var(--border);
+    font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 1.55;
+    color: var(--muted); overflow-x: auto; white-space: pre;
+  }
+  #rust:empty { display: none; }
   .empty { font-size: 13px; color: var(--muted); padding: 1.5rem 0; }
   footer {
     display: flex; justify-content: space-between;
@@ -123,6 +129,7 @@
   <div class="stats" id="stats">loading weights · 8mb</div>
   <textarea id="input" spellcheck="false" placeholder="paste a passage"></textarea>
   <div id="out"></div>
+  <pre id="rust"></pre>
   <footer>
     <span>byte-minGRU ×2 · 1m params each</span>
     <span id="timing"></span>
@@ -171,6 +178,7 @@ function render() {
   if (!parsley) return;
   if (!text.trim()) {
     out.innerHTML = `<div class="empty">no text — paste a passage to segment</div>`;
+    $("rust").textContent = "";
     $("timing").textContent = "";
     return;
   }
@@ -230,6 +238,37 @@ function render() {
     `segment ${(t1 - t0).toFixed(1)}ms · tokenize ${tokTime.toFixed(1)}ms`;
   $("stats").textContent =
     `${sentSpans.length} sentences · ${nTok} tokens · ${cps.length} chars`;
+  $("rust").textContent = rustSnippet(text, lang, sentSpans, cps);
+}
+
+// The same segmentation, as the runnable Rust it takes (weights are shared, so this
+// assert really passes). JSON string escaping is valid Rust except \uXXXX -> \u{XXXX}.
+const LANG_NAME = {deu:"German", eng:"English", fra:"French", hin:"Hindi", ita:"Italian",
+                   jpn:"Japanese", kor:"Korean", por:"Portuguese", rus:"Russian", spa:"Spanish"};
+function rustStr(s) {
+  return JSON.stringify(s).replace(/\\u([0-9a-fA-F]{4})/g, "\\u{$1}");
+}
+function rustSnippet(text, lang, sentSpans, cps) {
+  const call = lang
+    ? `parsley.segment_in(${rustStr(text)}, Language::${LANG_NAME[lang]})`
+    : `parsley.segment(${rustStr(text)})`;
+  const imports = lang ? "{Language, Segmenter}" : "Segmenter";
+  const sentences = sentSpans
+    .map(([s, e]) => "            " + rustStr(cps.slice(s, e).join("")) + ",")
+    .join("\n");
+  return `// Cargo.toml: lexide = { git = "https://github.com/anchpop/lexide", features = ["segment"] }
+use lexide::${imports};
+
+fn main() -> anyhow::Result<()> {
+    let parsley = Segmenter::from_pretrained()?; // ~4 mb download, cached
+    assert_eq!(
+        ${call},
+        [
+${sentences}
+        ],
+    );
+    Ok(())
+}`;
 }
 
 let timer = null;

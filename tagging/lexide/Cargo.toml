@@ -17,6 +17,22 @@ name = "label-tokenization"
 path = "src/bin/label_tokenization.rs"
 required-features = ["remote"]
 
+[[example]]
+name = "segment"
+required-features = ["segment"]
+
+[[example]]
+name = "simple"
+required-features = ["local"]
+
+[[example]]
+name = "concurrent"
+required-features = ["local"]
+
+[[example]]
+name = "matching"
+required-features = ["local"]
+
 [dependencies]
 # Core dependencies
 tokio = { version = "1.42", features = ["full"] }
@@ -42,5 +58,7 @@ reqwest = { version = "0.12", features = ["json"], optional = true }
 
 [features]
 # Backend selection - choose one (or both)
-local = ["dep:ort", "dep:tokenizers", "dep:safetensors", "dep:fst", "dep:hf-hub"]
+local = ["segment", "dep:ort", "dep:tokenizers", "dep:fst"]
+# Just the 1M-param sentence segmenter (Segmenter::from_pretrained, ~4 MB download)
+segment = ["dep:safetensors", "dep:hf-hub"]
 remote = ["dep:reqwest"]

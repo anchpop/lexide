@@ -14,14 +14,11 @@
 //!   sentence_segmenter.safetensors  byte-minGRU sentence segmenter weights (optional)
 //!   lemma_fst/wikt_{lang}.fst    optional per-language lemma tables (build-lemma-fst)
 
-mod byte_bio;
 mod chartok;
 mod lemma;
 mod script;
-mod sentence;
 mod tagger;
 
-pub use sentence::Sentence;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -91,10 +88,10 @@ fn fetch_from_hub(repo_id: &str) -> Result<PathBuf> {
             tagger_path = Some(p);
         }
     }
-    // Optional: the sentence segmenter. Older repo snapshots may not have it; a miss just
-    // means `segment_sentences` is unavailable, not a failed load.
+    // Not used by this pipeline, but pre-fetching warms the cache Segmenter::from_pretrained
+    // reads from; a miss on older repo snapshots is fine.
     if let Err(e) = repo.get("onnx/sentence_segmenter.safetensors") {
-        eprintln!("lexide: no sentence segmenter on {repo_id} (segment_sentences disabled): {e}");
+        eprintln!("lexide: no sentence segmenter on {repo_id}: {e}");
     }
     for lang in TABLE_LANGS {
         // Optional: a table missing on the hub just means model-only lemmas for that language.
@@ -115,8 +112,6 @@ fn fetch_from_hub(repo_id: &str) -> Result<PathBuf> {
 pub struct LocalLexide {
     chartok: chartok::CharTokenizer,
     tagger: tagger::OnnxTagger,
-    // Optional: absent when the artifact isn't published/downloaded (older snapshots).
-    segmenter: Option<sentence::SentenceSegmenter>,
     lemma_dir: PathBuf,
     // Tables load lazily per language (a table is a few MB; most callers use one language).
     tables: RwLock<HashMap<&'static str, Option<Arc<LemmaTable>>>>,
@@ -153,24 +148,12 @@ impl LocalLexide {
             .context("failed to load the char tokenizer")?;
         let tagger = tagger::OnnxTagger::load(dir, config.threads)
             .context("failed to load the ONNX tagger")?;
-        // Optional: present only if the artifact was published/downloaded. A present-but-
-        // unreadable file is worth surfacing; an absent one just disables segmentation.
-        let seg_path = dir.join("sentence_segmenter.safetensors");
-        let segmenter = if seg_path.exists() {
-            Some(
-                sentence::SentenceSegmenter::load(&seg_path)
-                    .context("failed to load the sentence segmenter")?,
-            )
-        } else {
-            None
-        };
         let lemma_dir = config
             .lemma_tables_dir
             .unwrap_or_else(|| dir.join("lemma_fst"));
         Ok(Self {
             chartok,
             tagger,
-            segmenter,
             lemma_dir,
             tables: RwLock::new(HashMap::new()),
         })
@@ -226,51 +209,5 @@ impl LocalLexide {
         Ok(tokens_from_raw(&rtoks, sentence))
     }
 
-    fn require_segmenter(&self) -> Result<&sentence::SentenceSegmenter> {
-        self.segmenter.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "sentence segmenter not loaded (sentence_segmenter.safetensors missing from \
-                 the model dir / HF repo)"
-            )
-        })
-    }
-
-    /// Split a passage into its sentences (gaps between sentences dropped), each with its
-    /// char span. Errors if the segmenter artifact wasn't available at load time.
-    /// `language` improves ambiguous boundaries on lang-token checkpoints; pass None when
-    /// the language isn't known.
-    pub fn segment_sentences_detailed(
-        &self,
-        text: &str,
-        language: Option<Language>,
-    ) -> Result<Vec<Sentence>> {
-        Ok(self
-            .require_segmenter()?
-            .segment(text, language.map(|l| l.code())))
-    }
-
-    /// Split a passage into its sentence strings, in order.
-    pub fn segment_sentences(&self, text: &str, language: Option<Language>) -> Result<Vec<String>> {
-        Ok(self
-            .require_segmenter()?
-            .sentences(text, language.map(|l| l.code())))
-    }
 }
 
-/// Test helper: locate a model artifact, honoring LEXIDE_MODEL_DIR and falling back to
-/// the repo-relative `../data/onnx` (where `modal volume get lexide-onnx` drops them).
-#[cfg(test)]
-pub(crate) mod test_support {
-    use std::path::PathBuf;
-
-    pub fn model_dir() -> PathBuf {
-        std::env::var("LEXIDE_MODEL_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data/onnx"))
-    }
-
-    pub fn model_file(name: &str) -> Option<PathBuf> {
-        let p = model_dir().join(name);
-        p.exists().then_some(p)
-    }
-}
