@@ -1,0 +1,37 @@
+{"id": "pat-eng-01", "lang": "eng", "category": "dash_abbr", "text": "Dr. Smith arrived at 3 p.m. - and he wasn't late. ", "tokens": [{"start": 0, "end": 49}]}
+{"id": "pat-eng-02", "lang": "eng", "category": "dash_abbr", "text": "Sgt. Alvarez left at 4 a.m. – nobody noticed a thing.", "tokens": [{"start": 0, "end": 53}]}
+{"id": "pat-eng-03", "lang": "eng", "category": "dash_paren", "text": "The trial — held, unbelievably, at midnight! — ended fast.", "tokens": [{"start": 0, "end": 58}]}
+{"id": "pat-eng-04", "lang": "eng", "category": "dash_paren", "text": "She hesitated — then, finally! — signed the form.", "tokens": [{"start": 0, "end": 49}]}
+{"id": "pat-eng-05", "lang": "eng", "category": "abbr_final", "text": "He drove down Elm St. The house was dark.", "tokens": [{"start": 0, "end": 21}, {"start": 22, "end": 41}]}
+{"id": "pat-eng-06", "lang": "eng", "category": "tricky", "text": "Build 7.1.3 landed at 6 p.m. sharp.", "tokens": [{"start": 0, "end": 35}]}
+{"id": "pat-eng-07", "lang": "eng", "category": "tricky", "text": "Contact sales@acme.co.uk for pricing.", "tokens": [{"start": 0, "end": 37}]}
+{"id": "pat-eng-08", "lang": "eng", "category": "multi_quote", "text": "“The road is long. We rest at dawn.”", "tokens": [{"start": 0, "end": 18}, {"start": 19, "end": 36}]}
+{"id": "pat-eng-09", "lang": "eng", "category": "hardwrap", "text": "The delivery arrived\nbefore anyone was awake.", "tokens": [{"start": 0, "end": 45}]}
+{"id": "pat-eng-10", "lang": "eng", "category": "dash_abbr", "text": "Mrs. Okafor rang at 11 a.m. - twice, in fact. No one answered.", "tokens": [{"start": 0, "end": 45}, {"start": 46, "end": 62}]}
+{"id": "pat-deu-01", "lang": "deu", "category": "dash_abbr", "text": "Fr. Weber kam um 8 Uhr an - und niemand wartete.", "tokens": [{"start": 0, "end": 48}]}
+{"id": "pat-deu-02", "lang": "deu", "category": "dash_paren", "text": "Der Vortrag — wer hätte das gedacht! — endete um 23 Uhr.", "tokens": [{"start": 0, "end": 56}]}
+{"id": "pat-deu-03", "lang": "deu", "category": "abbr_final", "text": "Die Lieferung kommt am Do. Danach wird abgerechnet.", "tokens": [{"start": 0, "end": 26}, {"start": 27, "end": 51}]}
+{"id": "pat-deu-04", "lang": "deu", "category": "tricky", "text": "Update 3.0.2 brachte keine Besserung.", "tokens": [{"start": 0, "end": 37}]}
+{"id": "pat-fra-01", "lang": "fra", "category": "dash_abbr", "text": "M. Bertrand est arrivé à 19 h - et personne ne l'attendait.", "tokens": [{"start": 0, "end": 59}]}
+{"id": "pat-fra-02", "lang": "fra", "category": "dash_paren", "text": "Le colis — qui l'aurait cru ? — est arrivé avant 7 h.", "tokens": [{"start": 0, "end": 53}]}
+{"id": "pat-fra-03", "lang": "fra", "category": "tricky", "text": "La mise à jour 5.0.2 n'a rien réglé du tout.", "tokens": [{"start": 0, "end": 44}]}
+{"id": "pat-fra-04", "lang": "fra", "category": "multi_quote", "text": "« Le chemin est long. Nous partirons à l'aube. »", "tokens": [{"start": 0, "end": 21}, {"start": 22, "end": 48}]}
+{"id": "pat-ita-01", "lang": "ita", "category": "dash_abbr", "text": "Il dott. Ferrari arrivò alle 19 - e nessuno lo aspettava.", "tokens": [{"start": 0, "end": 57}]}
+{"id": "pat-ita-02", "lang": "ita", "category": "dash_paren", "text": "Il processo — incredibile a dirsi! — finì a mezzanotte.", "tokens": [{"start": 0, "end": 55}]}
+{"id": "pat-spa-01", "lang": "spa", "category": "dash_abbr", "text": "El Dr. Vargas llegó a las 7 p. m. - y nadie lo esperaba.", "tokens": [{"start": 0, "end": 56}]}
+{"id": "pat-spa-02", "lang": "spa", "category": "dash_paren", "text": "El juicio —¿quién lo creería?— terminó a medianoche.", "tokens": [{"start": 0, "end": 52}]}
+{"id": "pat-por-01", "lang": "por", "category": "dash_abbr", "text": "O Dr. Moreira chegou às 19 h - e ninguém o esperava.", "tokens": [{"start": 0, "end": 52}]}
+{"id": "pat-por-02", "lang": "por", "category": "dash_paren", "text": "O julgamento — quem diria? — terminou à meia-noite.", "tokens": [{"start": 0, "end": 51}]}
+{"id": "pat-rus-01", "lang": "rus", "category": "dash_abbr", "text": "Д-р Волков пришёл в 19 ч. - и никто его не ждал.", "tokens": [{"start": 0, "end": 48}]}
+{"id": "pat-rus-02", "lang": "rus", "category": "dash_paren", "text": "Суд — кто бы поверил! — закончился в полночь.", "tokens": [{"start": 0, "end": 45}]}
+{"id": "pat-rus-03", "lang": "rus", "category": "abbr_final", "text": "Он набрал уже 10 тыс. Остальное пришло позже.", "tokens": [{"start": 0, "end": 21}, {"start": 22, "end": 45}]}
+{"id": "pat-hin-01", "lang": "hin", "category": "dash_abbr", "text": "डॉ. वर्मा शाम 7 बजे पहुँचे - और कोई नहीं आया था।", "tokens": [{"start": 0, "end": 48}]}
+{"id": "pat-hin-02", "lang": "hin", "category": "dash_paren", "text": "सुनवाई - कौन मानेगा? - आधी रात को खत्म हुई।", "tokens": [{"start": 0, "end": 43}]}
+{"id": "pat-jpn-01", "lang": "jpn", "category": "quote_copula", "text": "彼の答えは「行かない」だった。", "tokens": [{"start": 0, "end": 15}]}
+{"id": "pat-jpn-02", "lang": "jpn", "category": "quote_copula", "text": "彼女の口癖は「まあいいか」だ。", "tokens": [{"start": 0, "end": 15}]}
+{"id": "pat-jpn-03", "lang": "jpn", "category": "quote_copula", "text": "黒板の文字は「明日休講」だったのだ。", "tokens": [{"start": 0, "end": 18}]}
+{"id": "pat-jpn-04", "lang": "jpn", "category": "dash_paren", "text": "裁判は――誰も信じないだろうが――真夜中に終わった。", "tokens": [{"start": 0, "end": 26}]}
+{"id": "pat-jpn-05", "lang": "jpn", "category": "multi_quote", "text": "「道は長い。 夜明けに発つ。」", "tokens": [{"start": 0, "end": 6}, {"start": 7, "end": 15}]}
+{"id": "pat-kor-01", "lang": "kor", "category": "dash_abbr", "text": "박 박사는 저녁 7시에 도착했다 - 아무도 기다리지 않았다.", "tokens": [{"start": 0, "end": 33}]}
+{"id": "pat-kor-02", "lang": "kor", "category": "quote_copula", "text": "돌아온 대답은 \"안 간다\"였다.", "tokens": [{"start": 0, "end": 17}]}
+{"id": "pat-kor-03", "lang": "kor", "category": "dash_paren", "text": "재판은 — 누가 믿겠냐마는 — 자정에 끝났다.", "tokens": [{"start": 0, "end": 25}]}

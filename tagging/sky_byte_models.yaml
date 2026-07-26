@@ -38,14 +38,24 @@ run: |
     python3 sentence-labeller/train_segmenter.py \
         --data-dir sentence-labeller/processed --out-dir output/segmenter \
         --epochs "${SEG_EPOCHS}" --workers 8
-    python3 tagger/hf_upload_run.py output/segmenter segmenter
+    echo "=== pattern eval: NEW checkpoint ==="
+    python3 sentence-labeller/eval_patterns.py --ckpt output/segmenter/segmenter.pt
+    echo "=== pattern eval: OLD (shipped byte-v2) checkpoint ==="
+    python3 -c "from huggingface_hub import hf_hub_download; print(hf_hub_download(
+        'anchpop/lexide-parsley', 'training-runs/byte-v2/segmenter/segmenter.pt',
+        local_dir='old-segmenter'))"
+    python3 sentence-labeller/eval_patterns.py \
+        --ckpt old-segmenter/training-runs/byte-v2/segmenter/segmenter.pt
+    python3 tagger/hf_upload_run.py output/segmenter segmenter "${RUN_NAME}"
   fi
 
-  echo "=== char tokenizer (long) ==="
-  python3 tagger/train_tokenizer.py \
-      --data-dir data/processed --out-dir output/tokenizer \
-      --epochs "${TOK_EPOCHS}" --batch-size "${TOK_BATCH}" --workers 8
-  python3 tagger/hf_upload_run.py output/tokenizer tokenizer
+  if [ "${SKIP_TOK}" != "1" ]; then
+    echo "=== char tokenizer (long) ==="
+    python3 tagger/train_tokenizer.py \
+        --data-dir data/processed --out-dir output/tokenizer \
+        --epochs "${TOK_EPOCHS}" --batch-size "${TOK_BATCH}" --workers 8
+    python3 tagger/hf_upload_run.py output/tokenizer tokenizer "${RUN_NAME}"
+  fi
 
   echo "=== all done ==="
 
@@ -54,3 +64,5 @@ envs:
   TOK_EPOCHS: "2"
   TOK_BATCH: "256"
   SKIP_SEG: "0"
+  SKIP_TOK: "0"
+  RUN_NAME: "byte-v2"
