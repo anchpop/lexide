@@ -1,0 +1,15 @@
+{
+  "name": "parsley-web-demo",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "parsley_web_demo_bg.wasm",
+    "parsley_web_demo.js",
+    "parsley_web_demo.d.ts"
+  ],
+  "main": "parsley_web_demo.js",
+  "types": "parsley_web_demo.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
