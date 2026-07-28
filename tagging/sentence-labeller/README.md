@@ -38,7 +38,7 @@ The Rust binaries (`cargo run --release --bin <name>`):
 # 1. flatten sections -> per-byte sentence spans, split train/val/test
 python3 sentence-labeller/sentence_data_prep.py         # -> sentence-labeller/processed/
 
-# 2. train the byte-minGRU (0.31M params; trains on the box's GPU in minutes)
+# 2. train the byte-minGRU (0.99M params; trains on the box's GPU in minutes)
 LD_LIBRARY_PATH=<gcc-lib>:/run/opengl-driver/lib \
   .venv-seg/bin/python sentence-labeller/train_segmenter.py \
     --data-dir sentence-labeller/processed --out-dir sentence-labeller/output

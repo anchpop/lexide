@@ -8,7 +8,7 @@ import json
 import math
 import os
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from functools import partial
 
 import torch
@@ -37,33 +37,65 @@ def spans_from_labels(labels):
     return set(spans)
 
 
+def stratified(records, per_lang):
+    """Up to `per_lang` records of each language, in file order.
+
+    The val file is written language-by-language, so `records[:n]` is not a sample of the
+    corpus — it is whichever languages happen to come first alphabetically. Scoring that
+    prefix reported 99.8 token F1 for years while Japanese sat at 86.6, unmeasured.
+    """
+    seen = Counter()
+    out = []
+    for r in records:
+        lang = r.get("lang", "und")
+        if seen[lang] >= per_lang:
+            continue
+        seen[lang] += 1
+        out.append(r)
+    return out
+
+
+def fmt_metrics(m):
+    langs = " ".join(f"{lang} {d['token_f1']}" for lang, d in m["per_lang"].items())
+    return (f"F1={m['token_f1']} prec={m['prec']} rec={m['rec']} "
+            f"byte_acc={m['byte_acc']} | {langs}")
+
+
 @torch.no_grad()
-def evaluate(model, records, device, max_items=2000, max_bytes=512, use_lang=True):
+def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True):
+    """Micro-averaged token-span F1 overall and per language."""
     model.eval()
-    tp = fp = fn = 0
-    byte_correct = byte_total = 0
-    for r in records[:max_items]:
+    agg = dict(tp=0, fp=0, fn=0, bc=0, bt=0)
+    per = {}
+    for r in stratified(records, per_lang):
         lang = r.get("lang") if use_lang else None
         byte_ids, labels = encode_bytes_and_labels(r["text"], r["tokens"], max_bytes, lang)
         x = torch.tensor([byte_ids], device=device)
-        logits = model(x)[0]
-        pred = logits.argmax(-1).tolist()
-        gold_spans = spans_from_labels(labels)
-        pred_spans = spans_from_labels(pred)
-        tp += len(gold_spans & pred_spans)
-        fp += len(pred_spans - gold_spans)
-        fn += len(gold_spans - pred_spans)
-        for a, b in zip(pred, labels):
-            if b == -100:
-                continue
-            byte_total += 1
-            byte_correct += int(a == b)
-    prec = tp / max(1, tp + fp)
-    rec = tp / max(1, tp + fn)
-    f1 = 2 * prec * rec / max(1e-9, prec + rec)
+        pred = model(x)[0].argmax(-1).tolist()
+        gold_spans, pred_spans = spans_from_labels(labels), spans_from_labels(pred)
+        counts = dict(
+            tp=len(gold_spans & pred_spans),
+            fp=len(pred_spans - gold_spans),
+            fn=len(gold_spans - pred_spans),
+            bc=sum(int(a == b) for a, b in zip(pred, labels) if b != -100),
+            bt=sum(1 for b in labels if b != -100),
+        )
+        d = per.setdefault(r.get("lang", "und"), dict(tp=0, fp=0, fn=0, bc=0, bt=0))
+        for k, v in counts.items():
+            d[k] += v
+            agg[k] += v
+
+    def score(d):
+        prec = d["tp"] / max(1, d["tp"] + d["fp"])
+        rec = d["tp"] / max(1, d["tp"] + d["fn"])
+        return {"token_f1": round(200 * prec * rec / max(1e-9, prec + rec), 2),
+                "prec": round(prec * 100, 2), "rec": round(rec * 100, 2),
+                "byte_acc": round(d["bc"] / max(1, d["bt"]) * 100, 2)}
+
     model.train()
-    return {"token_f1": round(f1 * 100, 2), "prec": round(prec * 100, 2),
-            "rec": round(rec * 100, 2), "byte_acc": round(byte_correct / max(1, byte_total) * 100, 2)}
+    out = score(agg)
+    out["per_lang"] = {lang: score(d) for lang, d in sorted(per.items())}
+    return out
 
 
 def main():
@@ -147,10 +179,13 @@ def main():
                 run = 0.0
             if step % args.eval_every == 0 or (args.smoke and step == total_steps):
                 m = evaluate(model, val_records, device)
-                print(f"[tok] eval@{step} {m}", flush=True)
+                print(f"[tok] eval@{step} {fmt_metrics(m)}", flush=True)
                 if args.wandb:
                     import wandb
-                    wandb.log({f"tok/{k}": v for k, v in m.items()}, step=step)
+                    flat = {f"tok/{k}": v for k, v in m.items() if k != "per_lang"}
+                    flat.update({f"tok/{lang}_f1": d["token_f1"]
+                                 for lang, d in m["per_lang"].items()})
+                    wandb.log(flat, step=step)
                 if m["token_f1"] > best:
                     best = m["token_f1"]
                     torch.save(model.state_dict(), os.path.join(args.out_dir, "tokenizer.pt"))
@@ -158,11 +193,11 @@ def main():
                         json.dump({"metrics": m, "step": step, "config": vars(args)}, f, indent=2)
 
     m = evaluate(model, val_records, device)
-    print(f"[tok] final {m}", flush=True)
+    print(f"[tok] final {fmt_metrics(m)}", flush=True)
     if m["token_f1"] >= best:
         torch.save(model.state_dict(), os.path.join(args.out_dir, "tokenizer.pt"))
     nl = evaluate(model, val_records, device, use_lang=False)
-    print(f"[tok] final lang-free {nl}", flush=True)
+    print(f"[tok] final lang-free {fmt_metrics(nl)}", flush=True)
     print("done")
 
 

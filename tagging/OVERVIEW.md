@@ -35,7 +35,10 @@ train/val/test.
   linear head, a lemma **edit-script** classifier, and a Dozat-Manning **biaffine** dependency
   head (head + relation).
 - **CharBoundaryTagger** — a byte-level bidirectional **minGRU** predicting per-byte O/B/I token
-  boundaries (~0.31M params) — tokenization-free segmentation.
+  boundaries (0.99M params; emb 96 / hidden 192 / 4 BiMinGRU layers / 269-token vocab) —
+  tokenization-free segmentation. No MLPs, residuals or attention: embedding → 4 bidirectional
+  minGRU layers (each concatenating both directions, so information zigzags across depth) →
+  one LayerNorm → Linear to 3 logits. The sentence segmenter is the same class.
 
 Trained on Lambda (single A10, ~2.5h, bf16, 2 epochs). Both pushed to HF `anchpop/lexide-parsley`.
 
@@ -65,13 +68,37 @@ verified fixed. Trained on Lambda (`sky_byte_models.yaml`) in ~35 min after rewr
 scan as a **Hillis-Steele doubling scan** (`model.py` — the sequential python loop was
 kernel-launch-bound: 0.06 → 2.7 it/s). The Rust `byte_bio.rs` forward was likewise rewritten
 (axpy over transposed weights, timestep tiling) — bit-identical output, ~3x faster native, ~8x in
-wasm. A **bigger char tokenizer** was trained the same way twice but never beat v1
-(99.70 vs 99.78 token F1); v1 stays shipped — its residual weakness (rare dropped words in
-abbreviation-dense sentences) needs abbreviation coverage in the *tokenization* silver data,
-i.e. teacher-labelling augmented sentences (follow-up).
+wasm.
+
+**Segmenter v3–v6 (2026-07-26, v6 deployed).** v3/v4 kept fixing *data*: `{N}`-ized templates
+drawing street/company names from mined pools (v4 winner 40/40 on the pattern holdout). v5 and v6
+then fixed the thing that was actually capping F1 — **label-policy noise**, not model capacity.
+The jpn/kor/spa gap (81/77/81 against 92+ elsewhere) traced to the LLM labeller applying
+contradictory sentence-splitting policies to identical constructions; rewriting the ambiguous
+semantic instructions as **mechanical** ones (e.g. "check for the binder particle と/って/라고",
+not "is this an attribution?") took labelling consistency from ~80% to ~97-99%. v6 added
+script/screenplay formats to the mechanical augmenter and four **conditional** prompt bullets
+appended only when the record contains the trigger (quote chars, dash, ellipsis, `lang==hin`), so
+out-of-scope records keep byte-identical prompts and stay cached in tysm. Test F1 **92.70** (v5
+scored 92.11 on the same new gold), **48/49** pattern cases; per language deu 95.1, eng 94.4,
+fra 91.0, hin 91.5, ita 92.3, jpn 91.2, kor 91.2, por 96.8, rus 86.0, spa 98.2. Seed sweeps are
+standard now (`SEG_SEEDS` in the sky yaml): seeds fail on *different* marginal cases, and the
+6-seed sweep is what caught seed 2 regressing a dash-parenthetical guard case that seed 5 passes.
+Remaining known bias: English attribution with no comma (`"…!" Hermione urged Neville.`)
+over-splits — cross-language interference from the jpn/kor juxtaposition examples.
+
+**Char tokenizer v2 (2026-07-25, deployed).** Growing the net alone never beat v1 (99.70 vs
+99.78 token F1) — the *data* was the limit. 43k Gemma-labelled synthetic sentences (per-language
+abbreviation templates, multi-word proper nouns incl. mined entities, ~25 frames/lang) plus a 3k
+held-out eval set (`data/aug_holdout/`, committed as the yardstick) fixed it. Shipped tokenizer
+is now the same 0.99M architecture as the segmenter (emb 96 / hidden 192 / 4 layers,
+language-conditioned BOS): in-distribution token F1 **99.80** (but see the per-language table
+below — that figure was deu+eng only), augmented holdout **93.6 vs 69.6**, dropped-text
+**0.28% vs 4.18%** (v1 lost 54% of characters on abbreviation-dense Korean). "Eiffel Tower"
+merges as one token again.
 
 **Web demo** (`web-demo/`, live at <https://anchpop.github.io/lexide/>). The two byte-minGRUs
-compiled to wasm (~200KB + 5.2MB weights), running fully in-browser: paste a passage, see
+compiled to wasm (~195KB + 7.9MB weights, 3.96MB each), running fully in-browser: paste a passage, see
 sentences/gaps/token spans live, with a `lang:` hint selector. Reuses `byte_bio.rs` verbatim via
 `#[path]`; parity-tested in Node against the Python fixtures. Deployed from the `gh-pages`
 branch (`build.sh` + copy `www/` there).
@@ -86,7 +113,30 @@ overall POS 98.3 / lemma 97.9 / UAS 93.1 / **LAS 91.7**.
 | **weak** | **jpn** | **85** | **65** |
 
 Quality tracks per-language data volume: jpn/kor/hin (22–96k sentences) lag the European
-languages (300–400k each). Char tokenizer: **99.78% token-span F1**.
+languages (300–400k each).
+
+**Char tokenizer, per language (2026-07-28).** The long-quoted "99.8% token-span F1" was
+measured on `val_records[:2000]` — and the val file is written language-by-language, so that
+prefix is **1500 German + 500 English**. Japanese was never in the number. Re-scored on a
+language-stratified sample of the silver test split (400 sentences/language, shipped weights,
+language token on):
+
+| deu | eng | fra | hin | ita | **jpn** | kor | por | rus | spa |
+|-----|-----|-----|-----|-----|---------|-----|-----|-----|-----|
+| 99.9 | 99.7 | 99.4 | 97.6 | 99.8 | **86.6** | 91.8 | 99.9 | 99.9 | 99.8 |
+
+Japanese is the floor by a wide margin (Korean second), which is unsurprising in hindsight:
+they are the two languages with no whitespace to anchor a boundary, so every span has to be
+inferred from context — and jpn has 52k training sentences against 300–420k for each European
+language. `evaluate()` in `train_tokenizer.py` now stratifies by language and reports per-lang
+F1 so this cannot hide again. Dropped-text is ~0 for jpn/kor; the errors are boundary
+placement, not lost characters. Sampling the jpn disagreements (6 of 10 test sentences differ
+somewhere): kanji compounds split down the middle (`翻訳` → `翻|訳`, `求め` → `求|め`) are
+outright wrong, while others are teacher-policy calls — auxiliary attachment (`ました` vs
+`まし|た`), compound verbs (`苛立ち始め` vs `苛立ち|始め`), and the `って` binder (`トム|って` vs
+`トムって`) — so part of the 13-point gap is silver noise from the teacher whose own jpn is
+weakest (POS 85 / LAS 65). Fixing jpn tokenization is the same lever as fixing jpn tagging:
+more/better jpn silver, or a weighted sampler.
 
 **Lemma quality investigation.** A blind `claude-fable-5` judge on 100 hard tokens found the
 silver lemmas are **~99% accurate** (only ~1 real error; most disagreements are annotation
@@ -140,8 +190,10 @@ dep, head all identical. ~55 ms warm per sentence on CPU; load is ~10-15 s on th
    and mirrored on the `lexide-onnx` Modal volume.
 
 Quality follow-ups (separate from the Rust work):
-- **Fix Japanese** — the biggest POS+lemma win: rebalance the training mix (weighted sampler so
-  22k Hindi / 38k Japanese aren't drowned by 400k European) and/or get more low-resource silver.
+- **Fix Japanese** — the biggest POS+lemma win, and (newly measured) the biggest *tokenizer* win
+  too: jpn token F1 86.6 / kor 91.8 against ~99.8 elsewhere. Rebalance the training mix (weighted
+  sampler so 35k Hindi / 52k Japanese aren't drowned by 300–420k European) and/or get more
+  low-resource silver.
 - **Measure real accuracy** — everything so far is teacher-agreement; a small gold set (or a
   morphological analyzer for jpn/kor) would give true numbers.
 
@@ -166,7 +218,8 @@ Gemma endpoint**) and jpn is fixed or gated.
   artifact set incl. fst lemma tables). The Modal secret's token is read-only (fine for
   serving); a write token exists locally for uploads.
 - **Live endpoint:** `https://anchpop--lexide-parsley-parsley-tag.modal.run` (Modal app `lexide-parsley`, workspace `anchpop`).
-- **Not shipped:** Japanese (POS/LAS 85/65).
+- **Not shipped:** Japanese (POS/LAS 85/65; char tokenizer 86.6 token F1 — see the per-language
+  table above).
 - **Cold starts:** ~26s scale-to-zero on Modal; `min_containers=1` for zero cold starts (ongoing
   warm-container cost). The Rust `local` backend runs in-process (load ~10-15s, disk-bound on the
   1.1 GB fp32 graph — quantization shrinks it); a Fly deploy of it is the remaining serving work.

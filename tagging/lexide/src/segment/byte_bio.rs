@@ -1,5 +1,5 @@
 //! Shared byte-level bidirectional minGRU — a pure-Rust reimplementation of the
-//! `CharBoundaryTagger` in `tagger/model.py` (~0.31M params, so no ML runtime needed;
+//! `CharBoundaryTagger` in `tagger/model.py` (0.99M params, so no ML runtime needed;
 //! the sequential-scan recurrence is also what keeps it out of the ONNX graph).
 //!
 //! Two models share this exact architecture and weight layout, differing only in what
