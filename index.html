@@ -17,6 +17,9 @@
     --fg: oklch(0.145 0 0);
     --muted: oklch(0.556 0 0);
     --border: oklch(0 0 0 / 10%);
+    --tok-a: oklch(0.935 0.028 245);
+    --tok-b: oklch(0.94 0.038 85);
+    --tok-line: oklch(0 0 0 / 40%);
     color-scheme: light;
   }
   html.dark {
@@ -25,6 +28,13 @@
     --fg: oklch(0.985 0 0);
     --muted: oklch(0.708 0 0);
     --border: oklch(1 0 0 / 10%);
+    /* Token chips carry the structure, so they need more than the hairline the
+       rest of the page uses — a 10% outline reads as ~#2e2e2e here, invisible
+       below full screen brightness (same in reverse for light). Alternating two
+       faint tints makes each boundary readable from the fill alone. */
+    --tok-a: oklch(0.275 0.032 245);
+    --tok-b: oklch(0.275 0.038 80);
+    --tok-line: oklch(1 0 0 / 30%);
     color-scheme: dark;
   }
   * { box-sizing: border-box; margin: 0; }
@@ -83,11 +93,12 @@
   }
   .sent { white-space: pre-wrap; word-break: break-word; }
   .tok {
-    background: var(--card);
-    box-shadow: 0 0 0 1px var(--border);
+    box-shadow: 0 0 0 1px var(--tok-line);
     border-radius: 4px;
     padding: 0 1px;
   }
+  .tok.a { background: var(--tok-a); }
+  .tok.b { background: var(--tok-b); }
   .gap-row { font-size: 11px; color: var(--muted); }
   .gap-row .g { opacity: 0.75; }
   #rust {
@@ -220,10 +231,10 @@ function render() {
     p.className = "sent";
     const scps = Array.from(sentence);
     let pos = 0;
-    for (const [ts, te] of tokSpans) {
+    for (const [ti, [ts, te]] of tokSpans.entries()) {
       if (ts > pos) p.append(scps.slice(pos, ts).join(""));
       const span = document.createElement("span");
-      span.className = "tok";
+      span.className = ti % 2 ? "tok b" : "tok a";
       span.textContent = scps.slice(ts, te).join("");
       p.append(span);
       pos = te;
