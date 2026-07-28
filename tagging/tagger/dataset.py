@@ -189,14 +189,64 @@ def encode_bytes_and_labels(text, tokens, max_bytes=512, lang=None):
     return byte_ids[:max_bytes], labels[:max_bytes]
 
 
+def _jpn_absorbs(text, head, nxt):
+    """Does `nxt` continue the same word as `head`? (see merge_jpn_inflection)"""
+    if nxt["start"] != head["end"]:
+        return False  # written apart — whatever separates them keeps them separate
+    head_text, nxt_text = text[head["start"]:head["end"]], text[nxt["start"]:nxt["end"]]
+    # pull the て/で of a て-form onto its verb so the stem is not left stranded
+    if nxt.get("pos") == "SCONJ" and nxt_text in ("て", "で"):
+        return head.get("pos") in ("VERB", "ADJ")
+    if nxt.get("pos") != "AUX":
+        return False
+    # only a predicate has an inflectional tail; a noun keeps its copula (学生|です)
+    if head.get("pos") not in ("VERB", "ADJ", "AUX"):
+        return False
+    if head_text.endswith(("て", "で")):
+        return False  # 食べて|いる — both halves are words, so the split stays
+    if nxt_text == "な":
+        return False  # 綿密|な — attributive marker, treated like a particle
+    return True
+
+
+def merge_jpn_inflection(text, tokens):
+    """Japanese verb/adjective + its auxiliary chain is one word: 食べ|まし|た -> 食べました.
+
+    Japanese inflection is agglutinative, so splitting a predicate from its auxiliaries
+    strands pieces (食べ, まし, だっ, られ) that are not words and that no learner can be
+    shown. The morpheme layer, not the tokenizer, is where the internal structure lives.
+    Mirrors JapaneseCorrector::post_corrections in yap's clean-nlp-data, which applies the
+    same rule at labelling time; this applies it to silver already on disk, where the
+    Gemma teacher still emits the old finer split.
+    """
+    out = []
+    for tk in tokens:
+        if out and _jpn_absorbs(text, out[-1], tk):
+            out[-1] = {**out[-1], "end": tk["end"]}
+            continue
+        out.append(tk)
+    return out
+
+
+def maybe_merge_inflection(record, enabled):
+    """Token spans for `record`, merged if this language needs it and `enabled` is set."""
+    if enabled and record.get("lang") == "jpn":
+        return merge_jpn_inflection(record["text"], record["tokens"])
+    return record["tokens"]
+
+
 class CharBoundaryDataset(Dataset):
-    def __init__(self, records, max_bytes=512, lang_dropout=None):
+    def __init__(self, records, max_bytes=512, lang_dropout=None, merge_inflection=False):
         """lang_dropout=None trains language-blind (generic BOS always, the pre-lang
         behavior); a float p trains language-conditioned, replacing the record's lang
-        with the generic BOS with probability p so the model also works lang-free."""
+        with the generic BOS with probability p so the model also works lang-free.
+
+        merge_inflection is for the *tokenizer* only — the segmenter shares this class but
+        its spans are sentences, which have no inflection to merge."""
         self.records = records
         self.max_bytes = max_bytes
         self.lang_dropout = lang_dropout
+        self.merge_inflection = merge_inflection
 
     def __len__(self):
         return len(self.records)
@@ -206,7 +256,8 @@ class CharBoundaryDataset(Dataset):
         lang = None
         if self.lang_dropout is not None and random.random() >= self.lang_dropout:
             lang = r.get("lang")
-        byte_ids, labels = encode_bytes_and_labels(r["text"], r["tokens"], self.max_bytes, lang)
+        tokens = maybe_merge_inflection(r, self.merge_inflection)
+        byte_ids, labels = encode_bytes_and_labels(r["text"], tokens, self.max_bytes, lang)
         return {"byte_ids": byte_ids, "labels": labels}
 
 

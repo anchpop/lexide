@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from dataset import (CHAR_VOCAB_SIZE, CharBoundaryDataset, char_collate,
-                     encode_bytes_and_labels, read_jsonl)
+                     encode_bytes_and_labels, maybe_merge_inflection, read_jsonl)
 from model import CharBoundaryTagger
 
 
@@ -62,14 +62,16 @@ def fmt_metrics(m):
 
 
 @torch.no_grad()
-def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True):
+def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
+             merge_inflection=True):
     """Micro-averaged token-span F1 overall and per language."""
     model.eval()
     agg = dict(tp=0, fp=0, fn=0, bc=0, bt=0)
     per = {}
     for r in stratified(records, per_lang):
         lang = r.get("lang") if use_lang else None
-        byte_ids, labels = encode_bytes_and_labels(r["text"], r["tokens"], max_bytes, lang)
+        tokens = maybe_merge_inflection(r, merge_inflection)
+        byte_ids, labels = encode_bytes_and_labels(r["text"], tokens, max_bytes, lang)
         x = torch.tensor([byte_ids], device=device)
         pred = model(x)[0].argmax(-1).tolist()
         gold_spans, pred_spans = spans_from_labels(labels), spans_from_labels(pred)
@@ -116,6 +118,10 @@ def main():
     ap.add_argument("--log-every", type=int, default=100)
     ap.add_argument("--eval-every", type=int, default=2000)
     ap.add_argument("--train-limit", type=int, default=None)
+    ap.add_argument("--no-merge-inflection", dest="merge_inflection",
+                    action="store_false", default=True,
+                    help="keep the old finer Japanese split (食べ|まし|た) instead of "
+                         "merging a predicate with its auxiliary chain")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--wandb", action="store_true")
     args = ap.parse_args()
@@ -133,7 +139,8 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"char tokenizer params: {n_params/1e6:.2f}M")
 
-    ds = CharBoundaryDataset(train_records, args.max_bytes, lang_dropout=args.lang_dropout)
+    ds = CharBoundaryDataset(train_records, args.max_bytes, lang_dropout=args.lang_dropout,
+                             merge_inflection=args.merge_inflection)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
                         collate_fn=char_collate, pin_memory=True, drop_last=True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
