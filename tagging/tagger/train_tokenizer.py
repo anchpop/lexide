@@ -318,6 +318,13 @@ def main():
         torch.save(model.state_dict(), os.path.join(args.out_dir, "tokenizer.pt"))
     nl = evaluate(model, val_records, device, use_lang=False, use_prior=args.use_prior, wordbanks=wordbanks, sidecar=val_side)
     print(f"[tok] final lang-free {fmt_metrics(nl)}", flush=True)
+    if args.use_prior:
+        # How far the model falls with no proposal at all. This is the number that hid a
+        # 71-point Japanese collapse in v11: every with-prior metric looked healthy while
+        # the model had no independent route to the answer.
+        bp = evaluate(model, val_records, device, use_prior=True, wordbanks=wordbanks,
+                      sidecar=val_side, blank_prior=True)
+        print(f"[tok] final blank-prior {fmt_metrics(bp)}", flush=True)
     print("done")
 
 
