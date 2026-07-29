@@ -198,39 +198,53 @@ class Wordbank:
             i = j
         return spans[::-1]
 
-    def segment_constrained(self, text):
-        """Whitespace boundaries are hard; Viterbi only proposes splits *inside* a run.
+    # the name the shared helpers below dispatch on; UniDic offers the same
+    segment_run = segment
 
-        This is what lets one mechanism serve every language. Japanese has no spaces, so
-        the whole sentence is a single run and this reduces to plain Viterbi. Korean gets
-        the eojeol boundary free from whitespace and the wordbank proposes the split
-        inside it (밥을 -> 밥|을), which whitespace alone cannot see. Spaced European
-        languages mostly keep their runs whole, since the run is usually one dictionary
-        word already.
-        """
-        spans = []
-        i, n = 0, len(text)
-        while i < n:
-            if text[i].isspace():
-                i += 1
-                continue
-            j = i
-            while j < n and not text[j].isspace():
-                j += 1
-            spans.extend((i + a, i + b) for a, b in self.segment(text[i:j]))
-            i = j
-        return spans
+    def segment_constrained(self, text):
+        return segment_constrained(self, text)
 
     def char_labels(self, text):
-        """B_HARD where whitespace guarantees a boundary, B_SOFT where Viterbi proposes one."""
-        out = [PRIOR_O] * len(text)
-        hard = hard_starts(text)
-        for a, b in self.segment_constrained(text):
-            if text[a:b].strip():
-                out[a] = PRIOR_B if a in hard else PRIOR_B_SOFT
-                for k in range(a + 1, b):
-                    out[k] = PRIOR_I
-        return out
+        return proposer_char_labels(self, text)
+
+
+def segment_constrained(proposer, text):
+    """Whitespace boundaries are hard; the proposer only splits *inside* a run.
+
+    This is what lets one mechanism serve every language. Japanese has no spaces, so the
+    whole sentence is a single run and this reduces to plain Viterbi. Korean gets the eojeol
+    boundary free from whitespace and the proposer splits inside it (밥을 -> 밥|을), which
+    whitespace alone cannot see. Spaced European languages mostly keep their runs whole,
+    since the run is usually one dictionary word already.
+
+    `proposer` is anything with a `segment_run(text) -> [(start, end)]`: a Wordbank, or the
+    bundled UniDic in `unidic.py`. Passed by duck type rather than imported, so prior.py
+    stays free of a dependency on the artifact reader.
+    """
+    spans = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i].isspace():
+            i += 1
+            continue
+        j = i
+        while j < n and not text[j].isspace():
+            j += 1
+        spans.extend((i + a, i + b) for a, b in proposer.segment_run(text[i:j]))
+        i = j
+    return spans
+
+
+def proposer_char_labels(proposer, text):
+    """B where whitespace guarantees a boundary, B_SOFT where the proposer suggests one."""
+    out = [PRIOR_O] * len(text)
+    hard = hard_starts(text)
+    for a, b in segment_constrained(proposer, text):
+        if text[a:b].strip():
+            out[a] = PRIOR_B if a in hard else PRIOR_B_SOFT
+            for k in range(a + 1, b):
+                out[k] = PRIOR_I
+    return out
 
 
 class PriorSidecar:
@@ -268,7 +282,7 @@ class PriorSidecar:
         return list(self.mm[self.blob + a: self.blob + b])
 
 
-def char_prior(text, lang, tagger=None, wordbanks=None):
+def char_prior(text, lang, tagger=None, wordbanks=None, unidic=None):
     """Best available proposal for this language.
 
     Sources differ per language because the measurements do. Japanese earns a real
@@ -280,8 +294,14 @@ def char_prior(text, lang, tagger=None, wordbanks=None):
     banks = wordbanks or {}
     wb = banks.get(lang) if isinstance(banks, dict) else banks
     if wb is not None:
-        return wb.char_labels(text)
+        return proposer_char_labels(wb, text)
     if lang == "jpn":
+        # The bundled artifact is what the Rust library and the training priors read, so it
+        # comes first: fugashi with unidic-lite is a *different* dictionary and segments
+        # 6.5% of our validation sentences differently, which would show up as serve /
+        # library parity failures.
+        if unidic is not None:
+            return proposer_char_labels(unidic, text)
         try:
             return japanese_char_labels(text, tagger)
         except ImportError:
@@ -307,18 +327,20 @@ def encode_prior_bytes(text, char_labels, max_bytes=512):
     return ids[:max_bytes]
 
 
-def prior_ids_for(text, lang, max_bytes=512, tagger=None, wordbanks=None, soft=True):
+def prior_ids_for(text, lang, max_bytes=512, tagger=None, wordbanks=None, soft=True,
+                  unidic=None):
     """soft=False collapses B_SOFT back onto B — the pre-36b37e9 encoding, kept as a
     control arm. The vocab stays 5 either way, so the two only differ in the input."""
-    ids = encode_prior_bytes(text, char_prior(text, lang, tagger, wordbanks), max_bytes)
+    ids = encode_prior_bytes(text, char_prior(text, lang, tagger, wordbanks, unidic),
+                             max_bytes)
     if not soft:
         ids = [PRIOR_B if i == PRIOR_B_SOFT else i for i in ids]
     return ids
 
 
-def proposal_spans(text, lang, tagger=None, wordbanks=None):
+def proposal_spans(text, lang, tagger=None, wordbanks=None, unidic=None):
     """The prior's own segmentation as (start, end) character spans — for diagnostics."""
-    labels = char_prior(text, lang, tagger, wordbanks)
+    labels = char_prior(text, lang, tagger, wordbanks, unidic)
     spans, start = [], None
     for i, lab in enumerate(labels):
         if lab in (PRIOR_B, PRIOR_B_SOFT):
@@ -343,4 +365,4 @@ __all__ = ["PriorSidecar", "PRIOR_NONE", "PRIOR_O", "PRIOR_B", "PRIOR_I", "PRIOR
            "PRIOR_VOCAB",
            "char_prior", "encode_prior_bytes", "prior_ids_for", "proposal_spans",
            "describe", "hard_starts", "whitespace_char_labels", "japanese_char_labels",
-           "Wordbank"]
+           "Wordbank", "segment_constrained", "proposer_char_labels"]

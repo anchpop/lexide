@@ -47,7 +47,11 @@ def _download_model():
         revision=os.environ.get("LEXIDE_MODEL_REVISION") or None,
         # segmenter/* is optional on older repo snapshots; snapshot_download simply skips
         # patterns that match nothing, so the serve still builds before it's published.
-        allow_patterns=["tagger/best/*", "tokenizer/*", "segmenter/*"],
+        # onnx/jpn-unidic.bin is the tokenizer's boundary prior — the same artifact the
+        # Rust library reads, so the serve and the library segment Japanese identically
+        # (release.sh's step 10 parity test compares them token for token).
+        allow_patterns=["tagger/best/*", "tokenizer/*", "segmenter/*",
+                        "onnx/jpn-unidic.bin"],
         local_dir=MODEL_DIR,
         token=os.environ["HF_TOKEN"],
     )
@@ -111,6 +115,7 @@ class Parsley:
             tagger_dir=os.path.join(MODEL_DIR, "tagger", "best"),
             tokenizer_path=os.path.join(MODEL_DIR, "tokenizer", "tokenizer.pt"),
             segmenter_path=segmenter_path if os.path.exists(segmenter_path) else None,
+            prior_dir=os.path.join(MODEL_DIR, "onnx"),
             device="cpu",
         )
         self._tables = {}

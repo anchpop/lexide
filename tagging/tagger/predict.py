@@ -27,8 +27,17 @@ def load_char_model(path, device):
     vocab, emb_dim = state["emb.weight"].shape
     hidden = state["layers.0.fwd.to_z.weight"].shape[0]
     layers = sum(1 for k in state if k.endswith(".fwd.to_z.weight"))
+    # The boundary prior is recovered the same way: presence from the tensor, and whether
+    # it was added or concatenated from layer 0's input width against the byte embedding.
+    prior_vocab, prior_dim, prior_mode = 0, 8, "add"
+    if "prior_emb.weight" in state:
+        prior_vocab, prior_dim = state["prior_emb.weight"].shape
+        in0 = state["layers.0.fwd.to_z.weight"].shape[1]
+        prior_mode = "concat" if in0 == emb_dim + prior_dim else "add"
     model = CharBoundaryTagger(vocab_size=vocab, emb_dim=emb_dim,
-                               hidden_dim=hidden, layers=layers)
+                               hidden_dim=hidden, layers=layers,
+                               prior_vocab=prior_vocab, prior_mode=prior_mode,
+                               prior_dim=prior_dim)
     model.load_state_dict(state)
     return model.to(device).eval()
 
@@ -77,7 +86,7 @@ def spans_from_byte_labels(text, byte_labels):
 
 class Pipeline:
     def __init__(self, tagger_dir, tokenizer_path=None, device=None, lemma_table_path=None,
-                 segmenter_path=None):
+                 segmenter_path=None, prior_dir=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.lemma_table = None
         if lemma_table_path:
@@ -97,8 +106,26 @@ class Pipeline:
         self.tagger.to(self.device).eval()
 
         self.char_tok = None
+        self.unidic = None
         if tokenizer_path and os.path.exists(tokenizer_path):
             self.char_tok = load_char_model(tokenizer_path, self.device)
+            # A prior-trained tokenizer has learned to lean on the proposal, so running it
+            # prior-free would silently degrade exactly the languages the prior was added
+            # for — and in concat mode would not run at all. The artifact ships beside the
+            # weights (see release.sh); it must be the *same* one the Rust library reads.
+            if self.char_tok.prior_emb is not None:
+                from unidic import UniDic
+                # defaults to beside the weights; the serve points this at the shared
+                # onnx/ copy so the 83MB artifact is published once, not twice
+                art = os.path.join(prior_dir or os.path.dirname(tokenizer_path),
+                                   "jpn-unidic.bin")
+                if os.path.exists(art):
+                    self.unidic = UniDic.load(art)
+                else:
+                    raise RuntimeError(
+                        f"{tokenizer_path} was trained with a boundary prior but "
+                        f"{art} is missing — Japanese would fall back to whitespace and "
+                        f"diverge from the Rust library")
 
         # Optional sentence segmenter (same byte-minGRU architecture, sentence-scale O/B/I).
         self.segmenter = None
@@ -110,8 +137,15 @@ class Pipeline:
         """Raw text -> list of (start,end) char spans using the char boundary tagger."""
         if self.char_tok is None:
             raise RuntimeError("no char tokenizer loaded; pass gold spans instead")
-        x = torch.tensor([byte_encode(text, lang, self.char_tok)], device=self.device)
-        labels = self.char_tok(x)[0].argmax(-1).tolist()
+        byte_ids = byte_encode(text, lang, self.char_tok)
+        x = torch.tensor([byte_ids], device=self.device)
+        p = None
+        if self.char_tok.prior_emb is not None:
+            from prior import prior_ids_for
+            ids = prior_ids_for(text, lang, max_bytes=len(byte_ids), wordbanks={},
+                                unidic=self.unidic)
+            p = torch.tensor([ids], device=self.device)
+        labels = self.char_tok(x, p)[0].argmax(-1).tolist()
         return spans_from_byte_labels(text, labels)
 
     @torch.no_grad()
