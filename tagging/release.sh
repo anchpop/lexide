@@ -29,8 +29,11 @@ HF_REPO="anchpop/lexide-parsley"
 ENV_FILE="../.env"                         # repo root .env with the write-role HF_TOKEN
 SEG_CKPT="sentence-labeller/output/segmenter.pt"
 
-# cargo: direct if on PATH, else via the yap flake devshell (how this box provides it)
-if command -v cargo >/dev/null; then
+# cargo: direct only if the toolchain can actually build our dependency tree, else via the
+# yap flake devshell (how this box provides it). Testing `command -v cargo` alone is not
+# enough — NixOS has a system cargo on PATH, but openssl-sys is only discoverable inside the
+# devshell, so the bare branch got picked and the build died on a missing OpenSSL.
+if command -v cargo >/dev/null && pkg-config --exists openssl 2>/dev/null; then
     CARGO=(cargo)
 else
     CARGO=(direnv exec /data/coding/yap cargo)

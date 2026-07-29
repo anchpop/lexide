@@ -322,13 +322,22 @@
   "text": "Don't touch that — it's mine!",
   "tokens": [
    {
-    "text": "Don't",
+    "text": "Don'",
     "start": 0,
-    "end": 5,
+    "end": 4,
     "pos": "AUX",
     "lemma": "do",
-    "head": 2,
+    "head": 3,
     "dep": "aux"
+   },
+   {
+    "text": "t",
+    "start": 4,
+    "end": 5,
+    "pos": "PART",
+    "lemma": "t",
+    "head": 3,
+    "dep": "advmod"
    },
    {
     "text": "touch",
@@ -345,7 +354,7 @@
     "end": 16,
     "pos": "PRON",
     "lemma": "that",
-    "head": 2,
+    "head": 3,
     "dep": "obj"
    },
    {
@@ -354,7 +363,7 @@
     "end": 18,
     "pos": "PUNCT",
     "lemma": "—",
-    "head": 2,
+    "head": 3,
     "dep": "punct"
    },
    {
@@ -363,7 +372,7 @@
     "end": 23,
     "pos": "PRON",
     "lemma": "it",
-    "head": 6,
+    "head": 7,
     "dep": "nsubj"
    },
    {
@@ -372,7 +381,7 @@
     "end": 28,
     "pos": "PRON",
     "lemma": "mine",
-    "head": 2,
+    "head": 3,
     "dep": "parataxis"
    },
    {
@@ -381,7 +390,7 @@
     "end": 29,
     "pos": "PUNCT",
     "lemma": "!",
-    "head": 2,
+    "head": 3,
     "dep": "punct"
    }
   ]
@@ -1609,22 +1618,13 @@
     "dep": "case"
    },
    {
-    "text": "好き",
+    "text": "好きです",
     "start": 4,
-    "end": 6,
+    "end": 8,
     "pos": "ADP",
     "lemma": "好きだ",
     "head": 3,
     "dep": "case"
-   },
-   {
-    "text": "です",
-    "start": 6,
-    "end": 8,
-    "pos": "AUX",
-    "lemma": "だ",
-    "head": 4,
-    "dep": "aux"
    },
    {
     "text": "。",
@@ -1687,47 +1687,20 @@
     "dep": "case"
    },
    {
-    "text": "遊ん",
+    "text": "遊んで",
     "start": 8,
-    "end": 10,
+    "end": 11,
     "pos": "VERB",
     "lemma": "遊ぶ",
     "head": 0,
     "dep": "root"
    },
    {
-    "text": "で",
-    "start": 10,
-    "end": 11,
-    "pos": "VERB",
-    "lemma": "でぶ",
-    "head": 0,
-    "dep": "root"
-   },
-   {
-    "text": "い",
+    "text": "いました",
     "start": 11,
-    "end": 12,
-    "pos": "AUX",
-    "lemma": "いる",
-    "head": 6,
-    "dep": "aux"
-   },
-   {
-    "text": "まし",
-    "start": 12,
-    "end": 14,
-    "pos": "AUX",
-    "lemma": "まる",
-    "head": 6,
-    "dep": "aux"
-   },
-   {
-    "text": "た",
-    "start": 14,
     "end": 15,
     "pos": "AUX",
-    "lemma": "たる",
+    "lemma": "いる",
     "head": 6,
     "dep": "aux"
    },
