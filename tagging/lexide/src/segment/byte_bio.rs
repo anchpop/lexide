@@ -212,9 +212,11 @@ impl ByteBioModel {
         let (prior_emb, prior_dim) = match st.tensor("prior_emb.weight") {
             Ok(_) => {
                 let (shape, w) = tensor("prior_emb.weight")?;
-                if shape[0] != super::prior::PRIOR_VOCAB {
+                // Extra rows are fine: checkpoints trained before B_SOFT was dropped carry
+                // 5, and row 4 simply goes unused. Too few would be an out-of-range index.
+                if shape[0] < super::prior::PRIOR_VOCAB {
                     bail!(
-                        "prior embedding has {} rows, expected {}",
+                        "prior embedding has {} rows, need at least {}",
                         shape[0],
                         super::prior::PRIOR_VOCAB
                     );

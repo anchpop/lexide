@@ -24,17 +24,19 @@ use super::unidic::UniDic;
 
 /// Per-byte prior ids. NONE covers BOS/EOS/padding, so 0 is a safe fill.
 ///
-/// `B` and `B_SOFT` are separate because a prior's worth is its precision, not its
-/// coverage. Whitespace marks a real Korean boundary 100% of the time; a Viterbi bank
-/// finds far more boundaries and is right 92.6% of the time. Encoding both as one symbol
-/// forces a single average trust level, and measurably cost 3.3 F1 on Korean when a bank
-/// replaced whitespace. Kept apart, the model can trust one absolutely and weigh the other.
+/// There was briefly a fifth symbol, `B_SOFT`, separating a boundary whitespace guarantees
+/// from one a dictionary merely proposes. It measured flat (91.80 against 92.24), and
+/// counting showed why: with no wordbanks shipped it appeared only in Japanese, where a
+/// sentence is a single whitespace-free run — the first token `B`, every other `B_SOFT`,
+/// 1.07 `B` per sentence. It encoded "not sentence-initial", and across languages "is
+/// Japanese", which the language token already carries. A language with both whitespace and
+/// a dictionary would give it real content; that is the configuration the same measurement
+/// rejects.
 pub const PRIOR_NONE: u8 = 0;
 pub const PRIOR_O: u8 = 1;
 pub const PRIOR_B: u8 = 2;
 pub const PRIOR_I: u8 = 3;
-pub const PRIOR_B_SOFT: u8 = 4;
-pub const PRIOR_VOCAB: usize = 5;
+pub const PRIOR_VOCAB: usize = 4;
 
 /// Character classes, following MeCab's `char.def`: a run of one script is usually one
 /// word. The limit is how long an *unknown* run of that class may be grouped into a single
@@ -210,34 +212,12 @@ pub fn segment_constrained(p: &dyn Proposer, chars: &[char]) -> Vec<(usize, usiz
     spans
 }
 
-/// Indices where whitespace *guarantees* a token begins — the run starts.
-///
-/// Every proposal source shares this rule, so `PRIOR_B` means the same thing in every
-/// language: a boundary we are certain of. Anything a dictionary merely proposes is
-/// `PRIOR_B_SOFT`, whatever proposed it — including the Japanese analyzer, whose 84.4%
-/// precision is the lowest of the three sources we ship.
-fn hard_starts(chars: &[char]) -> Vec<bool> {
-    let mut hard = vec![false; chars.len()];
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i].is_whitespace() {
-            i += 1;
-            continue;
-        }
-        hard[i] = true;
-        while i < chars.len() && !chars[i].is_whitespace() {
-            i += 1;
-        }
-    }
-    hard
-}
-
+/// B on each proposed token start, I inside it, O on characters no token covers.
 fn proposer_char_labels(p: &dyn Proposer, chars: &[char]) -> Vec<u8> {
     let mut out = vec![PRIOR_O; chars.len()];
-    let hard = hard_starts(chars);
     for (a, b) in segment_constrained(p, chars) {
         if chars[a..b].iter().any(|c| !c.is_whitespace()) {
-            out[a] = if hard[a] { PRIOR_B } else { PRIOR_B_SOFT };
+            out[a] = PRIOR_B;
             for slot in out.iter_mut().take(b).skip(a + 1) {
                 *slot = PRIOR_I;
             }
@@ -279,7 +259,7 @@ pub fn prior_ids(text: &str, proposer: Option<&dyn Proposer>, max_bytes: usize) 
         let n_bytes = ch.len_utf8();
         ids.push(lab);
         if n_bytes > 1 {
-            let cont = if lab == PRIOR_B || lab == PRIOR_I || lab == PRIOR_B_SOFT {
+            let cont = if lab == PRIOR_B || lab == PRIOR_I {
                 PRIOR_I
             } else {
                 PRIOR_O
@@ -305,7 +285,7 @@ pub fn proposal_spans(text: &str, proposer: Option<&dyn Proposer>) -> Vec<(usize
             let mut start: Option<usize> = None;
             for (i, &lab) in labels.iter().enumerate() {
                 match lab {
-                    PRIOR_B | PRIOR_B_SOFT => {
+                    PRIOR_B => {
                         if let Some(s) = start {
                             spans.push((s, i));
                         }

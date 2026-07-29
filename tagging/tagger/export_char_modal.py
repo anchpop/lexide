@@ -108,7 +108,7 @@ def export():
 
     unidic = None
     if prior_vocab and unidic_path:
-        from unidic import UniDic
+        from unidic_artifact import UniDic
         unidic = UniDic.load(unidic_path)
         print(f"[load] boundary prior: bundled UniDic ({os.path.getsize(unidic_path)/1048576:.0f}MB)")
 

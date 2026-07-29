@@ -64,7 +64,7 @@ def fmt_metrics(m):
 
 @torch.no_grad()
 def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
-             merge_inflection=True, use_prior=False, wordbanks=None, prior_soft=True,
+             merge_inflection=True, use_prior=False, wordbanks=None,
              sidecar=None, blank_prior=False):
     """Micro-averaged token-span F1 overall and per language."""
     model.eval()
@@ -90,7 +90,7 @@ def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
                 ids = sidecar[r["_idx"]]
             else:
                 ids = prior_ids_for(r["text"], r.get("lang") if use_lang else None,
-                                    max_bytes, wordbanks=wordbanks, soft=prior_soft)
+                                    max_bytes, wordbanks=wordbanks)
             p = torch.tensor([ids], device=device)
         pred = model(x, p)[0].argmax(-1).tolist()
         gold_spans, pred_spans = spans_from_labels(labels), spans_from_labels(pred)
@@ -174,10 +174,6 @@ def main():
                          "to PRIOR_NONE, so the model keeps a non-prior route to the answer. "
                          "Without it the prior becomes a hard dependency: v11 scores jpn "
                          "93.3 with the dictionary and 21.2 without.")
-    ap.add_argument("--no-prior-soft", dest="prior_soft", action="store_false",
-                    help="collapse B_SOFT onto B, so a proposed boundary is encoded the "
-                         "same as one whitespace guarantees. The pre-36b37e9 behavior, "
-                         "kept as a control arm.")
     ap.add_argument("--no-group-unknown", dest="group_unknown", action="store_false",
                     default=True,
                     help="charge unknown cost per character instead of grouping a run of "
@@ -200,7 +196,7 @@ def main():
                 print(f"WARNING: no wordbank at {path}; {lang} falls back to whitespace")
         others = "analyzer (jpn)" if "jpn" not in wordbanks else ""
         print(f"prior: wordbanks={sorted(wordbanks)} {others} "
-              f"group_unknown={args.group_unknown} soft={args.prior_soft}")
+              f"group_unknown={args.group_unknown}")
 
     train_records = read_jsonl(os.path.join(args.data_dir, "train.jsonl"), args.train_limit)
     val_records = read_jsonl(os.path.join(args.data_dir, "val.jsonl"))
@@ -231,8 +227,7 @@ def main():
     # language-blind, generic BOS always, which the loop could not undo.)
     ds = CharBoundaryDataset(train_records, args.max_bytes, lang_dropout=0.0,
                              merge_inflection=args.merge_inflection,
-                             use_prior=args.use_prior, wordbanks=wordbanks,
-                             prior_soft=args.prior_soft, prior_sidecar=train_side)
+                             use_prior=args.use_prior, wordbanks=wordbanks, prior_sidecar=train_side)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
                         collate_fn=char_collate, pin_memory=True, drop_last=True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -301,7 +296,7 @@ def main():
                 # token and the real prior measures a combination it has never been shown —
                 # it reads as a catastrophic F1 while the loss falls perfectly normally.
                 m = evaluate(model, val_records, device, use_prior=args.use_prior,
-                             wordbanks=wordbanks, prior_soft=args.prior_soft,
+                             wordbanks=wordbanks,
                              sidecar=val_side, use_lang=not warm, blank_prior=warm)
                 tag = " (warmup: no lang, blank prior)" if warm else ""
                 print(f"[tok] eval@{step}{tag} {fmt_metrics(m)}", flush=True)
@@ -317,13 +312,11 @@ def main():
                     with open(os.path.join(args.out_dir, "meta.json"), "w") as f:
                         json.dump({"metrics": m, "step": step, "config": vars(args)}, f, indent=2)
 
-    m = evaluate(model, val_records, device, use_prior=args.use_prior, wordbanks=wordbanks,
-                     prior_soft=args.prior_soft, sidecar=val_side)
+    m = evaluate(model, val_records, device, use_prior=args.use_prior, wordbanks=wordbanks, sidecar=val_side)
     print(f"[tok] final {fmt_metrics(m)}", flush=True)
     if m["token_f1"] >= best:
         torch.save(model.state_dict(), os.path.join(args.out_dir, "tokenizer.pt"))
-    nl = evaluate(model, val_records, device, use_lang=False, use_prior=args.use_prior, wordbanks=wordbanks,
-                     prior_soft=args.prior_soft, sidecar=val_side)
+    nl = evaluate(model, val_records, device, use_lang=False, use_prior=args.use_prior, wordbanks=wordbanks, sidecar=val_side)
     print(f"[tok] final lang-free {fmt_metrics(nl)}", flush=True)
     print("done")
 

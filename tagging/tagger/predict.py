@@ -114,7 +114,7 @@ class Pipeline:
             # for — and in concat mode would not run at all. The artifact ships beside the
             # weights (see release.sh); it must be the *same* one the Rust library reads.
             if self.char_tok.prior_emb is not None:
-                from unidic import UniDic
+                from unidic_artifact import UniDic
                 # defaults to beside the weights; the serve points this at the shared
                 # onnx/ copy so the 83MB artifact is published once, not twice
                 art = os.path.join(prior_dir or os.path.dirname(tokenizer_path),

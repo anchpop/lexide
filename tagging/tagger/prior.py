@@ -41,14 +41,16 @@ def _char_type(ch):
 
 # Per-byte prior ids. NONE covers BOS/EOS/padding, so 0 is a safe fill.
 #
-# B_HARD and B_SOFT exist because a prior's usefulness is precision, not coverage.
-# Whitespace in Korean marks a real gold boundary 100% of the time; a Viterbi bank finds
-# far more boundaries but is right 92.6% of the time. Encoding both as one symbol forces
-# the model to learn a single average trust level — and measurably cost 3.3 F1 on Korean
-# when a bank replaced whitespace. Separating them lets it trust the certain boundary
-# absolutely and treat the proposed one as a suggestion.
-PRIOR_NONE, PRIOR_O, PRIOR_B, PRIOR_I, PRIOR_B_SOFT = 0, 1, 2, 3, 4
-PRIOR_VOCAB = 5
+# There was briefly a fifth symbol, B_SOFT, meant to distinguish a boundary whitespace
+# guarantees from one a dictionary merely proposes. It measured flat (91.80 vs 92.24), and
+# counting showed why: with no wordbanks shipped it only ever appeared in Japanese, where a
+# sentence is one whitespace-free run — so the first token was B and every other B_SOFT,
+# 1.07 B per sentence. It encoded "not sentence-initial", and across languages "is
+# Japanese", which the language token already carries. A language with both whitespace and
+# a dictionary would give it real content; that is the configuration the same measurement
+# rejects.
+PRIOR_NONE, PRIOR_O, PRIOR_B, PRIOR_I = 0, 1, 2, 3
+PRIOR_VOCAB = 4
 
 _TAGGER = None
 
@@ -60,25 +62,6 @@ def _tagger():
         import fugashi
         _TAGGER = fugashi.Tagger()
     return _TAGGER
-
-
-def hard_starts(text):
-    """Indices where whitespace *guarantees* a token begins — the run starts.
-
-    Every proposal source shares this rule, so that PRIOR_B always means the same thing
-    across languages: a boundary we are certain of. Anything a dictionary merely proposes
-    is PRIOR_B_SOFT, whatever proposed it.
-    """
-    out = set()
-    i, n = 0, len(text)
-    while i < n:
-        if text[i].isspace():
-            i += 1
-            continue
-        out.add(i)
-        while i < n and not text[i].isspace():
-            i += 1
-    return out
 
 
 def whitespace_char_labels(text):
@@ -103,7 +86,6 @@ def japanese_char_labels(text, tagger=None):
     """
     tagger = tagger or _tagger()
     out = [PRIOR_O] * len(text)
-    hard = hard_starts(text)
     pos = 0
     for word in tagger(text):
         surface = word.surface
@@ -112,9 +94,7 @@ def japanese_char_labels(text, tagger=None):
         i = text.find(surface, pos)
         if i < 0:
             continue  # analyzer normalized something; leave those characters unproposed
-        # The analyzer is a proposal like any other — measured at 84.4% precision against
-        # our gold, the *lowest* of the three sources. Only whitespace makes it certain.
-        out[i] = PRIOR_B if i in hard else PRIOR_B_SOFT
+        out[i] = PRIOR_B
         for k in range(i + 1, min(i + len(surface), len(text))):
             out[k] = PRIOR_I
         pos = i + len(surface)
@@ -236,12 +216,11 @@ def segment_constrained(proposer, text):
 
 
 def proposer_char_labels(proposer, text):
-    """B where whitespace guarantees a boundary, B_SOFT where the proposer suggests one."""
+    """B on each proposed token start, I inside it, O on characters no token covers."""
     out = [PRIOR_O] * len(text)
-    hard = hard_starts(text)
     for a, b in segment_constrained(proposer, text):
         if text[a:b].strip():
-            out[a] = PRIOR_B if a in hard else PRIOR_B_SOFT
+            out[a] = PRIOR_B
             for k in range(a + 1, b):
                 out[k] = PRIOR_I
     return out
@@ -342,21 +321,15 @@ def encode_prior_bytes(text, char_labels, max_bytes=512):
         n_bytes = len(ch.encode("utf-8"))
         ids.append(lab)
         if n_bytes > 1:
-            cont = PRIOR_I if lab in (PRIOR_B, PRIOR_I, PRIOR_B_SOFT) else PRIOR_O
+            cont = PRIOR_I if lab in (PRIOR_B, PRIOR_I) else PRIOR_O
             ids.extend([cont] * (n_bytes - 1))
     ids.append(PRIOR_NONE)
     return ids[:max_bytes]
 
 
-def prior_ids_for(text, lang, max_bytes=512, tagger=None, wordbanks=None, soft=True,
-                  unidic=None):
-    """soft=False collapses B_SOFT back onto B — the pre-36b37e9 encoding, kept as a
-    control arm. The vocab stays 5 either way, so the two only differ in the input."""
-    ids = encode_prior_bytes(text, char_prior(text, lang, tagger, wordbanks, unidic),
-                             max_bytes)
-    if not soft:
-        ids = [PRIOR_B if i == PRIOR_B_SOFT else i for i in ids]
-    return ids
+def prior_ids_for(text, lang, max_bytes=512, tagger=None, wordbanks=None, unidic=None):
+    return encode_prior_bytes(text, char_prior(text, lang, tagger, wordbanks, unidic),
+                              max_bytes)
 
 
 def proposal_spans(text, lang, tagger=None, wordbanks=None, unidic=None):
@@ -364,7 +337,7 @@ def proposal_spans(text, lang, tagger=None, wordbanks=None, unidic=None):
     labels = char_prior(text, lang, tagger, wordbanks, unidic)
     spans, start = [], None
     for i, lab in enumerate(labels):
-        if lab in (PRIOR_B, PRIOR_B_SOFT):
+        if lab == PRIOR_B:
             if start is not None:
                 spans.append((start, i))
             start = i
@@ -382,9 +355,8 @@ def describe(text, lang):
     return "|".join(text[a:b] for a, b in proposal_spans(text, lang))
 
 
-__all__ = ["PriorSidecar", "PRIOR_NONE", "PRIOR_O", "PRIOR_B", "PRIOR_I", "PRIOR_B_SOFT",
-           "PRIOR_VOCAB",
+__all__ = ["PriorSidecar", "PRIOR_NONE", "PRIOR_O", "PRIOR_B", "PRIOR_I", "PRIOR_VOCAB",
            "char_prior", "encode_prior_bytes", "prior_ids_for", "proposal_spans",
-           "describe", "hard_starts", "infer_lang", "whitespace_char_labels",
+           "describe", "infer_lang", "whitespace_char_labels",
            "japanese_char_labels",
            "Wordbank", "segment_constrained", "proposer_char_labels"]

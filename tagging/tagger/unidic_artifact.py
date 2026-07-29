@@ -1,5 +1,10 @@
 """Reader for the packed UniDic artifact — the Python twin of `lexide/src/segment/unidic.rs`.
 
+(Named `unidic_artifact` rather than `unidic` on purpose: tagger/ goes on sys.path, and a
+module called `unidic` shadows the PyPI package of that name, which is what fugashi imports
+to find its dictionary. That collision breaks fugashi with a confusing
+`module 'unidic' has no attribute 'DICDIR'`.)
+
 Three implementations have to agree on where Japanese words begin: the Rust library that
 ships to users, the Modal serve that `release.sh` parity-tests it against, and whatever
 generates training priors. Agreeing means reading the *same* dictionary, not merely a

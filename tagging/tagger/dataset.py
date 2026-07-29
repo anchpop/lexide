@@ -243,7 +243,7 @@ def maybe_merge_inflection(record, enabled):
 
 class CharBoundaryDataset(Dataset):
     def __init__(self, records, max_bytes=512, lang_dropout=None, merge_inflection=False,
-                 use_prior=False, wordbanks=None, prior_soft=True, prior_sidecar=None,
+                 use_prior=False, wordbanks=None, prior_sidecar=None,
                  prior_dropout=0.0):
         """lang_dropout=None trains language-blind (generic BOS always, the pre-lang
         behavior); a float p trains language-conditioned, replacing the record's lang
@@ -257,7 +257,6 @@ class CharBoundaryDataset(Dataset):
         self.merge_inflection = merge_inflection
         self.use_prior = use_prior
         self.wordbanks = wordbanks
-        self.prior_soft = prior_soft
         self.prior_sidecar = prior_sidecar
         # Fraction of examples whose proposal is blanked to PRIOR_NONE — "no proposal
         # available" — so the model keeps a route to the answer that does not go through
@@ -294,8 +293,7 @@ class CharBoundaryDataset(Dataset):
                 # the prior always knows the language — it is computed from the text we
                 # hold, not from the lang token the model may have had dropped out
                 item["prior_ids"] = prior_ids_for(r["text"], r.get("lang"), self.max_bytes,
-                                                  wordbanks=self.wordbanks,
-                                                  soft=self.prior_soft)
+                                                  wordbanks=self.wordbanks)
         return item
 
 
