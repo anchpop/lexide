@@ -28,7 +28,8 @@ setup: |
   fi
   python3 -c "import torch; assert torch.cuda.is_available(), 'torch still cannot see CUDA after setup'"
   pip install --quiet huggingface_hub 'numpy<2'
-  # Japanese boundary prior: a dictionary + Viterbi analyzer (see tagger/prior.py)
+  # fugashi is only needed for the legacy in-Python Japanese prior; the shipping path
+  # (--prior-sidecar) reads priors precomputed by the Rust emit-priors binary.
   pip install --quiet fugashi unidic-lite
 
 run: |

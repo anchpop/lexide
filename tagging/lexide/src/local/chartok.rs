@@ -9,28 +9,58 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::segment::byte_bio::ByteBioModel;
+use crate::segment::prior::PriorSet;
+
+/// Max prior length, matching `--max-bytes` at training time. Longer inputs are truncated
+/// by the model anyway.
+const MAX_PRIOR_BYTES: usize = 512;
 
 pub struct CharTokenizer {
     model: ByteBioModel,
+    priors: PriorSet,
 }
 
 impl CharTokenizer {
+    /// Loads the weights, and the boundary priors sitting beside them if the checkpoint
+    /// was trained with one.
     pub fn load(path: &Path) -> Result<Self> {
-        Ok(Self {
-            model: ByteBioModel::load(path)?,
-        })
+        let model = ByteBioModel::load(path)?;
+        // The prior is part of the model, not an optional extra: a checkpoint trained with
+        // one has learned to lean on it, and running it prior-free silently degrades
+        // exactly the languages the prior was added for.
+        let priors = match (model.wants_prior(), path.parent()) {
+            (true, Some(dir)) => PriorSet::load(dir)?,
+            _ => PriorSet::default(),
+        };
+        if model.wants_prior() && priors.is_empty() {
+            anyhow::bail!(
+                "{} was trained with a boundary prior but no prior data sits beside it \
+                 (expected jpn-unidic.bin and/or wordbanks/*.tsv in {})",
+                path.display(),
+                path.parent().unwrap_or(Path::new(".")).display()
+            );
+        }
+        Ok(Self { model, priors })
     }
 
     /// Per-position O/B/I logits for `[LANG or BOS] + utf8(text) + [EOS]`.
     #[allow(dead_code)] // used by the parity test; not on any production path
     pub fn logits(&self, text: &str, lang: Option<&str>) -> Vec<[f32; 3]> {
-        self.model.logits(text, lang)
+        let prior = self.prior_for(text, lang);
+        self.model.logits_with_prior(text, lang, prior.as_deref())
     }
 
     /// Raw text -> token (start, end) char spans. The optional language hint improves
     /// ambiguous boundaries on lang-token checkpoints; harmless no-op on older ones.
     pub fn segment(&self, text: &str, lang: Option<&str>) -> Vec<(usize, usize)> {
-        self.model.segment(text, lang)
+        let prior = self.prior_for(text, lang);
+        self.model.segment_with_prior(text, lang, prior.as_deref())
+    }
+
+    fn prior_for(&self, text: &str, lang: Option<&str>) -> Option<Vec<u8>> {
+        self.model
+            .wants_prior()
+            .then(|| self.priors.ids(text, lang, MAX_PRIOR_BYTES))
     }
 }
 

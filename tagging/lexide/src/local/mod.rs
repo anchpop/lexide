@@ -88,6 +88,15 @@ fn fetch_from_hub(repo_id: &str) -> Result<PathBuf> {
             tagger_path = Some(p);
         }
     }
+    // Boundary priors for the tokenizer (see segment::prior). Optional on the hub: a repo
+    // whose checkpoint predates the prior simply has none, and CharTokenizer::load is what
+    // enforces that a prior-trained checkpoint actually found its data.
+    if let Err(e) = repo.get("onnx/jpn-unidic.bin") {
+        eprintln!("lexide: no Japanese boundary dictionary on {repo_id}: {e}");
+    }
+    for lang in crate::segment::byte_bio::LANG_ORDER {
+        let _ = repo.get(&format!("onnx/wordbanks/{lang}.tsv"));
+    }
     // Not used by this pipeline, but pre-fetching warms the cache Segmenter::from_pretrained
     // reads from; a miss on older repo snapshots is fine.
     if let Err(e) = repo.get("onnx/sentence_segmenter.safetensors") {

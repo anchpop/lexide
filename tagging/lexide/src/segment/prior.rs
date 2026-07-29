@@ -20,6 +20,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use super::unidic::UniDic;
+
 /// Per-byte prior ids. NONE covers BOS/EOS/padding, so 0 is a safe fill.
 ///
 /// `B` and `B_SOFT` are separate because a prior's worth is its precision, not its
@@ -39,7 +41,7 @@ pub const PRIOR_VOCAB: usize = 5;
 /// proposal — katakana loanwords and numbers run long, kanji compounds are usually 2-3, and
 /// a run of hiragana is grammar rather than one word so it is never grouped.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum CharType {
+pub enum CharType {
     Katakana,
     Hiragana,
     Kanji,
@@ -49,7 +51,7 @@ enum CharType {
 }
 
 impl CharType {
-    fn of(ch: char) -> Self {
+    pub fn of(ch: char) -> Self {
         let o = ch as u32;
         if (0x30A0..=0x30FF).contains(&o) || o == 0x30FC {
             CharType::Katakana
@@ -66,13 +68,23 @@ impl CharType {
         }
     }
 
-    fn unk_max_len(self) -> usize {
+    pub fn unk_max_len(self) -> usize {
         match self {
             CharType::Katakana | CharType::Latin | CharType::Digit => 24,
             CharType::Kanji => 3,
             CharType::Hiragana | CharType::Other => 1,
         }
     }
+}
+
+/// Anything that can propose word boundaries inside one whitespace-free run.
+///
+/// Whitespace handling, the hard/soft distinction and the byte alignment are the same for
+/// every source, so they live here once; an implementor only has to segment a run. Today
+/// that is the corpus [`Wordbank`] and the bundled [`UniDic`](super::unidic::UniDic).
+pub trait Proposer {
+    /// Minimum-cost segmentation of `chars`, as (start, end) character indices.
+    fn segment_run(&self, chars: &[char]) -> Vec<(usize, usize)>;
 }
 
 /// A unigram wordbank plus Viterbi — the same proposal a morphological analyzer gives,
@@ -123,7 +135,6 @@ impl Wordbank {
         Ok(Self::from_counts(counts, group_unknown))
     }
 
-    /// Minimum-cost segmentation of `chars`, as (start, end) character indices.
     fn segment_chars(&self, chars: &[char]) -> Vec<(usize, usize)> {
         let n = chars.len();
         let types: Vec<CharType> = chars.iter().map(|&c| CharType::of(c)).collect();
@@ -166,58 +177,73 @@ impl Wordbank {
         spans.reverse();
         spans
     }
+}
 
-    /// Whitespace is a hard boundary; Viterbi only proposes splits *inside* a run.
-    ///
-    /// One mechanism for every language. Japanese has no spaces, so the sentence is a
-    /// single run and this is plain Viterbi. Korean gets the eojeol boundary free and the
-    /// bank proposes the split inside it (나는 밥을 -> 나|는|밥|을), which whitespace cannot
-    /// see and where Korean's remaining errors lived.
-    pub fn segment_constrained(&self, chars: &[char]) -> Vec<(usize, usize)> {
-        let mut spans = Vec::new();
-        let n = chars.len();
-        let mut i = 0;
-        while i < n {
-            if chars[i].is_whitespace() {
-                i += 1;
-                continue;
-            }
-            let mut j = i;
-            while j < n && !chars[j].is_whitespace() {
-                j += 1;
-            }
-            spans.extend(self.segment_chars(&chars[i..j]).into_iter().map(|(a, b)| (i + a, i + b)));
-            i = j;
-        }
-        spans
+impl Proposer for Wordbank {
+    fn segment_run(&self, chars: &[char]) -> Vec<(usize, usize)> {
+        self.segment_chars(chars)
     }
+}
 
-    fn char_labels(&self, chars: &[char]) -> Vec<u8> {
-        let mut out = vec![PRIOR_O; chars.len()];
-        // a whitespace-delimited run start is a boundary whitespace vouches for; splits
-        // Viterbi proposes inside the run are suggestions
-        let mut hard = vec![false; chars.len()];
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i].is_whitespace() {
-                i += 1;
-                continue;
-            }
-            hard[i] = true;
-            while i < chars.len() && !chars[i].is_whitespace() {
-                i += 1;
-            }
+/// Whitespace is a hard boundary; the proposer only splits *inside* a run.
+///
+/// One mechanism for every language. Japanese has no spaces, so the sentence is a single
+/// run and this is plain Viterbi. Korean gets the eojeol boundary free from whitespace and
+/// the proposer splits inside it (나는 밥을 -> 나|는|밥|을), which whitespace cannot see and
+/// where Korean's remaining errors lived.
+pub fn segment_constrained(p: &dyn Proposer, chars: &[char]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
         }
-        for (a, b) in self.segment_constrained(chars) {
-            if chars[a..b].iter().any(|c| !c.is_whitespace()) {
-                out[a] = if hard[a] { PRIOR_B } else { PRIOR_B_SOFT };
-                for slot in out.iter_mut().take(b).skip(a + 1) {
-                    *slot = PRIOR_I;
-                }
-            }
+        let mut j = i;
+        while j < n && !chars[j].is_whitespace() {
+            j += 1;
         }
-        out
+        spans.extend(p.segment_run(&chars[i..j]).into_iter().map(|(a, b)| (i + a, i + b)));
+        i = j;
     }
+    spans
+}
+
+/// Indices where whitespace *guarantees* a token begins — the run starts.
+///
+/// Every proposal source shares this rule, so `PRIOR_B` means the same thing in every
+/// language: a boundary we are certain of. Anything a dictionary merely proposes is
+/// `PRIOR_B_SOFT`, whatever proposed it — including the Japanese analyzer, whose 84.4%
+/// precision is the lowest of the three sources we ship.
+fn hard_starts(chars: &[char]) -> Vec<bool> {
+    let mut hard = vec![false; chars.len()];
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        hard[i] = true;
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+    }
+    hard
+}
+
+fn proposer_char_labels(p: &dyn Proposer, chars: &[char]) -> Vec<u8> {
+    let mut out = vec![PRIOR_O; chars.len()];
+    let hard = hard_starts(chars);
+    for (a, b) in segment_constrained(p, chars) {
+        if chars[a..b].iter().any(|c| !c.is_whitespace()) {
+            out[a] = if hard[a] { PRIOR_B } else { PRIOR_B_SOFT };
+            for slot in out.iter_mut().take(b).skip(a + 1) {
+                *slot = PRIOR_I;
+            }
+        }
+    }
+    out
 }
 
 /// B on the first character of each whitespace-delimited run, I inside, O on the space.
@@ -241,10 +267,10 @@ fn whitespace_char_labels(chars: &[char]) -> Vec<u8> {
 /// Mirrors `dataset.encode_bytes_and_labels`: one leading slot for BOS, each character's
 /// label on its first byte with continuation bytes marked I inside a proposed word, one
 /// trailing slot for EOS — so the prior and the byte stream stay aligned byte for byte.
-pub fn prior_ids(text: &str, wordbank: Option<&Wordbank>, max_bytes: usize) -> Vec<u8> {
+pub fn prior_ids(text: &str, proposer: Option<&dyn Proposer>, max_bytes: usize) -> Vec<u8> {
     let chars: Vec<char> = text.chars().collect();
-    let labels = match wordbank {
-        Some(wb) => wb.char_labels(&chars),
+    let labels = match proposer {
+        Some(p) => proposer_char_labels(p, &chars),
         None => whitespace_char_labels(&chars),
     };
     let mut ids = Vec::with_capacity(text.len() + 2);
@@ -269,10 +295,10 @@ pub fn prior_ids(text: &str, wordbank: Option<&Wordbank>, max_bytes: usize) -> V
 }
 
 /// The proposal itself, as character spans — for diagnostics and parity testing.
-pub fn proposal_spans(text: &str, wordbank: Option<&Wordbank>) -> Vec<(usize, usize)> {
+pub fn proposal_spans(text: &str, proposer: Option<&dyn Proposer>) -> Vec<(usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
-    match wordbank {
-        Some(wb) => wb.segment_constrained(&chars),
+    match proposer {
+        Some(p) => segment_constrained(p, &chars),
         None => {
             let labels = whitespace_char_labels(&chars);
             let mut spans = Vec::new();
@@ -317,19 +343,19 @@ mod tests {
         let wb = bank(&[("나", 100), ("는", 100), ("밥", 50), ("을", 100)], true);
         let chars: Vec<char> = "나는 밥을".chars().collect();
         // the eojeol boundary comes from whitespace, the split inside it from the bank
-        assert_eq!(wb.segment_constrained(&chars), vec![(0, 1), (1, 2), (3, 4), (4, 5)]);
+        assert_eq!(segment_constrained(&wb, &chars), vec![(0, 1), (1, 2), (3, 4), (4, 5)]);
     }
 
     #[test]
     fn unknown_runs_group_by_script() {
         let wb = bank(&[("が", 100), ("好き", 50)], true);
         let chars: Vec<char> = "ブロックチェーンが好き".chars().collect();
-        let spans = wb.segment_constrained(&chars);
+        let spans = segment_constrained(&wb, &chars);
         // the unseen katakana loanword stays whole rather than shattering
         assert_eq!(chars[spans[0].0..spans[0].1].iter().collect::<String>(), "ブロックチェーン");
 
         let shattered = bank(&[("が", 100), ("好き", 50)], false);
-        let spans = shattered.segment_constrained(&chars);
+        let spans = segment_constrained(&shattered, &chars);
         assert_eq!(chars[spans[0].0..spans[0].1].iter().collect::<String>(), "ブ");
     }
 
@@ -352,5 +378,65 @@ mod tests {
             ids,
             vec![PRIOR_NONE, PRIOR_B, PRIOR_I, PRIOR_O, PRIOR_B, PRIOR_I, PRIOR_NONE]
         );
+    }
+}
+
+/// The proposal sources that ship with a model: the bundled UniDic for Japanese, plus a
+/// corpus wordbank for each language that has one.
+///
+/// Which languages carry a bank is a training-time decision — a bank finds more boundaries
+/// than whitespace but is less precise, so it is not a free win everywhere — and the answer
+/// is recorded by which files the release contains. Loading is therefore a directory scan
+/// rather than a hardcoded list: the model and its priors cannot disagree.
+#[derive(Default)]
+pub struct PriorSet {
+    unidic: Option<UniDic>,
+    banks: HashMap<String, Wordbank>,
+}
+
+impl PriorSet {
+    /// Reads `jpn-unidic.bin` and `wordbanks/*.tsv` from a model directory. Missing files
+    /// are not an error — the languages they cover fall back to whitespace.
+    pub fn load(dir: &Path) -> Result<Self> {
+        let mut set = Self::default();
+        let dict = dir.join("jpn-unidic.bin");
+        if dict.exists() {
+            set.unidic = Some(UniDic::load(&dict)?);
+        }
+        let banks_dir = dir.join("wordbanks");
+        if let Ok(entries) = std::fs::read_dir(&banks_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("tsv") {
+                    continue;
+                }
+                let Some(lang) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                set.banks
+                    .insert(lang.to_string(), Wordbank::load(&path, true)?);
+            }
+        }
+        Ok(set)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.unidic.is_none() && self.banks.is_empty()
+    }
+
+    /// The best proposer for a language, or `None` to fall back to plain whitespace.
+    pub fn for_lang(&self, lang: Option<&str>) -> Option<&dyn Proposer> {
+        match lang {
+            Some("jpn") if self.unidic.is_some() => {
+                self.unidic.as_ref().map(|d| d as &dyn Proposer)
+            }
+            Some(l) => self.banks.get(l).map(|b| b as &dyn Proposer),
+            None => None,
+        }
+    }
+
+    /// Per-byte prior ids for `text`, ready to hand to the model.
+    pub fn ids(&self, text: &str, lang: Option<&str>, max_bytes: usize) -> Vec<u8> {
+        prior_ids(text, self.for_lang(lang), max_bytes)
     }
 }

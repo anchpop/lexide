@@ -3,6 +3,7 @@
 tagger/.venv
 tagger/output
 data/big
+data/priors
 data/audio
 data/onnx
 data/lemma_tables

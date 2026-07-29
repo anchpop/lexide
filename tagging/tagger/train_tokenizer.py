@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from dataset import (CHAR_VOCAB_SIZE, CharBoundaryDataset, char_collate,
                      encode_bytes_and_labels, maybe_merge_inflection, read_jsonl)
 from model import CharBoundaryTagger
-from prior import PRIOR_VOCAB, Wordbank, prior_ids_for
+from prior import PRIOR_VOCAB, PriorSidecar, Wordbank, prior_ids_for
 
 
 def spans_from_labels(labels):
@@ -64,7 +64,8 @@ def fmt_metrics(m):
 
 @torch.no_grad()
 def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
-             merge_inflection=True, use_prior=False, wordbanks=None):
+             merge_inflection=True, use_prior=False, wordbanks=None, prior_soft=True,
+             sidecar=None):
     """Micro-averaged token-span F1 overall and per language."""
     model.eval()
     agg = dict(tp=0, fp=0, fn=0, bc=0, bt=0)
@@ -76,8 +77,10 @@ def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
         x = torch.tensor([byte_ids], device=device)
         p = None
         if use_prior:
-            p = torch.tensor([prior_ids_for(r["text"], r.get("lang"), max_bytes,
-                                            wordbanks=wordbanks)], device=device)
+            ids = (sidecar[r["_idx"]] if sidecar is not None
+                   else prior_ids_for(r["text"], r.get("lang"), max_bytes,
+                                      wordbanks=wordbanks, soft=prior_soft))
+            p = torch.tensor([ids], device=device)
         pred = model(x, p)[0].argmax(-1).tolist()
         gold_spans, pred_spans = spans_from_labels(labels), spans_from_labels(pred)
         counts = dict(
@@ -146,6 +149,15 @@ def main():
                          "beats a bank there (99.4%% vs 98.8%% boundary coverage, 1.1 F1); "
                          "kor/hin gain nothing from an analyzer and cost <1MB as banks")
     ap.add_argument("--wordbank-dir", default="data/wordbanks")
+    ap.add_argument("--prior-sidecar", default=None,
+                    help="priors precomputed by the Rust `emit-priors` binary, as "
+                         "<path>.{train,val}. This is the shipping path: the proposal the "
+                         "model trains against then comes from the same code that produces "
+                         "it at inference, and the Viterbi leaves the dataloader.")
+    ap.add_argument("--no-prior-soft", dest="prior_soft", action="store_false",
+                    help="collapse B_SOFT onto B, so a proposed boundary is encoded the "
+                         "same as one whitespace guarantees. The pre-36b37e9 behavior, "
+                         "kept as a control arm.")
     ap.add_argument("--no-group-unknown", dest="group_unknown", action="store_false",
                     default=True,
                     help="charge unknown cost per character instead of grouping a run of "
@@ -168,7 +180,7 @@ def main():
                 print(f"WARNING: no wordbank at {path}; {lang} falls back to whitespace")
         others = "analyzer (jpn)" if "jpn" not in wordbanks else ""
         print(f"prior: wordbanks={sorted(wordbanks)} {others} "
-              f"group_unknown={args.group_unknown}")
+              f"group_unknown={args.group_unknown} soft={args.prior_soft}")
 
     train_records = read_jsonl(os.path.join(args.data_dir, "train.jsonl"), args.train_limit)
     val_records = read_jsonl(os.path.join(args.data_dir, "val.jsonl"))
@@ -187,9 +199,16 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"char tokenizer params: {n_params/1e6:.2f}M")
 
+    train_side = val_side = None
+    if args.prior_sidecar:
+        train_side = PriorSidecar(f"{args.prior_sidecar}.train")
+        val_side = PriorSidecar(f"{args.prior_sidecar}.val")
+        print(f"prior sidecar: {len(train_side)} train / {len(val_side)} val records")
+
     ds = CharBoundaryDataset(train_records, args.max_bytes, lang_dropout=args.lang_dropout,
                              merge_inflection=args.merge_inflection,
-                             use_prior=args.use_prior, wordbanks=wordbanks)
+                             use_prior=args.use_prior, wordbanks=wordbanks,
+                             prior_soft=args.prior_soft, prior_sidecar=train_side)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
                         collate_fn=char_collate, pin_memory=True, drop_last=True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -235,7 +254,8 @@ def main():
                 print(f"[tok] step {step}/{total_steps} loss={run/args.log_every:.4f} ({sps:.1f} it/s)", flush=True)
                 run = 0.0
             if step % args.eval_every == 0 or (args.smoke and step == total_steps):
-                m = evaluate(model, val_records, device, use_prior=args.use_prior, wordbanks=wordbanks)
+                m = evaluate(model, val_records, device, use_prior=args.use_prior, wordbanks=wordbanks,
+                     prior_soft=args.prior_soft, sidecar=val_side)
                 print(f"[tok] eval@{step} {fmt_metrics(m)}", flush=True)
                 if args.wandb:
                     import wandb
@@ -249,11 +269,13 @@ def main():
                     with open(os.path.join(args.out_dir, "meta.json"), "w") as f:
                         json.dump({"metrics": m, "step": step, "config": vars(args)}, f, indent=2)
 
-    m = evaluate(model, val_records, device, use_prior=args.use_prior, wordbanks=wordbanks)
+    m = evaluate(model, val_records, device, use_prior=args.use_prior, wordbanks=wordbanks,
+                     prior_soft=args.prior_soft, sidecar=val_side)
     print(f"[tok] final {fmt_metrics(m)}", flush=True)
     if m["token_f1"] >= best:
         torch.save(model.state_dict(), os.path.join(args.out_dir, "tokenizer.pt"))
-    nl = evaluate(model, val_records, device, use_lang=False, use_prior=args.use_prior, wordbanks=wordbanks)
+    nl = evaluate(model, val_records, device, use_lang=False, use_prior=args.use_prior, wordbanks=wordbanks,
+                     prior_soft=args.prior_soft, sidecar=val_side)
     print(f"[tok] final lang-free {fmt_metrics(nl)}", flush=True)
     print("done")
 

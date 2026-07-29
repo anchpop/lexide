@@ -62,6 +62,25 @@ def _tagger():
     return _TAGGER
 
 
+def hard_starts(text):
+    """Indices where whitespace *guarantees* a token begins — the run starts.
+
+    Every proposal source shares this rule, so that PRIOR_B always means the same thing
+    across languages: a boundary we are certain of. Anything a dictionary merely proposes
+    is PRIOR_B_SOFT, whatever proposed it.
+    """
+    out = set()
+    i, n = 0, len(text)
+    while i < n:
+        if text[i].isspace():
+            i += 1
+            continue
+        out.add(i)
+        while i < n and not text[i].isspace():
+            i += 1
+    return out
+
+
 def whitespace_char_labels(text):
     """B on the first character of each whitespace-delimited run, I inside, O on space."""
     out = []
@@ -84,6 +103,7 @@ def japanese_char_labels(text, tagger=None):
     """
     tagger = tagger or _tagger()
     out = [PRIOR_O] * len(text)
+    hard = hard_starts(text)
     pos = 0
     for word in tagger(text):
         surface = word.surface
@@ -92,7 +112,9 @@ def japanese_char_labels(text, tagger=None):
         i = text.find(surface, pos)
         if i < 0:
             continue  # analyzer normalized something; leave those characters unproposed
-        out[i] = PRIOR_B
+        # The analyzer is a proposal like any other — measured at 84.4% precision against
+        # our gold, the *lowest* of the three sources. Only whitespace makes it certain.
+        out[i] = PRIOR_B if i in hard else PRIOR_B_SOFT
         for k in range(i + 1, min(i + len(surface), len(text))):
             out[k] = PRIOR_I
         pos = i + len(surface)
@@ -202,21 +224,48 @@ class Wordbank:
     def char_labels(self, text):
         """B_HARD where whitespace guarantees a boundary, B_SOFT where Viterbi proposes one."""
         out = [PRIOR_O] * len(text)
-        hard = set()
-        i, n = 0, len(text)
-        while i < n:
-            if text[i].isspace():
-                i += 1
-                continue
-            hard.add(i)                       # a run start is a boundary whitespace vouches for
-            while i < n and not text[i].isspace():
-                i += 1
+        hard = hard_starts(text)
         for a, b in self.segment_constrained(text):
             if text[a:b].strip():
                 out[a] = PRIOR_B if a in hard else PRIOR_B_SOFT
                 for k in range(a + 1, b):
                     out[k] = PRIOR_I
         return out
+
+
+class PriorSidecar:
+    """Per-byte priors precomputed by the Rust `emit-priors` binary, indexed by record.
+
+    Two reasons this is a file rather than a call. First, train/inference parity: the
+    proposal a model trains against is produced by the same code that will produce it at
+    inference, so the two cannot drift. Second, speed — a Viterbi over a 570k-entry
+    dictionary in every dataloader worker was a real fraction of step time, and this moves
+    it to a one-off pass.
+
+    Layout (little-endian), written by `src/bin/emit_priors.rs`:
+        magic "LXPRIOR\x01" | u64 count | u64 offsets[count+1] | id bytes
+    """
+
+    MAGIC = b"LXPRIOR\x01"
+
+    def __init__(self, path):
+        import mmap
+        self.file = open(path, "rb")
+        self.mm = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_READ)
+        if self.mm[:8] != self.MAGIC:
+            raise ValueError(f"{path} is not a prior sidecar")
+        self.count = int.from_bytes(self.mm[8:16], "little")
+        self.blob = 16 + (self.count + 1) * 8
+
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, i):
+        if not 0 <= i < self.count:
+            raise IndexError(i)
+        a = int.from_bytes(self.mm[16 + i * 8: 24 + i * 8], "little")
+        b = int.from_bytes(self.mm[24 + i * 8: 32 + i * 8], "little")
+        return list(self.mm[self.blob + a: self.blob + b])
 
 
 def char_prior(text, lang, tagger=None, wordbanks=None):
@@ -258,9 +307,13 @@ def encode_prior_bytes(text, char_labels, max_bytes=512):
     return ids[:max_bytes]
 
 
-def prior_ids_for(text, lang, max_bytes=512, tagger=None, wordbanks=None):
-    return encode_prior_bytes(text, char_prior(text, lang, tagger, wordbanks),
-                              max_bytes)
+def prior_ids_for(text, lang, max_bytes=512, tagger=None, wordbanks=None, soft=True):
+    """soft=False collapses B_SOFT back onto B — the pre-36b37e9 encoding, kept as a
+    control arm. The vocab stays 5 either way, so the two only differ in the input."""
+    ids = encode_prior_bytes(text, char_prior(text, lang, tagger, wordbanks), max_bytes)
+    if not soft:
+        ids = [PRIOR_B if i == PRIOR_B_SOFT else i for i in ids]
+    return ids
 
 
 def proposal_spans(text, lang, tagger=None, wordbanks=None):
@@ -286,7 +339,8 @@ def describe(text, lang):
     return "|".join(text[a:b] for a, b in proposal_spans(text, lang))
 
 
-__all__ = ["PRIOR_NONE", "PRIOR_O", "PRIOR_B", "PRIOR_I", "PRIOR_B_SOFT",
+__all__ = ["PriorSidecar", "PRIOR_NONE", "PRIOR_O", "PRIOR_B", "PRIOR_I", "PRIOR_B_SOFT",
            "PRIOR_VOCAB",
            "char_prior", "encode_prior_bytes", "prior_ids_for", "proposal_spans",
-           "describe", "whitespace_char_labels", "japanese_char_labels", "Wordbank"]
+           "describe", "hard_starts", "whitespace_char_labels", "japanese_char_labels",
+           "Wordbank"]

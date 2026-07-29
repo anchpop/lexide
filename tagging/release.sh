@@ -65,6 +65,25 @@ else
     echo "WARNING: $SEG_CKPT not found — skipping segmenter export (keeping existing artifacts)." >&2
 fi
 
+step "3c/10 stage boundary priors -> data/onnx/"
+# The tokenizer's boundary prior (segment::prior) is part of the model: a checkpoint
+# trained with one refuses to load without its data, because running it prior-free
+# silently degrades exactly the languages the prior was added for. These files are built
+# once by tagger/build_unidic_artifact.py + tagger/build_wordbanks.py and live in
+# data/priors; staging them here puts them in the same upload as the weights.
+if [ -f data/priors/jpn-unidic.bin ]; then
+    cp data/priors/jpn-unidic.bin data/onnx/
+    echo "staged jpn-unidic.bin ($(du -h data/priors/jpn-unidic.bin | cut -f1))"
+else
+    echo "WARNING: data/priors/jpn-unidic.bin not found — a prior-trained tokenizer will" >&2
+    echo "         fail to load. Rebuild with tagger/build_unidic_artifact.py." >&2
+fi
+if [ -d data/priors/wordbanks ]; then
+    mkdir -p data/onnx/wordbanks
+    cp data/priors/wordbanks/*.tsv data/onnx/wordbanks/ 2>/dev/null || true
+    echo "staged wordbanks: $(ls data/onnx/wordbanks 2>/dev/null | tr '\n' ' ')"
+fi
+
 step "4/10 rebuild training-data lemma priors"
 if [ -f data/processed/train.jsonl ]; then
     PYTHONPATH=tagger python3 tagger/build_lemma_priors.py

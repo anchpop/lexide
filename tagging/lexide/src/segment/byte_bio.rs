@@ -135,6 +135,10 @@ impl BiMinGru {
 pub struct ByteBioModel {
     emb: Vec<f32>, // [VOCAB (+ n_langs), emb_dim]
     emb_dim: usize,
+    /// Optional per-byte boundary-prior embedding (see [`super::prior`]), summed into the
+    /// byte embedding as BERT does with segment embeddings. Absent on pre-prior
+    /// checkpoints, which is why it is an Option rather than a zero row.
+    prior_emb: Option<Vec<f32>>,
     n_langs: usize, // 0 = language-blind checkpoint
     layers: Vec<BiMinGru>,
     norm_w: Vec<f32>,
@@ -197,6 +201,28 @@ impl ByteBioModel {
             );
         }
         let n_langs = emb_shape[0] - VOCAB;
+        let prior_emb = match st.tensor("prior_emb.weight") {
+            Ok(_) => {
+                let (shape, w) = tensor("prior_emb.weight")?;
+                if shape[1] != emb_shape[1] {
+                    bail!(
+                        "prior embedding is {}-wide but the byte embedding is {} — this is a \
+                         concat-mode checkpoint, which this runtime does not implement",
+                        shape[1],
+                        emb_shape[1]
+                    );
+                }
+                if shape[0] != super::prior::PRIOR_VOCAB {
+                    bail!(
+                        "prior embedding has {} rows, expected {}",
+                        shape[0],
+                        super::prior::PRIOR_VOCAB
+                    );
+                }
+                Some(w)
+            }
+            Err(_) => None,
+        };
         let mut layers = Vec::new();
         for i in 0.. {
             if st.tensor(&format!("layers.{i}.fwd.to_z.weight")).is_err() {
@@ -223,6 +249,7 @@ impl ByteBioModel {
         Ok(Self {
             emb_dim: emb_shape[1],
             emb,
+            prior_emb,
             n_langs,
             layers,
             norm_w,
@@ -235,6 +262,23 @@ impl ByteBioModel {
     /// three-letter code from [`LANG_ORDER`]; unknown codes — or any code on a
     /// language-blind checkpoint — fall back to the generic BOS.
     pub fn logits(&self, text: &str, lang: Option<&str>) -> Vec<[f32; 3]> {
+        self.logits_with_prior(text, lang, None)
+    }
+
+    /// True when the checkpoint was trained with a boundary prior and expects one.
+    pub fn wants_prior(&self) -> bool {
+        self.prior_emb.is_some()
+    }
+
+    /// As [`Self::logits`], plus a per-byte boundary proposal aligned to
+    /// `[BOS] + utf8(text) + [EOS]` — exactly what [`super::prior::prior_ids`] returns.
+    /// Ignored by checkpoints trained without one.
+    pub fn logits_with_prior(
+        &self,
+        text: &str,
+        lang: Option<&str>,
+        prior: Option<&[u8]>,
+    ) -> Vec<[f32; 3]> {
         let first = lang
             .and_then(lang_index)
             .filter(|&i| i < self.n_langs)
@@ -249,6 +293,16 @@ impl ByteBioModel {
         let mut h: Vec<f32> = Vec::with_capacity(len * self.emb_dim);
         for id in ids {
             h.extend_from_slice(&self.emb[id * self.emb_dim..(id + 1) * self.emb_dim]);
+        }
+        if let (Some(pe), Some(prior)) = (&self.prior_emb, prior) {
+            for t in 0..len {
+                // a short prior is padded with NONE rather than misaligned
+                let row = *prior.get(t).unwrap_or(&super::prior::PRIOR_NONE) as usize;
+                let src = &pe[row * self.emb_dim..(row + 1) * self.emb_dim];
+                for (dst, v) in h[t * self.emb_dim..(t + 1) * self.emb_dim].iter_mut().zip(src) {
+                    *dst += v;
+                }
+            }
         }
         for layer in &self.layers {
             h = layer.forward(&h, len);
@@ -275,7 +329,21 @@ impl ByteBioModel {
 
     /// Raw text -> (start, end) char spans (each B and its trailing I run).
     pub fn segment(&self, text: &str, lang: Option<&str>) -> Vec<(usize, usize)> {
-        let labels: Vec<u8> = self.logits(text, lang).iter().map(argmax3).collect();
+        self.segment_with_prior(text, lang, None)
+    }
+
+    /// As [`Self::segment`], with a per-byte boundary proposal.
+    pub fn segment_with_prior(
+        &self,
+        text: &str,
+        lang: Option<&str>,
+        prior: Option<&[u8]>,
+    ) -> Vec<(usize, usize)> {
+        let labels: Vec<u8> = self
+            .logits_with_prior(text, lang, prior)
+            .iter()
+            .map(argmax3)
+            .collect();
         spans_from_byte_labels(text, &labels)
     }
 }

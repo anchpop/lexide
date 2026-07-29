@@ -31,7 +31,11 @@ def read_jsonl(path, limit=None):
         for i, line in enumerate(f):
             if limit is not None and i >= limit:
                 break
-            out.append(json.loads(line))
+            r = json.loads(line)
+            # keep the file position: the prior sidecar is indexed by it, and callers
+            # filter/subset the records afterwards
+            r["_idx"] = i
+            out.append(r)
     return out
 
 
@@ -239,7 +243,7 @@ def maybe_merge_inflection(record, enabled):
 
 class CharBoundaryDataset(Dataset):
     def __init__(self, records, max_bytes=512, lang_dropout=None, merge_inflection=False,
-                 use_prior=False, wordbanks=None):
+                 use_prior=False, wordbanks=None, prior_soft=True, prior_sidecar=None):
         """lang_dropout=None trains language-blind (generic BOS always, the pre-lang
         behavior); a float p trains language-conditioned, replacing the record's lang
         with the generic BOS with probability p so the model also works lang-free.
@@ -252,6 +256,8 @@ class CharBoundaryDataset(Dataset):
         self.merge_inflection = merge_inflection
         self.use_prior = use_prior
         self.wordbanks = wordbanks
+        self.prior_soft = prior_soft
+        self.prior_sidecar = prior_sidecar
 
     def __len__(self):
         return len(self.records)
@@ -265,10 +271,15 @@ class CharBoundaryDataset(Dataset):
         byte_ids, labels = encode_bytes_and_labels(r["text"], tokens, self.max_bytes, lang)
         item = {"byte_ids": byte_ids, "labels": labels}
         if self.use_prior:
-            # the prior always knows the language — it is computed from the text we hold,
-            # not from the lang token the model may have had dropped out
-            item["prior_ids"] = prior_ids_for(r["text"], r.get("lang"), self.max_bytes,
-                                              wordbanks=self.wordbanks)
+            if self.prior_sidecar is not None:
+                # precomputed by the Rust binary that also runs at inference
+                item["prior_ids"] = self.prior_sidecar[r["_idx"]]
+            else:
+                # the prior always knows the language — it is computed from the text we
+                # hold, not from the lang token the model may have had dropped out
+                item["prior_ids"] = prior_ids_for(r["text"], r.get("lang"), self.max_bytes,
+                                                  wordbanks=self.wordbanks,
+                                                  soft=self.prior_soft)
         return item
 
 
