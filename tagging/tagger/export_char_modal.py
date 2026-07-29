@@ -64,6 +64,7 @@ def export():
     from dataset import BOS_BYTE, EOS_BYTE, LANG_BOS
     from model import CharBoundaryTagger
     from predict import spans_from_byte_labels
+    from prior import PRIOR_VOCAB, prior_ids_for
 
     pt = hf_hub_download("anchpop/lexide-parsley", "tokenizer/tokenizer.pt",
                          token=os.environ["HF_TOKEN"])
@@ -73,9 +74,19 @@ def export():
     vocab, emb_dim = state["emb.weight"].shape
     hidden = state["layers.0.fwd.to_z.weight"].shape[0]
     layers = sum(1 for k in state if k.endswith(".fwd.to_z.weight"))
-    print(f"[load] vocab={vocab} emb={emb_dim} hidden={hidden} layers={layers}")
+    # The boundary prior is likewise recoverable: its presence from the tensor, and whether
+    # it was added or concatenated from layer 0's input width against the byte embedding.
+    prior_vocab, prior_dim, prior_mode = 0, 8, "add"
+    if "prior_emb.weight" in state:
+        prior_vocab, prior_dim = state["prior_emb.weight"].shape
+        in0 = state["layers.0.fwd.to_z.weight"].shape[1]
+        prior_mode = "concat" if in0 == emb_dim + prior_dim else "add"
+    print(f"[load] vocab={vocab} emb={emb_dim} hidden={hidden} layers={layers} "
+          f"prior_vocab={prior_vocab} prior_mode={prior_mode}")
     model = CharBoundaryTagger(vocab_size=vocab, emb_dim=emb_dim,
-                               hidden_dim=hidden, layers=layers)
+                               hidden_dim=hidden, layers=layers,
+                               prior_vocab=prior_vocab, prior_mode=prior_mode,
+                               prior_dim=prior_dim)
     model.load_state_dict(state)
     model.eval()
 
@@ -93,12 +104,25 @@ def export():
                 for ch in text:
                     byte_ids.extend(ch.encode("utf-8"))
                 byte_ids.append(EOS_BYTE)
-                logits = model(torch.tensor([byte_ids]))[0]
+                # The prior is *recorded* rather than recomputed on the Rust side, so this
+                # fixture tests the network math alone. That the two implementations agree
+                # on the prior itself is a separate, exhaustive check: `emit-priors` against
+                # tagger/prior.py over the whole val split. Whitespace is used here because
+                # the 83MB Japanese dictionary is not on the Modal image — the prior channel
+                # is exercised either way, which is what this test is for.
+                prior = None
+                if prior_vocab:
+                    prior = prior_ids_for(text, lang, max_bytes=len(byte_ids),
+                                          wordbanks={})
+                    assert len(prior) == len(byte_ids), (len(prior), len(byte_ids))
+                logits = model(torch.tensor([byte_ids]),
+                               torch.tensor([prior]) if prior else None)[0]
                 labels = logits.argmax(-1).tolist()
                 spans = spans_from_byte_labels(text, labels)
                 fixtures.append({
                     "text": text,
                     "lang": use_lang,
+                    "prior_ids": prior,
                     "byte_labels": labels,
                     "spans": [[s, e] for s, e in spans],
                     # first-row logits let the Rust test check numerics, not just argmax

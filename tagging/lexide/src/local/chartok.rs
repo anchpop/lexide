@@ -50,6 +50,20 @@ impl CharTokenizer {
         self.model.logits_with_prior(text, lang, prior.as_deref())
     }
 
+    /// As [`Self::logits`], with the prior supplied rather than computed. The parity
+    /// fixtures record the exact prior PyTorch saw, so this test isolates the network
+    /// math; that the two implementations *derive* the same prior is checked separately
+    /// and exhaustively by `emit-priors` against `tagger/prior.py`.
+    #[cfg(test)]
+    pub fn logits_with_prior(
+        &self,
+        text: &str,
+        lang: Option<&str>,
+        prior: Option<&[u8]>,
+    ) -> Vec<[f32; 3]> {
+        self.model.logits_with_prior(text, lang, prior)
+    }
+
     /// Raw text -> token (start, end) char spans. The optional language hint improves
     /// ambiguous boundaries on lang-token checkpoints; harmless no-op on older ones.
     pub fn segment(&self, text: &str, lang: Option<&str>) -> Vec<(usize, usize)> {
@@ -109,10 +123,22 @@ mod tests {
                 .map(|s| (s[0].as_u64().unwrap() as usize, s[1].as_u64().unwrap() as usize))
                 .collect();
 
-            let logits = tok.logits(text, lang);
+            // Prior-trained checkpoints record the prior they were scored with.
+            let prior: Option<Vec<u8>> = fx.get("prior_ids").and_then(|v| v.as_array()).map(
+                |a| a.iter().map(|v| v.as_u64().unwrap() as u8).collect(),
+            );
+            let logits = tok.logits_with_prior(text, lang, prior.as_deref());
             let labels: Vec<u8> = logits.iter().map(argmax3).collect();
             assert_eq!(labels, want_labels, "byte labels diverge for {text:?}");
-            assert_eq!(tok.segment(text, lang), want_spans, "spans diverge for {text:?}");
+            let spans: Vec<(usize, usize)> = {
+                let labels: Vec<u8> = tok
+                    .logits_with_prior(text, lang, prior.as_deref())
+                    .iter()
+                    .map(argmax3)
+                    .collect();
+                crate::segment::byte_bio::spans_from_byte_labels(text, &labels)
+            };
+            assert_eq!(spans, want_spans, "spans diverge for {text:?}");
 
             let want_first: Vec<f32> = fx["first_logits"]
                 .as_array()
