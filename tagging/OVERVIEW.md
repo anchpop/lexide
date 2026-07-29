@@ -138,6 +138,38 @@ outright wrong, while others are teacher-policy calls — auxiliary attachment (
 weakest (POS 85 / LAS 65). Fixing jpn tokenization is the same lever as fixing jpn tagging:
 more/better jpn silver, or a weighted sampler.
 
+**Boundary prior (2026-07-29).** That last sentence was wrong, and the diagnosis it rested
+on was too. Three hypotheses were tested: label noise (real — jpn gold disagrees with itself
+1.39% of the time against deu's 0.02% — but fixing it moved F1 ~0), data volume (projected
+10x more jpn data ≈ +3.5 points, then saturating), and **lexical knowledge**. The third one
+is it, shown by a German control: bucketing errors by how often a token appeared in training,
+an unseen German word is 3.0% wrong while an unseen Japanese word is **30.5%** wrong. German
+gets both boundaries free from whitespace no matter how strange the word; Japanese has to
+already know it.
+
+So the model is now handed a per-byte proposal alongside the bytes — whitespace where that
+is exact, a dictionary + Viterbi where it is not (`tagger/prior.py`, `segment::prior`). One
+extra embedding, summed into the byte embedding, +384 params:
+
+| | jpn | kor | overall |
+|---|---|---|---|
+| before | 86.6 | 91.8 | 97.17 |
+| with prior | **94.5** | **95.2** | **98.66** |
+
+The rare-frequency error buckets collapse 2.4x. Two findings worth keeping:
+
+- **Precision, not coverage, is what a prior is worth.** Replacing Korean whitespace with a
+  wordbank raised boundary *recall* from 62.6% to 98.9% and **cost 3.3 F1** — because
+  whitespace is right 100% of the time and the bank 92.6%, and both were encoded as the same
+  symbol, forcing one averaged trust level. `B` (certain) and `B_SOFT` (proposed) are now
+  distinct. Japanese takes the opposite trade knowingly: its analyzer has the worst precision
+  of the three sources and still wins, because it is the only signal there is.
+- **The Japanese dictionary is bundled, not a dependency.** MeCab's Viterbi is reimplemented
+  in Rust over a packed 83MB UniDic artifact (570k surfaces, the full 5981x5981 connection
+  matrix, unk.def unknown-word rules), reproducing fugashi's segmentation exactly on the test
+  split. Training priors are precomputed by that same binary, so the proposal a model trains
+  against cannot drift from the one it sees at inference.
+
 **Lemma quality investigation.** A blind `claude-fable-5` judge on 100 hard tokens found the
 silver lemmas are **~99% accurate** (only ~1 real error; most disagreements are annotation
 *policy*, e.g. jpn です→だ). Conclusion: the lemma lever is small and external gold would import

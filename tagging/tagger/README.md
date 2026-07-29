@@ -30,6 +30,8 @@ is handled two ways:
 | `dataset.py` | Torch datasets + collation; the offset→word pooling map; byte O/B/I labels. |
 | `train.py` | Trains the multi-task tagger. Runs a short on-GPU **smoke phase** first, then full training. Metrics: POS acc, lemma acc, UAS, LAS, per language. |
 | `train_tokenizer.py` | Trains the char boundary tagger; reports token-span F1. |
+| `prior.py` | The **boundary prior** — a per-byte proposal fed alongside the bytes (below). |
+| `build_wordbanks.py` / `build_unidic_artifact.py` | Corpus unigram wordbanks, and the packed UniDic artifact the Rust Viterbi reads. |
 | `predict.py` | End-to-end inference: raw text → tokens with POS/lemma/head/dep. |
 | `sky_tagger.yaml` + `run_node.sh` | Lambda launch (single x86 GPU, autostop/autodown) + node orchestration (train → push to HF → train tokenizer → push). |
 | `export_onnx.py` / `export_modal.py` | Tagger → single ONNX graph, numerically verified vs PyTorch; the Modal wrapper runs it with the HF weights. |
@@ -37,6 +39,38 @@ is handled two ways:
 | `parse_wiktextract.py` / `build_lemma_priors.py` / `lemma_lookup.py` | Wiktionary lemma tables, training-data candidate priors, and the layered OOD lemma floor (see `LEMMA_LOOKUP.md`). |
 | `record_parity_fixtures.py` | Records live-serve outputs as the Rust parity-test fixtures. |
 | `../release.sh` | The whole post-training chain: export → verify → publish to HF → deploy → parity-gate (below). |
+
+## The boundary prior
+
+The tokenizer has to decide where words start from raw bytes. With whitespace that is
+nearly free — an *unseen* German word is still 97% correct, because the spaces hand over
+both boundaries. Japanese has no such signal, so every rare word has to be *known* rather
+than copied: a Japanese token seen fewer than 500 times was 24–30% wrong, against 0% for
+German. That gap is lexical knowledge, not label noise or data volume, and no amount of
+either closes it.
+
+So each sentence is accompanied by a per-byte proposal:
+
+| language | source | precision |
+|---|---|---|
+| spaced languages | whitespace | 100% (Korean), 96.4% (Hindi) |
+| Japanese | bundled UniDic + Viterbi (`segment::unidic`) | 84.4% |
+| optional | corpus unigram wordbank + Viterbi | 92.6% (Korean) |
+
+Feeding it lifted Japanese 86.6 → 94.5 and Korean 91.8 → 95.2.
+
+Two things this design gets right, both learned the hard way:
+
+* **A prior's worth is its precision, not its coverage.** A wordbank finds far more Korean
+  boundaries than whitespace does, and swapping it in *cost* 3.3 F1 — because whitespace is
+  never wrong and the bank is wrong 7% of the time, and both were encoded as the same
+  symbol. `B` now means "whitespace guarantees this", `B_SOFT` means "a dictionary proposes
+  this", so the model can trust one absolutely and weigh the other. Japanese inverts the
+  trade and still wins: worst precision of the three, but it is the only signal there is.
+* **Train and inference must share the implementation.** Training priors are precomputed by
+  the same Rust binary that runs at inference (`emit-priors --out`, read via
+  `PriorSidecar`), so the proposal distribution a model learns against cannot drift from the
+  one it later sees. It is also much faster than a Viterbi in every dataloader worker.
 
 ## Data
 
