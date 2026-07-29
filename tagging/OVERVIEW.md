@@ -156,6 +156,29 @@ extra embedding, summed into the byte embedding, +384 params:
 | before | 86.6 | 91.8 | 97.17 |
 | with prior | **94.5** | **95.2** | **98.66** |
 
+Those two rows are **not** a fair comparison, and the honest version is bigger. The 86.6 was
+scored against the *unmerged* Japanese gold the old model was trained for (食べ|まし|た);
+we then changed policy to merge a predicate with its auxiliary chain. Re-scoring both models
+on the same 150 validation sentences with the same code, against both policies:
+
+| model | vs merged gold (what we target) | vs unmerged gold |
+|---|---|---|
+| old, no prior at all | 74.57 | 82.30 |
+| curriculum model, no dictionary | 80.38 | 71.49 |
+| curriculum model, dictionary | **92.11** | 84.46 |
+
+Each model scores best against the policy it was trained for, which is what makes the
+headline pair misleading. Against the policy we actually target the work is worth
+**74.6 -> 92.1**, of which **+11.7 is the dictionary alone** (80.4 -> 92.1, same model, same
+gold, same sentences).
+
+**A caution on every number in this section.** byte-v12 and byte-v13 differ only in whether
+the inert `B_SOFT` symbol exists, yet they score jpn 93.06 and 90.94 — so run-to-run
+variance on Japanese is around **2 points**, and the per-language eval is 400 sentences.
+Single-run differences smaller than that (which is most of the ones recorded above) are not
+evidence of anything. The effects that survive this are the large ones: the prior itself,
+the dictionary, and the Korean wordbank regression.
+
 The rare-frequency error buckets collapse 2.4x. Two findings worth keeping:
 
 - **A prior helps only where the model has no other route to the answer.** Giving Korean a
