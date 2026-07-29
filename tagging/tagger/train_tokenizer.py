@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 from dataset import (CHAR_VOCAB_SIZE, CharBoundaryDataset, char_collate,
                      encode_bytes_and_labels, maybe_merge_inflection, read_jsonl)
 from model import CharBoundaryTagger
+from prior import PRIOR_VOCAB, prior_ids_for
 
 
 def spans_from_labels(labels):
@@ -63,7 +64,7 @@ def fmt_metrics(m):
 
 @torch.no_grad()
 def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
-             merge_inflection=True):
+             merge_inflection=True, use_prior=False):
     """Micro-averaged token-span F1 overall and per language."""
     model.eval()
     agg = dict(tp=0, fp=0, fn=0, bc=0, bt=0)
@@ -73,7 +74,11 @@ def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
         tokens = maybe_merge_inflection(r, merge_inflection)
         byte_ids, labels = encode_bytes_and_labels(r["text"], tokens, max_bytes, lang)
         x = torch.tensor([byte_ids], device=device)
-        pred = model(x)[0].argmax(-1).tolist()
+        p = None
+        if use_prior:
+            p = torch.tensor([prior_ids_for(r["text"], r.get("lang"), max_bytes)],
+                             device=device)
+        pred = model(x, p)[0].argmax(-1).tolist()
         gold_spans, pred_spans = spans_from_labels(labels), spans_from_labels(pred)
         counts = dict(
             tp=len(gold_spans & pred_spans),
@@ -122,6 +127,10 @@ def main():
                     action="store_false", default=True,
                     help="keep the old finer Japanese split (食べ|まし|た) instead of "
                          "merging a predicate with its auxiliary chain")
+    ap.add_argument("--use-prior", action="store_true",
+                    help="feed a per-byte boundary proposal alongside the bytes: "
+                         "whitespace for spaced languages, a dictionary+Viterbi "
+                         "analysis (fugashi/UniDic) for Japanese")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--wandb", action="store_true")
     args = ap.parse_args()
@@ -135,12 +144,14 @@ def main():
     print(f"train={len(train_records)} val={len(val_records)}")
 
     model = CharBoundaryTagger(vocab_size=CHAR_VOCAB_SIZE, emb_dim=args.emb_dim,
-                               hidden_dim=args.hidden, layers=args.layers).to(device)
+                               hidden_dim=args.hidden, layers=args.layers,
+                               prior_vocab=PRIOR_VOCAB if args.use_prior else 0).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"char tokenizer params: {n_params/1e6:.2f}M")
 
     ds = CharBoundaryDataset(train_records, args.max_bytes, lang_dropout=args.lang_dropout,
-                             merge_inflection=args.merge_inflection)
+                             merge_inflection=args.merge_inflection,
+                             use_prior=args.use_prior)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
                         collate_fn=char_collate, pin_memory=True, drop_last=True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -170,7 +181,8 @@ def main():
                 break
             byte_ids = batch["byte_ids"].to(device)
             labels = batch["labels"].to(device)
-            logits = model(byte_ids)
+            prior_ids = batch["prior_ids"].to(device) if "prior_ids" in batch else None
+            logits = model(byte_ids, prior_ids)
             loss = F.cross_entropy(logits.reshape(-1, 3), labels.reshape(-1), ignore_index=-100)
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite loss at step {step}")
@@ -185,7 +197,7 @@ def main():
                 print(f"[tok] step {step}/{total_steps} loss={run/args.log_every:.4f} ({sps:.1f} it/s)", flush=True)
                 run = 0.0
             if step % args.eval_every == 0 or (args.smoke and step == total_steps):
-                m = evaluate(model, val_records, device)
+                m = evaluate(model, val_records, device, use_prior=args.use_prior)
                 print(f"[tok] eval@{step} {fmt_metrics(m)}", flush=True)
                 if args.wandb:
                     import wandb
@@ -199,11 +211,11 @@ def main():
                     with open(os.path.join(args.out_dir, "meta.json"), "w") as f:
                         json.dump({"metrics": m, "step": step, "config": vars(args)}, f, indent=2)
 
-    m = evaluate(model, val_records, device)
+    m = evaluate(model, val_records, device, use_prior=args.use_prior)
     print(f"[tok] final {fmt_metrics(m)}", flush=True)
     if m["token_f1"] >= best:
         torch.save(model.state_dict(), os.path.join(args.out_dir, "tokenizer.pt"))
-    nl = evaluate(model, val_records, device, use_lang=False)
+    nl = evaluate(model, val_records, device, use_lang=False, use_prior=args.use_prior)
     print(f"[tok] final lang-free {fmt_metrics(nl)}", flush=True)
     print("done")
 

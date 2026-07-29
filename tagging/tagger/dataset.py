@@ -11,6 +11,8 @@ import random
 import torch
 from torch.utils.data import Dataset
 
+from prior import PRIOR_NONE, prior_ids_for
+
 
 def load_vocab(path):
     v = json.loads(open(path, encoding="utf-8").read())
@@ -236,7 +238,8 @@ def maybe_merge_inflection(record, enabled):
 
 
 class CharBoundaryDataset(Dataset):
-    def __init__(self, records, max_bytes=512, lang_dropout=None, merge_inflection=False):
+    def __init__(self, records, max_bytes=512, lang_dropout=None, merge_inflection=False,
+                 use_prior=False):
         """lang_dropout=None trains language-blind (generic BOS always, the pre-lang
         behavior); a float p trains language-conditioned, replacing the record's lang
         with the generic BOS with probability p so the model also works lang-free.
@@ -247,6 +250,7 @@ class CharBoundaryDataset(Dataset):
         self.max_bytes = max_bytes
         self.lang_dropout = lang_dropout
         self.merge_inflection = merge_inflection
+        self.use_prior = use_prior
 
     def __len__(self):
         return len(self.records)
@@ -258,7 +262,12 @@ class CharBoundaryDataset(Dataset):
             lang = r.get("lang")
         tokens = maybe_merge_inflection(r, self.merge_inflection)
         byte_ids, labels = encode_bytes_and_labels(r["text"], tokens, self.max_bytes, lang)
-        return {"byte_ids": byte_ids, "labels": labels}
+        item = {"byte_ids": byte_ids, "labels": labels}
+        if self.use_prior:
+            # the prior always knows the language — it is computed from the text we hold,
+            # not from the lang token the model may have had dropped out
+            item["prior_ids"] = prior_ids_for(r["text"], r.get("lang"), self.max_bytes)
+        return item
 
 
 def char_collate(batch):
@@ -266,8 +275,16 @@ def char_collate(batch):
     L = max(len(b["byte_ids"]) for b in batch)
     byte_ids = torch.full((B, L), PAD_BYTE, dtype=torch.long)
     labels = torch.full((B, L), -100, dtype=torch.long)
+    has_prior = "prior_ids" in batch[0]
+    prior_ids = torch.full((B, L), PRIOR_NONE, dtype=torch.long) if has_prior else None
     for i, b in enumerate(batch):
         n = len(b["byte_ids"])
         byte_ids[i, :n] = torch.tensor(b["byte_ids"])
         labels[i, :n] = torch.tensor(b["labels"])
-    return {"byte_ids": byte_ids, "labels": labels}
+        if has_prior:
+            p = b["prior_ids"]
+            prior_ids[i, :len(p)] = torch.tensor(p)
+    out = {"byte_ids": byte_ids, "labels": labels}
+    if has_prior:
+        out["prior_ids"] = prior_ids
+    return out

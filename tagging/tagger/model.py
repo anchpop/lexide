@@ -75,10 +75,14 @@ class CharBoundaryTagger(nn.Module):
     """
     LABELS = ["O", "B", "I"]
 
-    def __init__(self, vocab_size=259, emb_dim=64, hidden_dim=128, layers=3, dropout=0.1):
+    def __init__(self, vocab_size=259, emb_dim=64, hidden_dim=128, layers=3, dropout=0.1,
+                 prior_vocab=0):
         super().__init__()
         # vocab: 256 byte values + PAD(256) + BOS(257) + EOS(258)
         self.emb = nn.Embedding(vocab_size, emb_dim, padding_idx=256)
+        # Optional per-byte boundary proposal (see prior.py), added to the byte embedding.
+        # prior_vocab=0 adds no parameters at all, so pre-prior checkpoints load unchanged.
+        self.prior_emb = nn.Embedding(prior_vocab, emb_dim) if prior_vocab else None
         self.layers = nn.ModuleList()
         d = emb_dim
         for _ in range(layers):
@@ -88,8 +92,10 @@ class CharBoundaryTagger(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.out = nn.Linear(d, 3)
 
-    def forward(self, byte_ids):
+    def forward(self, byte_ids, prior_ids=None):
         h = self.emb(byte_ids)
+        if self.prior_emb is not None and prior_ids is not None:
+            h = h + self.prior_emb(prior_ids)
         for layer in self.layers:
             h = self.drop(layer(h))
         return self.out(self.norm(h))  # [B, L, 3]

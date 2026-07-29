@@ -28,6 +28,8 @@ setup: |
   fi
   python3 -c "import torch; assert torch.cuda.is_available(), 'torch still cannot see CUDA after setup'"
   pip install --quiet huggingface_hub 'numpy<2'
+  # Japanese boundary prior: a dictionary + Viterbi analyzer (see tagger/prior.py)
+  pip install --quiet fugashi unidic-lite
 
 run: |
   set -e
@@ -60,7 +62,7 @@ run: |
     echo "=== char tokenizer (long) ==="
     python3 tagger/train_tokenizer.py \
         --data-dir data/processed --out-dir output/tokenizer \
-        --epochs "${TOK_EPOCHS}" --batch-size "${TOK_BATCH}" --workers 8
+        --epochs "${TOK_EPOCHS}" --batch-size "${TOK_BATCH}" --workers 8 ${TOK_EXTRA}
     python3 tagger/hf_upload_run.py output/tokenizer tokenizer "${RUN_NAME}"
   fi
 
@@ -71,6 +73,7 @@ envs:
   SEG_EPOCHS: "3"
   TOK_EPOCHS: "2"
   TOK_BATCH: "256"
+  TOK_EXTRA: ""
   SKIP_SEG: "0"
   SKIP_TOK: "0"
   RUN_NAME: "byte-v6"
