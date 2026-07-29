@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from dataset import (CHAR_VOCAB_SIZE, CharBoundaryDataset, char_collate,
                      encode_bytes_and_labels, maybe_merge_inflection, read_jsonl)
 from model import CharBoundaryTagger
-from prior import PRIOR_VOCAB, prior_ids_for
+from prior import PRIOR_VOCAB, Wordbank, prior_ids_for
 
 
 def spans_from_labels(labels):
@@ -64,7 +64,7 @@ def fmt_metrics(m):
 
 @torch.no_grad()
 def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
-             merge_inflection=True, use_prior=False):
+             merge_inflection=True, use_prior=False, wordbank=None):
     """Micro-averaged token-span F1 overall and per language."""
     model.eval()
     agg = dict(tp=0, fp=0, fn=0, bc=0, bt=0)
@@ -76,8 +76,8 @@ def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
         x = torch.tensor([byte_ids], device=device)
         p = None
         if use_prior:
-            p = torch.tensor([prior_ids_for(r["text"], r.get("lang"), max_bytes)],
-                             device=device)
+            p = torch.tensor([prior_ids_for(r["text"], r.get("lang"), max_bytes,
+                                            wordbank=wordbank)], device=device)
         pred = model(x, p)[0].argmax(-1).tolist()
         gold_spans, pred_spans = spans_from_labels(labels), spans_from_labels(pred)
         counts = dict(
@@ -131,6 +131,10 @@ def main():
                     help="feed a per-byte boundary proposal alongside the bytes: "
                          "whitespace for spaced languages, a dictionary+Viterbi "
                          "analysis (fugashi/UniDic) for Japanese")
+    ap.add_argument("--prior-source", choices=["analyzer", "wordbank"], default="analyzer",
+                    help="Japanese proposal: fugashi/UniDic, or a unigram wordbank + "
+                         "Viterbi (~0.4MB, no analyzer dependency at inference)")
+    ap.add_argument("--wordbank", default="data/jpn_wordbank.tsv")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--wandb", action="store_true")
     args = ap.parse_args()
@@ -138,6 +142,13 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device={device}")
+
+    wordbank = None
+    if args.use_prior and args.prior_source == "wordbank":
+        wordbank = Wordbank.load(args.wordbank)
+        print(f"prior: unigram wordbank from {args.wordbank}")
+    elif args.use_prior:
+        print("prior: fugashi/UniDic analyzer")
 
     train_records = read_jsonl(os.path.join(args.data_dir, "train.jsonl"), args.train_limit)
     val_records = read_jsonl(os.path.join(args.data_dir, "val.jsonl"))
@@ -151,7 +162,7 @@ def main():
 
     ds = CharBoundaryDataset(train_records, args.max_bytes, lang_dropout=args.lang_dropout,
                              merge_inflection=args.merge_inflection,
-                             use_prior=args.use_prior)
+                             use_prior=args.use_prior, wordbank=wordbank)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
                         collate_fn=char_collate, pin_memory=True, drop_last=True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -197,7 +208,7 @@ def main():
                 print(f"[tok] step {step}/{total_steps} loss={run/args.log_every:.4f} ({sps:.1f} it/s)", flush=True)
                 run = 0.0
             if step % args.eval_every == 0 or (args.smoke and step == total_steps):
-                m = evaluate(model, val_records, device, use_prior=args.use_prior)
+                m = evaluate(model, val_records, device, use_prior=args.use_prior, wordbank=wordbank)
                 print(f"[tok] eval@{step} {fmt_metrics(m)}", flush=True)
                 if args.wandb:
                     import wandb
@@ -211,11 +222,11 @@ def main():
                     with open(os.path.join(args.out_dir, "meta.json"), "w") as f:
                         json.dump({"metrics": m, "step": step, "config": vars(args)}, f, indent=2)
 
-    m = evaluate(model, val_records, device, use_prior=args.use_prior)
+    m = evaluate(model, val_records, device, use_prior=args.use_prior, wordbank=wordbank)
     print(f"[tok] final {fmt_metrics(m)}", flush=True)
     if m["token_f1"] >= best:
         torch.save(model.state_dict(), os.path.join(args.out_dir, "tokenizer.pt"))
-    nl = evaluate(model, val_records, device, use_lang=False, use_prior=args.use_prior)
+    nl = evaluate(model, val_records, device, use_lang=False, use_prior=args.use_prior, wordbank=wordbank)
     print(f"[tok] final lang-free {fmt_metrics(nl)}", flush=True)
     print("done")
 

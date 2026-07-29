@@ -239,7 +239,7 @@ def maybe_merge_inflection(record, enabled):
 
 class CharBoundaryDataset(Dataset):
     def __init__(self, records, max_bytes=512, lang_dropout=None, merge_inflection=False,
-                 use_prior=False):
+                 use_prior=False, wordbank=None):
         """lang_dropout=None trains language-blind (generic BOS always, the pre-lang
         behavior); a float p trains language-conditioned, replacing the record's lang
         with the generic BOS with probability p so the model also works lang-free.
@@ -251,6 +251,7 @@ class CharBoundaryDataset(Dataset):
         self.lang_dropout = lang_dropout
         self.merge_inflection = merge_inflection
         self.use_prior = use_prior
+        self.wordbank = wordbank
 
     def __len__(self):
         return len(self.records)
@@ -266,7 +267,8 @@ class CharBoundaryDataset(Dataset):
         if self.use_prior:
             # the prior always knows the language — it is computed from the text we hold,
             # not from the lang token the model may have had dropped out
-            item["prior_ids"] = prior_ids_for(r["text"], r.get("lang"), self.max_bytes)
+            item["prior_ids"] = prior_ids_for(r["text"], r.get("lang"), self.max_bytes,
+                                              wordbank=self.wordbank)
         return item
 
 
