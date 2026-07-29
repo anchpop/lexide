@@ -76,15 +76,25 @@ class CharBoundaryTagger(nn.Module):
     LABELS = ["O", "B", "I"]
 
     def __init__(self, vocab_size=259, emb_dim=64, hidden_dim=128, layers=3, dropout=0.1,
-                 prior_vocab=0):
+                 prior_vocab=0, prior_mode="add", prior_dim=8):
         super().__init__()
         # vocab: 256 byte values + PAD(256) + BOS(257) + EOS(258)
         self.emb = nn.Embedding(vocab_size, emb_dim, padding_idx=256)
-        # Optional per-byte boundary proposal (see prior.py), added to the byte embedding.
-        # prior_vocab=0 adds no parameters at all, so pre-prior checkpoints load unchanged.
-        self.prior_emb = nn.Embedding(prior_vocab, emb_dim) if prior_vocab else None
-        self.layers = nn.ModuleList()
+        # Optional per-byte boundary proposal (see prior.py). prior_vocab=0 adds no
+        # parameters at all, so pre-prior checkpoints load unchanged.
+        #   "add"    — summed into the byte embedding, as BERT does with segment embeddings.
+        #              Shares the byte's 96 dims, so the table must keep the two separable.
+        #   "concat" — its own coordinates, so layer 0 weights the two signals independently
+        #              and cannot swamp the prior early in training. Widens layer 0 only.
+        self.prior_mode = prior_mode
+        self.prior_emb = None
         d = emb_dim
+        if prior_vocab:
+            width = emb_dim if prior_mode == "add" else prior_dim
+            self.prior_emb = nn.Embedding(prior_vocab, width)
+            if prior_mode == "concat":
+                d = emb_dim + prior_dim
+        self.layers = nn.ModuleList()
         for _ in range(layers):
             self.layers.append(BiMinGRU(d, hidden_dim))
             d = hidden_dim * 2
@@ -95,7 +105,8 @@ class CharBoundaryTagger(nn.Module):
     def forward(self, byte_ids, prior_ids=None):
         h = self.emb(byte_ids)
         if self.prior_emb is not None and prior_ids is not None:
-            h = h + self.prior_emb(prior_ids)
+            p = self.prior_emb(prior_ids)
+            h = h + p if self.prior_mode == "add" else torch.cat([h, p], dim=-1)
         for layer in self.layers:
             h = self.drop(layer(h))
         return self.out(self.norm(h))  # [B, L, 3]
