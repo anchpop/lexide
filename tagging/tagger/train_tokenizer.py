@@ -77,9 +77,15 @@ def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
         x = torch.tensor([byte_ids], device=device)
         p = None
         if use_prior:
+            # The prior sees the same language the *caller* would supply, so the lang-free
+            # eval measures what a lang-free caller actually gets. Passing r["lang"] here
+            # regardless — as this did — reported jpn 93.79 lang-free while real lang-free
+            # inference scored 22.4: whitespace on Japanese asserts the whole sentence is
+            # one word, and the model leans on the proposal hard enough to obey.
+            # prior.infer_lang recovers "jpn" from script, which is why the two now agree.
             ids = (sidecar[r["_idx"]] if sidecar is not None
-                   else prior_ids_for(r["text"], r.get("lang"), max_bytes,
-                                      wordbanks=wordbanks, soft=prior_soft))
+                   else prior_ids_for(r["text"], r.get("lang") if use_lang else None,
+                                      max_bytes, wordbanks=wordbanks, soft=prior_soft))
             p = torch.tensor([ids], device=device)
         pred = model(x, p)[0].argmax(-1).tolist()
         gold_spans, pred_spans = spans_from_labels(labels), spans_from_labels(pred)

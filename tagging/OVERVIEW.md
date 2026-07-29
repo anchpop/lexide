@@ -170,6 +170,28 @@ The rare-frequency error buckets collapse 2.4x. Two findings worth keeping:
   bank 92.6%), and the fix was to encode certain and proposed boundaries as different
   symbols. Measured, it does nothing — soft 91.80 vs hard 92.24 — so the precision story,
   however tidy, was not the operative cause.
+- **The prior is load-bearing, and that is a liability as much as a feature.** Measured on
+  the shipped v11 weights over 150 Japanese validation sentences:
+
+  | | jpn F1 |
+  |---|---|
+  | language token + dictionary prior | 93.33 |
+  | no language + dictionary prior | 93.19 |
+  | no language + whitespace prior | **22.41** |
+  | language token + whitespace prior | **21.17** |
+
+  Take the dictionary away and Japanese collapses by ~71 points — the language token cannot
+  rescue it. The model has not learned Japanese boundaries *plus* a hint; it has learned to
+  trust the hint. That is why `CharTokenizer::load` refuses a prior-trained checkpoint whose
+  prior data is missing instead of falling back to whitespace, and why a caller who supplies
+  no language gets one inferred from script (`prior.infer_lang`) rather than a whitespace
+  proposal that actively asserts the sentence is one word.
+
+  It also went unnoticed because the lang-free eval dropped the language *token* while still
+  handing the prior the true language, so it reported 93.79 for a configuration real callers
+  never saw. `evaluate()` now drops both. A training run that also dropped the prior's
+  language occasionally would make the failure graceful rather than catastrophic; that is
+  the obvious next change.
 - **The prior gets its own coordinates.** Layer 0 is linear, so adding the prior into the
   byte embedding computes `W(emb + prior)`, forcing it through the byte projection;
   concatenating computes `W_byte·emb + W_prior·prior`. With 5 prior symbols the narrow
