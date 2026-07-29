@@ -68,6 +68,17 @@ def export():
 
     pt = hf_hub_download("anchpop/lexide-parsley", "tokenizer/tokenizer.pt",
                          token=os.environ["HF_TOKEN"])
+    # The fixtures have to be generated with the *shipping* prior, or they are not a
+    # reference for what the Rust library does: it derives its proposal from this artifact,
+    # and a whitespace stand-in would disagree on every Japanese sentence. Downloaded
+    # rather than baked into the image so the export always matches what was published.
+    try:
+        unidic_path = hf_hub_download("anchpop/lexide-parsley", "onnx/jpn-unidic.bin",
+                                      token=os.environ["HF_TOKEN"])
+    except Exception as e:                       # noqa: BLE001 — pre-prior repos lack it
+        print(f"[load] no boundary-prior artifact on the hub ({e}); "
+              "Japanese fixtures will use whitespace")
+        unidic_path = None
     state = torch.load(pt, map_location="cpu")
     # Every dimension is recoverable from tensor shapes, so old 259-vocab and new
     # lang-token checkpoints both load without config guesswork.
@@ -95,6 +106,12 @@ def export():
     n = sum(v.numel() for v in flat.values())
     print(f"[export] char_tokenizer.safetensors: {len(flat)} tensors, {n/1e6:.2f}M params")
 
+    unidic = None
+    if prior_vocab and unidic_path:
+        from unidic import UniDic
+        unidic = UniDic.load(unidic_path)
+        print(f"[load] boundary prior: bundled UniDic ({os.path.getsize(unidic_path)/1048576:.0f}MB)")
+
     has_lang_tokens = model.emb.num_embeddings > 259
     fixtures = []
     with torch.no_grad():
@@ -104,16 +121,19 @@ def export():
                 for ch in text:
                     byte_ids.extend(ch.encode("utf-8"))
                 byte_ids.append(EOS_BYTE)
-                # The prior is *recorded* rather than recomputed on the Rust side, so this
-                # fixture tests the network math alone. That the two implementations agree
-                # on the prior itself is a separate, exhaustive check: `emit-priors` against
-                # tagger/prior.py over the whole val split. Whitespace is used here because
-                # the 83MB Japanese dictionary is not on the Modal image — the prior channel
-                # is exercised either way, which is what this test is for.
+                # The prior is recorded so the Rust test can isolate the network math,
+                # but it is computed from the same artifact the library reads — the test
+                # also asserts that Rust's *self-derived* prior reaches the same spans, and
+                # a whitespace stand-in here would fail that on every Japanese sentence.
+                # Computed from use_lang, not lang: at inference the prior only knows the
+                # language if the caller supplied one, so a language-free call gets the
+                # whitespace proposal even for Japanese. (Training differs — there the
+                # prior always knows the language, because we hold the record. The fixture
+                # has to mirror inference, which is what the Rust side does.)
                 prior = None
                 if prior_vocab:
-                    prior = prior_ids_for(text, lang, max_bytes=len(byte_ids),
-                                          wordbanks={})
+                    prior = prior_ids_for(text, use_lang, max_bytes=len(byte_ids),
+                                          wordbanks={}, unidic=unidic)
                     assert len(prior) == len(byte_ids), (len(prior), len(byte_ids))
                 logits = model(torch.tensor([byte_ids]),
                                torch.tensor([prior]) if prior else None)[0]

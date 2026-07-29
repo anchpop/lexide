@@ -282,6 +282,26 @@ class PriorSidecar:
         return list(self.mm[self.blob + a: self.blob + b])
 
 
+def infer_lang(text):
+    """Language for the *prior* when the caller supplied none.
+
+    Training always hands the prior the true language, even for the 15% of examples whose
+    language *token* is dropped — so "Japanese text with a whitespace proposal" is a
+    combination the model has never seen. At inference a caller may pass no language at
+    all, and whitespace on Japanese does not merely say nothing, it actively asserts that
+    the whole sentence is one word; the model, which has learned to lean on the proposal,
+    obeys. Measured on the shipped v11 weights, that collapses Japanese to a single token.
+
+    Script is enough to recover what the prior needs to know, so this restores the training
+    distribution rather than papering over it. It must stay identical to `infer_lang` in
+    segment/prior.rs.
+    """
+    for ch in text:
+        if _char_type(ch) in ("hiragana", "katakana", "kanji"):
+            return "jpn"
+    return None
+
+
 def char_prior(text, lang, tagger=None, wordbanks=None, unidic=None):
     """Best available proposal for this language.
 
@@ -291,6 +311,7 @@ def char_prior(text, lang, tagger=None, wordbanks=None, unidic=None):
     coverage against whitespace's 28.7% and 59.2%, so the remaining headroom is nil and the
     file is under a megabyte. Everything else keeps plain whitespace, which is exact.
     """
+    lang = lang or infer_lang(text)
     banks = wordbanks or {}
     wb = banks.get(lang) if isinstance(banks, dict) else banks
     if wb is not None:
@@ -364,5 +385,6 @@ def describe(text, lang):
 __all__ = ["PriorSidecar", "PRIOR_NONE", "PRIOR_O", "PRIOR_B", "PRIOR_I", "PRIOR_B_SOFT",
            "PRIOR_VOCAB",
            "char_prior", "encode_prior_bytes", "prior_ids_for", "proposal_spans",
-           "describe", "hard_starts", "whitespace_char_labels", "japanese_char_labels",
+           "describe", "hard_starts", "infer_lang", "whitespace_char_labels",
+           "japanese_char_labels",
            "Wordbank", "segment_constrained", "proposer_char_labels"]

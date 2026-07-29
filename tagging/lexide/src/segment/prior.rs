@@ -381,6 +381,28 @@ mod tests {
     }
 }
 
+/// Language for the *prior* when the caller supplied none.
+///
+/// Training always hands the prior the true language, even for the 15% of examples whose
+/// language *token* is dropped — so "Japanese text with a whitespace proposal" is a
+/// combination the model has never seen. A caller may pass no language at all, and
+/// whitespace on Japanese does not merely say nothing: it asserts that the whole sentence
+/// is one word, and the model, having learned to lean on the proposal, obeys. Measured on
+/// the v11 weights that collapses a Japanese sentence to a single token.
+///
+/// Script recovers what the prior needs, so this restores the training distribution rather
+/// than papering over it. Must stay identical to `infer_lang` in tagger/prior.py.
+pub fn infer_lang(text: &str) -> Option<&'static str> {
+    text.chars()
+        .any(|c| {
+            matches!(
+                CharType::of(c),
+                CharType::Hiragana | CharType::Katakana | CharType::Kanji
+            )
+        })
+        .then_some("jpn")
+}
+
 /// The proposal sources that ship with a model: the bundled UniDic for Japanese, plus a
 /// corpus wordbank for each language that has one.
 ///
@@ -435,8 +457,26 @@ impl PriorSet {
         }
     }
 
-    /// Per-byte prior ids for `text`, ready to hand to the model.
+    /// Per-byte prior ids for `text`, ready to hand to the model. A caller who supplies no
+    /// language gets one inferred from the script — see [`infer_lang`].
     pub fn ids(&self, text: &str, lang: Option<&str>, max_bytes: usize) -> Vec<u8> {
+        let lang = lang.or_else(|| infer_lang(text));
         prior_ids(text, self.for_lang(lang), max_bytes)
+    }
+}
+
+#[cfg(test)]
+mod infer_lang_tests {
+    use super::*;
+
+    #[test]
+    fn script_recovers_japanese_when_no_language_is_given() {
+        // kana or kanji is decisive; nothing else claims a language
+        assert_eq!(infer_lang("私は猫が好きです。"), Some("jpn"));
+        assert_eq!(infer_lang("ブロックチェーン"), Some("jpn"));
+        assert_eq!(infer_lang("漢字だけ"), Some("jpn"));
+        assert_eq!(infer_lang("Eine Fundgrube."), None);
+        assert_eq!(infer_lang("고양이가 좋아요."), None);
+        assert_eq!(infer_lang("мама"), None);
     }
 }
