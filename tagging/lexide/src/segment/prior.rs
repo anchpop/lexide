@@ -439,8 +439,19 @@ impl PriorSet {
 
     /// Per-byte prior ids for `text`, ready to hand to the model. A caller who supplies no
     /// language gets one inferred from the script — see [`infer_lang`].
+    ///
+    /// With no dictionary loaded, Japanese gets an all-`NONE` proposal rather than the
+    /// whitespace one. That distinction matters: whitespace on Japanese does not say "no
+    /// information", it asserts the entire run is a single word, and a model trained to
+    /// lean on the proposal will obey (measured: 21.2 F1 against 93.3). `NONE` says
+    /// nothing, which is a case the model is trained for — see `--prior-dropout`. This is
+    /// how a build with no room for the 87MB artifact, such as the wasm demo, degrades.
     pub fn ids(&self, text: &str, lang: Option<&str>, max_bytes: usize) -> Vec<u8> {
         let lang = lang.or_else(|| infer_lang(text));
+        if lang == Some("jpn") && self.unidic.is_none() && !self.banks.contains_key("jpn") {
+            let n = (text.len() + 2).min(max_bytes);
+            return vec![PRIOR_NONE; n];
+        }
         prior_ids(text, self.for_lang(lang), max_bytes)
     }
 }
@@ -458,5 +469,23 @@ mod infer_lang_tests {
         assert_eq!(infer_lang("Eine Fundgrube."), None);
         assert_eq!(infer_lang("고양이가 좋아요."), None);
         assert_eq!(infer_lang("мама"), None);
+    }
+}
+
+#[cfg(test)]
+mod priorset_tests {
+    use super::*;
+
+    #[test]
+    fn japanese_without_a_dictionary_says_nothing_rather_than_something_false() {
+        let empty = PriorSet::default();
+        // whitespace would mark the run as one token — an assertion, not an absence
+        let ids = empty.ids("これはペンです", Some("jpn"), 512);
+        assert!(ids.iter().all(|&p| p == PRIOR_NONE), "got {ids:?}");
+        // inferred from script too, with no language supplied
+        assert!(empty.ids("これはペンです", None, 512).iter().all(|&p| p == PRIOR_NONE));
+        // spaced languages still get their exact, free proposal
+        let deu = empty.ids("Ein Haus", Some("deu"), 512);
+        assert!(deu.contains(&PRIOR_B) && deu.contains(&PRIOR_O), "got {deu:?}");
     }
 }
