@@ -422,6 +422,18 @@ impl PriorSet {
         Ok(set)
     }
 
+    /// Install the Japanese dictionary after construction — for callers that fetch it
+    /// lazily rather than finding it on disk, such as the wasm demo, where 87MB is a
+    /// deliberate opt-in and only Japanese benefits.
+    pub fn set_unidic(&mut self, dict: UniDic) {
+        self.unidic = Some(dict);
+    }
+
+    /// Whether a Japanese proposal can be produced at all.
+    pub fn has_japanese(&self) -> bool {
+        self.unidic.is_some() || self.banks.contains_key("jpn")
+    }
+
     pub fn is_empty(&self) -> bool {
         self.unidic.is_none() && self.banks.is_empty()
     }
@@ -448,7 +460,7 @@ impl PriorSet {
     /// how a build with no room for the 87MB artifact, such as the wasm demo, degrades.
     pub fn ids(&self, text: &str, lang: Option<&str>, max_bytes: usize) -> Vec<u8> {
         let lang = lang.or_else(|| infer_lang(text));
-        if lang == Some("jpn") && self.unidic.is_none() && !self.banks.contains_key("jpn") {
+        if lang == Some("jpn") && !self.has_japanese() {
             let n = (text.len() + 2).min(max_bytes);
             return vec![PRIOR_NONE; n];
         }

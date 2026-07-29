@@ -133,7 +133,7 @@ impl BiMinGru {
 
 /// The full byte tagger: embedding, N BiMinGRU layers, LayerNorm, linear to O/B/I logits.
 pub struct ByteBioModel {
-    emb: Vec<f32>, // [VOCAB (+ n_langs), emb_dim]
+    emb: Vec<f32>, // [VOCAB + LANG_ORDER.len(), emb_dim]
     emb_dim: usize,
     /// Optional per-byte boundary-prior embedding (see [`super::prior`]). Absent on
     /// pre-prior checkpoints, which is why it is an Option rather than a zero row.
@@ -147,7 +147,6 @@ pub struct ByteBioModel {
     /// values a narrow dedicated channel can express anything the wide additive one could,
     /// so concat is strictly the more general of the two, and measured better.
     prior_dim: usize,
-    n_langs: usize, // 0 = language-blind checkpoint
     layers: Vec<BiMinGru>,
     norm_w: Vec<f32>,
     norm_b: Vec<f32>,
@@ -200,23 +199,20 @@ impl ByteBioModel {
         };
 
         let (emb_shape, emb) = tensor("emb.weight")?;
-        if emb_shape[0] < VOCAB || emb_shape[0] > VOCAB + LANG_ORDER.len() {
+        if emb_shape[0] != VOCAB + LANG_ORDER.len() {
             bail!(
-                "unexpected byte vocab size {} (expected {VOCAB}..={} — base vocab plus \
-                 optional language tokens)",
+                "unexpected byte vocab size {} (expected {} — base vocab plus one token \
+                 per language)",
                 emb_shape[0],
                 VOCAB + LANG_ORDER.len()
             );
         }
-        let n_langs = emb_shape[0] - VOCAB;
         let (prior_emb, prior_dim) = match st.tensor("prior_emb.weight") {
             Ok(_) => {
                 let (shape, w) = tensor("prior_emb.weight")?;
-                // Extra rows are fine: checkpoints trained before B_SOFT was dropped carry
-                // 5, and row 4 simply goes unused. Too few would be an out-of-range index.
-                if shape[0] < super::prior::PRIOR_VOCAB {
+                if shape[0] != super::prior::PRIOR_VOCAB {
                     bail!(
-                        "prior embedding has {} rows, need at least {}",
+                        "prior embedding has {} rows, expected {}",
                         shape[0],
                         super::prior::PRIOR_VOCAB
                     );
@@ -266,7 +262,6 @@ impl ByteBioModel {
             emb,
             prior_emb,
             prior_dim: if concat { prior_dim } else { 0 },
-            n_langs,
             layers,
             norm_w,
             norm_b,
@@ -295,11 +290,7 @@ impl ByteBioModel {
         lang: Option<&str>,
         prior: Option<&[u8]>,
     ) -> Vec<[f32; 3]> {
-        let first = lang
-            .and_then(lang_index)
-            .filter(|&i| i < self.n_langs)
-            .map(|i| VOCAB + i)
-            .unwrap_or(BOS_BYTE);
+        let first = lang.and_then(lang_index).map(|i| VOCAB + i).unwrap_or(BOS_BYTE);
         let mut ids: Vec<usize> = Vec::with_capacity(text.len() + 2);
         ids.push(first);
         ids.extend(text.as_bytes().iter().map(|&b| b as usize));

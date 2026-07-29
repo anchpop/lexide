@@ -21,6 +21,7 @@ mod unidic;
 
 use byte_bio::ByteBioModel;
 use prior::PriorSet;
+use unidic::UniDic;
 use wasm_bindgen::prelude::*;
 
 fn js_err(e: anyhow::Error) -> JsError {
@@ -35,12 +36,17 @@ const NO_PRIOR_LIMIT: usize = usize::MAX;
 pub struct Parsley {
     tokenizer: ByteBioModel,
     segmenter: ByteBioModel,
-    /// Empty: the browser has no room for the 87MB Japanese dictionary. Spaced languages
-    /// still get their exact whitespace proposal for free, and Japanese gets an all-NONE
-    /// one — "no information" rather than whitespace's false claim that the sentence is a
-    /// single word. Checkpoints trained with `--prior-dropout` handle that gracefully; a
-    /// checkpoint trained without it will segment Japanese poorly here, which is the
-    /// documented cost of running the demo without the dictionary.
+    /// Starts empty and can be given the Japanese dictionary via
+    /// [`Parsley::load_japanese_dictionary`]. Spaced languages need nothing loaded — their
+    /// proposal is whitespace, which is exact and free, and identical to what the server
+    /// pipeline uses. Only Japanese needs the 87MB artifact, which is why fetching it is
+    /// the caller's choice.
+    ///
+    /// Until it is loaded, Japanese gets an all-NONE proposal rather than the whitespace
+    /// one. Measured on a curriculum-trained checkpoint: 80.4 F1 with NONE against 33.5
+    /// with whitespace, because whitespace on a language with no spaces does not say "no
+    /// information", it asserts the sentence is a single token. With the dictionary
+    /// loaded it is 92.7.
     priors: PriorSet,
 }
 
@@ -54,6 +60,18 @@ impl Parsley {
             segmenter: ByteBioModel::from_bytes(segmenter_weights).map_err(js_err)?,
             priors: PriorSet::default(),
         })
+    }
+
+    /// Install the Japanese boundary dictionary (`onnx/jpn-unidic.bin`, ~87MB) fetched by
+    /// the page. Optional and only affects Japanese; everything else is already exact.
+    pub fn load_japanese_dictionary(&mut self, bytes: Vec<u8>) -> Result<(), JsError> {
+        self.priors.set_unidic(UniDic::from_bytes(bytes).map_err(js_err)?);
+        Ok(())
+    }
+
+    /// Whether the Japanese dictionary has been loaded.
+    pub fn has_japanese_dictionary(&self) -> bool {
+        self.priors.has_japanese()
     }
 
     /// Token `[start, end)` char spans as a JSON array of pairs. `lang` is an optional

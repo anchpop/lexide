@@ -133,6 +133,7 @@
         <option value="rus">lang: rus</option>
         <option value="spa">lang: spa</option>
       </select>
+      <button id="jpndict" title="japanese boundary dictionary — only affects japanese">jpn dict · 87mb</button>
       <a href="https://huggingface.co/anchpop/lexide-parsley" target="_blank" rel="noreferrer">model</a>
       <button id="theme"></button>
     </nav>
@@ -175,6 +176,32 @@ async function fetchWeights(name) {
   }
   throw new Error(`could not fetch ${name} locally or from hf`);
 }
+
+// The Japanese dictionary is opt-in: 87mb, and it is the only language it changes.
+// Without it Japanese still segments, just less accurately (the tokenizer is trained to
+// run with no proposal at all); every other language's proposal is whitespace, which
+// needs nothing downloaded and is already exact.
+const dictBtn = $("jpndict");
+let dictState = "off";
+function paintDict() {
+  const label = { off: "jpn dict · 87mb", loading: "jpn dict · loading", on: "jpn dict · on" }[dictState];
+  dictBtn.textContent = label;
+  dictBtn.disabled = dictState !== "off";
+}
+dictBtn.onclick = async () => {
+  if (dictState !== "off" || !parsley) return;
+  dictState = "loading";
+  paintDict();
+  try {
+    parsley.load_japanese_dictionary(await fetchWeights("jpn-unidic.bin"));
+    dictState = "on";
+    render();
+  } catch (e) {
+    dictState = "off";
+    $("stats").textContent = `jpn dict failed — ${String(e.message || e).toLowerCase()}`;
+  }
+  paintDict();
+};
 
 const DEFAULT_TEXT = `Dr. Smith arrived at 3 p.m. — he wasn't late. "Is this the place?" she asked. ¿Por qué se menciona "¿Dónde está la biblioteca?" en tantas películas/series de televisión?`;
 
@@ -296,6 +323,7 @@ try {
     fetchWeights("sentence_segmenter.safetensors"),
   ]);
   parsley = new Parsley(tokW, segW);
+  paintDict();
   $("input").value = DEFAULT_TEXT;
   render();
 } catch (e) {

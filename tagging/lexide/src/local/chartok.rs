@@ -123,10 +123,14 @@ mod tests {
                 .map(|s| (s[0].as_u64().unwrap() as usize, s[1].as_u64().unwrap() as usize))
                 .collect();
 
-            // Prior-trained checkpoints record the prior they were scored with.
-            let prior: Option<Vec<u8>> = fx.get("prior_ids").and_then(|v| v.as_array()).map(
-                |a| a.iter().map(|v| v.as_u64().unwrap() as u8).collect(),
-            );
+            // Every checkpoint we ship carries a prior, so the fixture must record one.
+            let prior: Vec<u8> = fx["prior_ids"]
+                .as_array()
+                .expect("fixture predates the boundary prior — re-export it")
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect();
+            let prior = Some(prior);
             let logits = tok.logits_with_prior(text, lang, prior.as_deref());
             let labels: Vec<u8> = logits.iter().map(argmax3).collect();
             assert_eq!(labels, want_labels, "byte labels diverge for {text:?}");
@@ -144,13 +148,11 @@ mod tests {
             // handed one, must reach the same answer. This is the link the recorded prior
             // deliberately does not test: that the Rust proposal matches the Python one
             // the model was scored against, dictionary and all.
-            if prior.is_some() {
-                assert_eq!(
-                    tok.segment(text, lang),
-                    want_spans,
-                    "self-computed prior diverges from the recorded one for {text:?}"
-                );
-            }
+            assert_eq!(
+                tok.segment(text, lang),
+                want_spans,
+                "self-computed prior diverges from the recorded one for {text:?}"
+            );
 
             let want_first: Vec<f32> = fx["first_logits"]
                 .as_array()
