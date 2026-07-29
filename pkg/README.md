@@ -1,7 +1,7 @@
 # parsley web demo — sentence segmentation + tokenization in the browser
 
 A static page that runs the two byte-minGRU models (the sentence segmenter and
-the char tokenizer, ~0.31M params / 1.3 MB each) fully in-browser via WASM.
+the char tokenizer, 0.99M params / 3.96 MB each) fully in-browser via WASM.
 Paste a passage: it's split into sentences (gaps between them shown dropped),
 and each sentence into token spans — the same `[BOS] + utf8 + [EOS]` O/B/I
 pipeline as `lexide/src/local/`, reusing that crate's `byte_bio.rs` verbatim
@@ -24,4 +24,4 @@ The page loads the weights from its own directory, falling back to
 `www/` works even without the local artifacts (or hosted anywhere static).
 
 `wasm-pack` comes from the yap flake (`direnv exec /data/coding/yap`); the
-wasm binary is ~150 KB.
+wasm binary is ~195 KB.

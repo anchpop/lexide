@@ -5,6 +5,15 @@ export class Parsley {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Whether the Japanese dictionary has been loaded.
+     */
+    has_japanese_dictionary(): boolean;
+    /**
+     * Install the Japanese boundary dictionary (`onnx/jpn-unidic.bin`, ~87MB) fetched by
+     * the page. Optional and only affects Japanese; everything else is already exact.
+     */
+    load_japanese_dictionary(bytes: Uint8Array): void;
+    /**
      * Build from the two safetensors artifacts (fetched by the page).
      */
     constructor(tokenizer_weights: Uint8Array, segmenter_weights: Uint8Array);
@@ -24,6 +33,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_parsley_free: (a: number, b: number) => void;
+    readonly parsley_has_japanese_dictionary: (a: number) => number;
+    readonly parsley_load_japanese_dictionary: (a: number, b: number, c: number) => [number, number];
     readonly parsley_new: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly parsley_sentence_spans: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly parsley_token_spans: (a: number, b: number, c: number, d: number, e: number) => [number, number];

@@ -12,6 +12,27 @@ export class Parsley {
         wasm.__wbg_parsley_free(ptr, 0);
     }
     /**
+     * Whether the Japanese dictionary has been loaded.
+     * @returns {boolean}
+     */
+    has_japanese_dictionary() {
+        const ret = wasm.parsley_has_japanese_dictionary(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Install the Japanese boundary dictionary (`onnx/jpn-unidic.bin`, ~87MB) fetched by
+     * the page. Optional and only affects Japanese; everything else is already exact.
+     * @param {Uint8Array} bytes
+     */
+    load_japanese_dictionary(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.parsley_load_japanese_dictionary(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * Build from the two safetensors artifacts (fetched by the page).
      * @param {Uint8Array} tokenizer_weights
      * @param {Uint8Array} segmenter_weights
