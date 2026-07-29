@@ -158,12 +158,23 @@ extra embedding, summed into the byte embedding, +384 params:
 
 The rare-frequency error buckets collapse 2.4x. Two findings worth keeping:
 
-- **Precision, not coverage, is what a prior is worth.** Replacing Korean whitespace with a
-  wordbank raised boundary *recall* from 62.6% to 98.9% and **cost 3.3 F1** — because
-  whitespace is right 100% of the time and the bank 92.6%, and both were encoded as the same
-  symbol, forcing one averaged trust level. `B` (certain) and `B_SOFT` (proposed) are now
-  distinct. Japanese takes the opposite trade knowingly: its analyzer has the worst precision
-  of the three sources and still wins, because it is the only signal there is.
+- **A prior helps only where the model has no other route to the answer.** Giving Korean a
+  wordbank raises boundary recall from 62.6% to 98.9% — strictly more information — and
+  **costs 5.6 F1** (97.74 -> 92.2 on the jpn+kor harness). With whitespace anchors and 96k
+  sentences the model already reads eojeol-internal splits from context better than a unigram
+  Viterbi proposes them, so the bank only supplies a confident-looking opinion to defer to.
+  Japanese has no anchor and genuinely lacks the lexicon, which is why the same mechanism is
+  worth ~8 F1 there. Korean and Hindi therefore ship with plain whitespace.
+
+  Worth recording as a wrong turn: the first diagnosis was *precision* (whitespace 100%,
+  bank 92.6%), and the fix was to encode certain and proposed boundaries as different
+  symbols. Measured, it does nothing — soft 91.80 vs hard 92.24 — so the precision story,
+  however tidy, was not the operative cause.
+- **The prior gets its own coordinates.** Layer 0 is linear, so adding the prior into the
+  byte embedding computes `W(emb + prior)`, forcing it through the byte projection;
+  concatenating computes `W_byte·emb + W_prior·prior`. With 5 prior symbols the narrow
+  dedicated channel expresses everything the wide additive one could, without perturbing
+  byte identity. +0.33 F1 for 5,792 params.
 - **The Japanese dictionary is bundled, not a dependency.** MeCab's Viterbi is reimplemented
   in Rust over a packed 83MB UniDic artifact (570k surfaces, the full 5981x5981 connection
   matrix, unk.def unknown-word rules), reproducing fugashi's segmentation exactly on the test

@@ -61,12 +61,24 @@ Feeding it lifted Japanese 86.6 → 94.5 and Korean 91.8 → 95.2.
 
 Two things this design gets right, both learned the hard way:
 
-* **A prior's worth is its precision, not its coverage.** A wordbank finds far more Korean
-  boundaries than whitespace does, and swapping it in *cost* 3.3 F1 — because whitespace is
-  never wrong and the bank is wrong 7% of the time, and both were encoded as the same
-  symbol. `B` now means "whitespace guarantees this", `B_SOFT` means "a dictionary proposes
-  this", so the model can trust one absolutely and weigh the other. Japanese inverts the
-  trade and still wins: worst precision of the three, but it is the only signal there is.
+* **A prior only helps where the model has no other route to the answer.** Giving Korean a
+  wordbank raises boundary *recall* from 62.6% to 98.9% — strictly more information than
+  whitespace alone — and costs **5.6 F1** (97.74 -> 92.2). The model, with whitespace anchors
+  and 96k sentences, already infers eojeol-internal splits from context better than a unigram
+  Viterbi proposes them, so the bank only adds a confident-looking opinion to partly defer
+  to. Japanese has no anchor and genuinely lacks the lexicon, which is why the same mechanism
+  is worth ~8 F1 there. Coverage is not the test; marginal information is.
+
+  A caveat on how this was diagnosed: the first explanation was precision (whitespace is
+  100% right, the bank 92.6%), and the fix was to encode "certain" and "proposed" as
+  different symbols (`B` / `B_SOFT`). That was measured and **it does not work** — soft
+  scores 91.80 against hard's 92.24, and the gap to whitespace stays. The symbol is kept
+  because Japanese uses it and it costs one embedding row, not because it earned its keep.
+* **The prior gets its own coordinates, not the byte's.** Layer 0 is linear, so summing the
+  prior into the byte embedding computes `W(emb + prior)` — the prior's contribution is
+  forced through the *byte* projection. Concatenating computes `W_byte·emb + W_prior·prior`,
+  which with only 5 prior symbols can express anything the additive form could and cannot
+  perturb byte identity. Worth +0.33 F1 for 5,792 params (`--prior-mode concat`).
 * **Train and inference must share the implementation.** Training priors are precomputed by
   the same Rust binary that runs at inference (`emit-priors --out`, read via
   `PriorSidecar`), so the proposal distribution a model learns against cannot drift from the

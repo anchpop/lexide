@@ -135,10 +135,18 @@ impl BiMinGru {
 pub struct ByteBioModel {
     emb: Vec<f32>, // [VOCAB (+ n_langs), emb_dim]
     emb_dim: usize,
-    /// Optional per-byte boundary-prior embedding (see [`super::prior`]), summed into the
-    /// byte embedding as BERT does with segment embeddings. Absent on pre-prior
-    /// checkpoints, which is why it is an Option rather than a zero row.
+    /// Optional per-byte boundary-prior embedding (see [`super::prior`]). Absent on
+    /// pre-prior checkpoints, which is why it is an Option rather than a zero row.
     prior_emb: Option<Vec<f32>>,
+    /// Width of a prior row. Under `add` this equals `emb_dim` and the row is summed into
+    /// the byte embedding; under `concat` it is narrower and gets its own coordinates.
+    ///
+    /// Layer 0 is linear, so add computes `W(emb + prior)` — the prior's contribution is
+    /// forced through the *byte* projection — while concat computes
+    /// `W_byte·emb + W_prior·prior` with an independent one. With only PRIOR_VOCAB distinct
+    /// values a narrow dedicated channel can express anything the wide additive one could,
+    /// so concat is strictly the more general of the two, and measured better.
+    prior_dim: usize,
     n_langs: usize, // 0 = language-blind checkpoint
     layers: Vec<BiMinGru>,
     norm_w: Vec<f32>,
@@ -201,17 +209,9 @@ impl ByteBioModel {
             );
         }
         let n_langs = emb_shape[0] - VOCAB;
-        let prior_emb = match st.tensor("prior_emb.weight") {
+        let (prior_emb, prior_dim) = match st.tensor("prior_emb.weight") {
             Ok(_) => {
                 let (shape, w) = tensor("prior_emb.weight")?;
-                if shape[1] != emb_shape[1] {
-                    bail!(
-                        "prior embedding is {}-wide but the byte embedding is {} — this is a \
-                         concat-mode checkpoint, which this runtime does not implement",
-                        shape[1],
-                        emb_shape[1]
-                    );
-                }
                 if shape[0] != super::prior::PRIOR_VOCAB {
                     bail!(
                         "prior embedding has {} rows, expected {}",
@@ -219,9 +219,9 @@ impl ByteBioModel {
                         super::prior::PRIOR_VOCAB
                     );
                 }
-                Some(w)
+                (Some(w), shape[1])
             }
-            Err(_) => None,
+            Err(_) => (None, 0),
         };
         let mut layers = Vec::new();
         for i in 0.. {
@@ -242,14 +242,28 @@ impl ByteBioModel {
         if layers.is_empty() {
             bail!("byte-minGRU weights contain no BiMinGRU layers");
         }
+        // Layer 0's input width is the ground truth for how the prior enters: equal to the
+        // byte embedding means the prior was summed in, wider means it was concatenated.
+        // Deriving it from the weights rather than a stored flag means a checkpoint cannot
+        // be loaded in the wrong mode.
+        let in0 = layers[0].fwd.to_z.in_dim;
+        let emb_dim = emb_shape[1];
+        let concat = prior_emb.is_some() && in0 == emb_dim + prior_dim;
+        if prior_emb.is_some() && !concat && in0 != emb_dim {
+            bail!(
+                "layer 0 takes {in0} inputs, but the byte embedding is {emb_dim} and the \
+                 prior embedding {prior_dim} — neither additive nor concatenated"
+            );
+        }
         let (_, norm_w) = tensor("norm.weight")?;
         let (_, norm_b) = tensor("norm.bias")?;
         let out = linear("out")?;
 
         Ok(Self {
-            emb_dim: emb_shape[1],
+            emb_dim,
             emb,
             prior_emb,
+            prior_dim: if concat { prior_dim } else { 0 },
             n_langs,
             layers,
             norm_w,
@@ -290,18 +304,35 @@ impl ByteBioModel {
         ids.push(EOS_BYTE);
         let len = ids.len();
 
-        let mut h: Vec<f32> = Vec::with_capacity(len * self.emb_dim);
-        for id in ids {
+        // a short or absent prior reads as NONE rather than shifting the alignment
+        let prior_row = |t: usize| -> usize {
+            prior
+                .and_then(|p| p.get(t))
+                .copied()
+                .unwrap_or(super::prior::PRIOR_NONE) as usize
+        };
+        let d0 = self.emb_dim + self.prior_dim;
+        let mut h: Vec<f32> = Vec::with_capacity(len * d0);
+        for (t, id) in ids.into_iter().enumerate() {
             h.extend_from_slice(&self.emb[id * self.emb_dim..(id + 1) * self.emb_dim]);
-        }
-        if let (Some(pe), Some(prior)) = (&self.prior_emb, prior) {
-            for t in 0..len {
-                // a short prior is padded with NONE rather than misaligned
-                let row = *prior.get(t).unwrap_or(&super::prior::PRIOR_NONE) as usize;
-                let src = &pe[row * self.emb_dim..(row + 1) * self.emb_dim];
-                for (dst, v) in h[t * self.emb_dim..(t + 1) * self.emb_dim].iter_mut().zip(src) {
-                    *dst += v;
+            match (&self.prior_emb, self.prior_dim) {
+                // concat: the prior gets its own coordinates after the byte's
+                (Some(pe), pd) if pd > 0 => {
+                    let row = prior_row(t);
+                    h.extend_from_slice(&pe[row * pd..(row + 1) * pd]);
                 }
+                // add: summed into the byte embedding it shares dimensions with
+                (Some(pe), _) => {
+                    let row = prior_row(t);
+                    let base = t * self.emb_dim;
+                    for (dst, v) in h[base..base + self.emb_dim]
+                        .iter_mut()
+                        .zip(&pe[row * self.emb_dim..(row + 1) * self.emb_dim])
+                    {
+                        *dst += v;
+                    }
+                }
+                (None, _) => {}
             }
         }
         for layer in &self.layers {
