@@ -449,3 +449,70 @@ mod tests {
         assert_eq!(spans_from_byte_labels("яб", &labels), vec![(0, 2)]);
     }
 }
+
+#[cfg(test)]
+mod prior_parity_tests {
+    use super::*;
+    use crate::segment::prior::PRIOR_NONE as PRIOR_NONE_U8;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    }
+
+    /// Bit-parity against PyTorch for a *concat-mode* prior checkpoint.
+    ///
+    /// The released fixtures come from whatever checkpoint shipped last, so until a concat
+    /// model ships they cannot cover this path. These come instead from a small
+    /// randomly-initialised concat model, committed (36KB) so the test never silently
+    /// skips. Small as it is, it catches what actually goes wrong here: the layer-0 input
+    /// assembled in the wrong order, the prior row indexed by the wrong stride, or the mode
+    /// mis-inferred from the weights.
+    #[test]
+    fn concat_prior_matches_pytorch() {
+        let model = ByteBioModel::load(&fixture("concat_parity.safetensors")).unwrap();
+        assert!(model.wants_prior(), "fixture model should carry a prior embedding");
+        assert!(model.prior_dim > 0, "should have loaded in concat mode, not add");
+
+        let cases: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(fixture("concat_parity.json")).unwrap(),
+        )
+        .unwrap();
+        for c in cases.as_array().unwrap() {
+            let text = c["text"].as_str().unwrap();
+            let lang = c.get("lang").and_then(|v| v.as_str());
+            let prior: Vec<u8> = c["prior_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect();
+            let want = c["logits"].as_array().unwrap();
+            let got = model.logits_with_prior(text, lang, Some(&prior));
+
+            // Guard against a vacuous pass: if the prior were being dropped on the floor,
+            // every comparison below would still succeed for a model that ignores it. A
+            // perturbed prior must move the logits.
+            if prior.iter().any(|&p| p != PRIOR_NONE_U8) {
+                let blanked = vec![PRIOR_NONE_U8; prior.len()];
+                let other = model.logits_with_prior(text, lang, Some(&blanked));
+                let moved = got
+                    .iter()
+                    .zip(&other)
+                    .any(|(a, b)| a.iter().zip(b).any(|(x, y)| (x - y).abs() > 1e-4));
+                assert!(moved, "prior had no effect on the logits for {text:?}");
+            }
+            assert_eq!(got.len(), want.len(), "length diverges for {text:?}");
+            for (t, (g, w)) in got.iter().zip(want).enumerate() {
+                for (j, gv) in g.iter().enumerate() {
+                    let wv = w[j].as_f64().unwrap() as f32;
+                    assert!(
+                        (gv - wv).abs() < 1e-3,
+                        "logits diverge for {text:?} lang={lang:?} at position {t}: \
+                         {g:?} vs {w:?}"
+                    );
+                }
+            }
+        }
+    }
+}
