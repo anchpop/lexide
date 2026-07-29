@@ -296,9 +296,15 @@ def main():
                 print(f"[tok] step {step}/{total_steps} loss={run/args.log_every:.4f} ({sps:.1f} it/s)", flush=True)
                 run = 0.0
             if step % args.eval_every == 0 or (args.smoke and step == total_steps):
-                m = evaluate(model, val_records, device, use_prior=args.use_prior, wordbanks=wordbanks,
-                     prior_soft=args.prior_soft, sidecar=val_side)
-                print(f"[tok] eval@{step} {fmt_metrics(m)}", flush=True)
+                # Mirror the training configuration. During warmup the model has only ever
+                # seen a generic BOS and a blank proposal, so scoring it with the language
+                # token and the real prior measures a combination it has never been shown —
+                # it reads as a catastrophic F1 while the loss falls perfectly normally.
+                m = evaluate(model, val_records, device, use_prior=args.use_prior,
+                             wordbanks=wordbanks, prior_soft=args.prior_soft,
+                             sidecar=val_side, use_lang=not warm, blank_prior=warm)
+                tag = " (warmup: no lang, blank prior)" if warm else ""
+                print(f"[tok] eval@{step}{tag} {fmt_metrics(m)}", flush=True)
                 if args.wandb:
                     import wandb
                     flat = {f"tok/{k}": v for k, v in m.items() if k != "per_lang"}
