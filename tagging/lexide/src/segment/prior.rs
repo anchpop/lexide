@@ -21,11 +21,18 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 /// Per-byte prior ids. NONE covers BOS/EOS/padding, so 0 is a safe fill.
+///
+/// `B` and `B_SOFT` are separate because a prior's worth is its precision, not its
+/// coverage. Whitespace marks a real Korean boundary 100% of the time; a Viterbi bank
+/// finds far more boundaries and is right 92.6% of the time. Encoding both as one symbol
+/// forces a single average trust level, and measurably cost 3.3 F1 on Korean when a bank
+/// replaced whitespace. Kept apart, the model can trust one absolutely and weigh the other.
 pub const PRIOR_NONE: u8 = 0;
 pub const PRIOR_O: u8 = 1;
 pub const PRIOR_B: u8 = 2;
 pub const PRIOR_I: u8 = 3;
-pub const PRIOR_VOCAB: usize = 4;
+pub const PRIOR_B_SOFT: u8 = 4;
+pub const PRIOR_VOCAB: usize = 5;
 
 /// Character classes, following MeCab's `char.def`: a run of one script is usually one
 /// word. The limit is how long an *unknown* run of that class may be grouped into a single
@@ -187,9 +194,23 @@ impl Wordbank {
 
     fn char_labels(&self, chars: &[char]) -> Vec<u8> {
         let mut out = vec![PRIOR_O; chars.len()];
+        // a whitespace-delimited run start is a boundary whitespace vouches for; splits
+        // Viterbi proposes inside the run are suggestions
+        let mut hard = vec![false; chars.len()];
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i].is_whitespace() {
+                i += 1;
+                continue;
+            }
+            hard[i] = true;
+            while i < chars.len() && !chars[i].is_whitespace() {
+                i += 1;
+            }
+        }
         for (a, b) in self.segment_constrained(chars) {
             if chars[a..b].iter().any(|c| !c.is_whitespace()) {
-                out[a] = PRIOR_B;
+                out[a] = if hard[a] { PRIOR_B } else { PRIOR_B_SOFT };
                 for slot in out.iter_mut().take(b).skip(a + 1) {
                     *slot = PRIOR_I;
                 }
@@ -232,7 +253,11 @@ pub fn prior_ids(text: &str, wordbank: Option<&Wordbank>, max_bytes: usize) -> V
         let n_bytes = ch.len_utf8();
         ids.push(lab);
         if n_bytes > 1 {
-            let cont = if lab == PRIOR_B || lab == PRIOR_I { PRIOR_I } else { PRIOR_O };
+            let cont = if lab == PRIOR_B || lab == PRIOR_I || lab == PRIOR_B_SOFT {
+                PRIOR_I
+            } else {
+                PRIOR_O
+            };
             for _ in 1..n_bytes {
                 ids.push(cont);
             }
@@ -254,7 +279,7 @@ pub fn proposal_spans(text: &str, wordbank: Option<&Wordbank>) -> Vec<(usize, us
             let mut start: Option<usize> = None;
             for (i, &lab) in labels.iter().enumerate() {
                 match lab {
-                    PRIOR_B => {
+                    PRIOR_B | PRIOR_B_SOFT => {
                         if let Some(s) = start {
                             spans.push((s, i));
                         }

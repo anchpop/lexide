@@ -40,8 +40,15 @@ def _char_type(ch):
 
 
 # Per-byte prior ids. NONE covers BOS/EOS/padding, so 0 is a safe fill.
-PRIOR_NONE, PRIOR_O, PRIOR_B, PRIOR_I = 0, 1, 2, 3
-PRIOR_VOCAB = 4
+#
+# B_HARD and B_SOFT exist because a prior's usefulness is precision, not coverage.
+# Whitespace in Korean marks a real gold boundary 100% of the time; a Viterbi bank finds
+# far more boundaries but is right 92.6% of the time. Encoding both as one symbol forces
+# the model to learn a single average trust level — and measurably cost 3.3 F1 on Korean
+# when a bank replaced whitespace. Separating them lets it trust the certain boundary
+# absolutely and treat the proposed one as a suggestion.
+PRIOR_NONE, PRIOR_O, PRIOR_B, PRIOR_I, PRIOR_B_SOFT = 0, 1, 2, 3, 4
+PRIOR_VOCAB = 5
 
 _TAGGER = None
 
@@ -193,10 +200,20 @@ class Wordbank:
         return spans
 
     def char_labels(self, text):
+        """B_HARD where whitespace guarantees a boundary, B_SOFT where Viterbi proposes one."""
         out = [PRIOR_O] * len(text)
+        hard = set()
+        i, n = 0, len(text)
+        while i < n:
+            if text[i].isspace():
+                i += 1
+                continue
+            hard.add(i)                       # a run start is a boundary whitespace vouches for
+            while i < n and not text[i].isspace():
+                i += 1
         for a, b in self.segment_constrained(text):
             if text[a:b].strip():
-                out[a] = PRIOR_B
+                out[a] = PRIOR_B if a in hard else PRIOR_B_SOFT
                 for k in range(a + 1, b):
                     out[k] = PRIOR_I
         return out
@@ -235,7 +252,7 @@ def encode_prior_bytes(text, char_labels, max_bytes=512):
         n_bytes = len(ch.encode("utf-8"))
         ids.append(lab)
         if n_bytes > 1:
-            cont = PRIOR_I if lab in (PRIOR_B, PRIOR_I) else PRIOR_O
+            cont = PRIOR_I if lab in (PRIOR_B, PRIOR_I, PRIOR_B_SOFT) else PRIOR_O
             ids.extend([cont] * (n_bytes - 1))
     ids.append(PRIOR_NONE)
     return ids[:max_bytes]
@@ -251,7 +268,7 @@ def proposal_spans(text, lang, tagger=None, wordbanks=None):
     labels = char_prior(text, lang, tagger, wordbanks)
     spans, start = [], None
     for i, lab in enumerate(labels):
-        if lab == PRIOR_B:
+        if lab in (PRIOR_B, PRIOR_B_SOFT):
             if start is not None:
                 spans.append((start, i))
             start = i
@@ -269,6 +286,7 @@ def describe(text, lang):
     return "|".join(text[a:b] for a, b in proposal_spans(text, lang))
 
 
-__all__ = ["PRIOR_NONE", "PRIOR_O", "PRIOR_B", "PRIOR_I", "PRIOR_VOCAB",
+__all__ = ["PRIOR_NONE", "PRIOR_O", "PRIOR_B", "PRIOR_I", "PRIOR_B_SOFT",
+           "PRIOR_VOCAB",
            "char_prior", "encode_prior_bytes", "prior_ids_for", "proposal_spans",
            "describe", "whitespace_char_labels", "japanese_char_labels", "Wordbank"]
