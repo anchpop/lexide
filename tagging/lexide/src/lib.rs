@@ -8,7 +8,7 @@ pub mod pos;
 #[cfg(feature = "local")]
 mod local;
 #[cfg(feature = "segment")]
-mod segment;
+pub mod segment;
 #[cfg(any(feature = "local", feature = "remote"))]
 mod raw;
 #[cfg(feature = "remote")]

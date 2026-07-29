@@ -11,6 +11,11 @@ name = "lexide"
 path = "src/lib.rs"
 
 [[bin]]
+name = "emit-priors"
+path = "src/bin/emit_priors.rs"
+required-features = ["segment"]
+
+[[bin]]
 name = "build-lemma-fst"
 path = "src/bin/build_lemma_fst.rs"
 required-features = ["local"]

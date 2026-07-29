@@ -107,7 +107,10 @@ class Wordbank:
         import math
         total = sum(counts.values()) or 1
         self.cost = {w: -math.log(c / total) for w, c in counts.items()}
-        self.max_len = max((len(w) for w in counts), default=1)
+        # also admit an unknown run at its full grouped length, or the longest
+        # known entry silently caps how much unseen katakana can be one proposal
+        self.max_len = max(max((len(w) for w in counts), default=1),
+                           max(_UNK_MAX_LEN.values()))
         self.unk = -math.log(1 / (total * 100))
         # a longer unknown run costs a little more, but far less than one
         # unknown token per character
