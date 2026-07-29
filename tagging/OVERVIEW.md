@@ -168,8 +168,14 @@ The rare-frequency error buckets collapse 2.4x. Two findings worth keeping:
 
   Worth recording as a wrong turn: the first diagnosis was *precision* (whitespace 100%,
   bank 92.6%), and the fix was to encode certain and proposed boundaries as different
-  symbols. Measured, it does nothing — soft 91.80 vs hard 92.24 — so the precision story,
-  however tidy, was not the operative cause.
+  symbols (`B` / `B_SOFT`). Measured, it does nothing — soft 91.80 vs hard 92.24. Counting
+  the symbols shows why: with no wordbanks shipped, `B_SOFT` appears only in Japanese, where
+  a sentence is one whitespace-free run, so the first token is `B` and all the rest are
+  `B_SOFT` (1.07 `B` per sentence). It encodes "not sentence-initial", and across languages
+  "is Japanese" — which the language token already says. There was never any signal in it to
+  measure. It would carry information for a language with both whitespace and a dictionary,
+  which is the configuration this same measurement rejects. Drop to `PRIOR_VOCAB=4` at the
+  next retrain.
 - **The prior is load-bearing, and that is a liability as much as a feature.** Measured on
   the shipped v11 weights over 150 Japanese validation sentences:
 

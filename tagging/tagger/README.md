@@ -71,9 +71,22 @@ Two things this design gets right, both learned the hard way:
 
   A caveat on how this was diagnosed: the first explanation was precision (whitespace is
   100% right, the bank 92.6%), and the fix was to encode "certain" and "proposed" as
-  different symbols (`B` / `B_SOFT`). That was measured and **it does not work** — soft
-  scores 91.80 against hard's 92.24, and the gap to whitespace stays. The symbol is kept
-  because Japanese uses it and it costs one embedding row, not because it earned its keep.
+  different symbols (`B` / `B_SOFT`). Measured, **it does nothing** — soft scores 91.80
+  against hard's 92.24 — and counting the symbols says why. In the shipped configuration
+  `B_SOFT` is inert:
+
+  | lang | B | B_SOFT | B per sentence |
+  |---|---|---|---|
+  | jpn | 595 | 4940 | 1.07 |
+  | all others | 1816-8846 | 0 | 3.4-5.9 |
+
+  Japanese has no internal whitespace, so a sentence is a single run: the first token gets
+  `B` and every other token gets `B_SOFT`. The symbol therefore encodes "not
+  sentence-initial" within Japanese, and "is Japanese" across languages — which the language
+  token already carries. It would mean something for a language with *both* whitespace and a
+  dictionary (Korean with a wordbank: `B` the exact eojeol boundary, `B_SOFT` the 92.6%
+  internal split), which is exactly the configuration the measurement above rejects. Worth
+  dropping to `PRIOR_VOCAB=4` at the next retrain.
 * **The prior gets its own coordinates, not the byte's.** Layer 0 is linear, so summing the
   prior into the byte embedding computes `W(emb + prior)` — the prior's contribution is
   forced through the *byte* projection. Concatenating computes `W_byte·emb + W_prior·prior`,
