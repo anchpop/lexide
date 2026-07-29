@@ -94,9 +94,11 @@ fn fetch_from_hub(repo_id: &str) -> Result<PathBuf> {
     if let Err(e) = repo.get("onnx/jpn-unidic.bin") {
         eprintln!("lexide: no Japanese boundary dictionary on {repo_id}: {e}");
     }
-    for lang in crate::segment::byte_bio::LANG_ORDER {
-        let _ = repo.get(&format!("onnx/wordbanks/{lang}.tsv"));
-    }
+    // No language currently ships a wordbank: measured against plain whitespace, giving
+    // Korean one cost 5.6 F1 (the model already reads eojeol-internal splits from context
+    // better than a unigram Viterbi proposes them). PriorSet still scans for wordbanks/*.tsv
+    // beside the weights, so adding one later means shipping the file and fetching it here —
+    // rather than ten requests that miss on every cold start.
     // Not used by this pipeline, but pre-fetching warms the cache Segmenter::from_pretrained
     // reads from; a miss on older repo snapshots is fine.
     if let Err(e) = repo.get("onnx/sentence_segmenter.safetensors") {
