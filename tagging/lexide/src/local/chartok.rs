@@ -140,6 +140,18 @@ mod tests {
             };
             assert_eq!(spans, want_spans, "spans diverge for {text:?}");
 
+            // ...and the shipped path, which derives the prior itself rather than being
+            // handed one, must reach the same answer. This is the link the recorded prior
+            // deliberately does not test: that the Rust proposal matches the Python one
+            // the model was scored against, dictionary and all.
+            if prior.is_some() {
+                assert_eq!(
+                    tok.segment(text, lang),
+                    want_spans,
+                    "self-computed prior diverges from the recorded one for {text:?}"
+                );
+            }
+
             let want_first: Vec<f32> = fx["first_logits"]
                 .as_array()
                 .unwrap()
