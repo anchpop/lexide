@@ -15,10 +15,10 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from dataset import (CHAR_VOCAB_SIZE, CharBoundaryDataset, char_collate,
+from dataset import (BOS_BYTE, CHAR_VOCAB_SIZE, CharBoundaryDataset, char_collate,
                      encode_bytes_and_labels, maybe_merge_inflection, read_jsonl)
 from model import CharBoundaryTagger
-from prior import PRIOR_VOCAB, PriorSidecar, Wordbank, prior_ids_for
+from prior import PRIOR_NONE, PRIOR_VOCAB, PriorSidecar, Wordbank, prior_ids_for
 
 
 def spans_from_labels(labels):
@@ -65,7 +65,7 @@ def fmt_metrics(m):
 @torch.no_grad()
 def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
              merge_inflection=True, use_prior=False, wordbanks=None, prior_soft=True,
-             sidecar=None):
+             sidecar=None, blank_prior=False):
     """Micro-averaged token-span F1 overall and per language."""
     model.eval()
     agg = dict(tp=0, fp=0, fn=0, bc=0, bt=0)
@@ -83,9 +83,14 @@ def evaluate(model, records, device, per_lang=400, max_bytes=512, use_lang=True,
             # inference scored 22.4: whitespace on Japanese asserts the whole sentence is
             # one word, and the model leans on the proposal hard enough to obey.
             # prior.infer_lang recovers "jpn" from script, which is why the two now agree.
-            ids = (sidecar[r["_idx"]] if sidecar is not None
-                   else prior_ids_for(r["text"], r.get("lang") if use_lang else None,
-                                      max_bytes, wordbanks=wordbanks, soft=prior_soft))
+            if blank_prior:
+                # what the model sees when no proposal is available at all
+                ids = [PRIOR_NONE] * min(len(r["text"].encode("utf-8")) + 2, max_bytes)
+            elif sidecar is not None:
+                ids = sidecar[r["_idx"]]
+            else:
+                ids = prior_ids_for(r["text"], r.get("lang") if use_lang else None,
+                                    max_bytes, wordbanks=wordbanks, soft=prior_soft)
             p = torch.tensor([ids], device=device)
         pred = model(x, p)[0].argmax(-1).tolist()
         gold_spans, pred_spans = spans_from_labels(labels), spans_from_labels(pred)
@@ -160,6 +165,15 @@ def main():
                          "<path>.{train,val}. This is the shipping path: the proposal the "
                          "model trains against then comes from the same code that produces "
                          "it at inference, and the Viterbi leaves the dataloader.")
+    ap.add_argument("--prior-warmup-frac", type=float, default=0.5,
+                    help="fraction of training during which the model gets neither the "
+                         "language token nor the boundary proposal, so it first learns "
+                         "boundaries from bytes alone. 0 disables the curriculum.")
+    ap.add_argument("--prior-dropout", type=float, default=0.1,
+                    help="fraction of training examples whose boundary proposal is blanked "
+                         "to PRIOR_NONE, so the model keeps a non-prior route to the answer. "
+                         "Without it the prior becomes a hard dependency: v11 scores jpn "
+                         "93.3 with the dictionary and 21.2 without.")
     ap.add_argument("--no-prior-soft", dest="prior_soft", action="store_false",
                     help="collapse B_SOFT onto B, so a proposed boundary is encoded the "
                          "same as one whitespace guarantees. The pre-36b37e9 behavior, "
@@ -211,7 +225,11 @@ def main():
         val_side = PriorSidecar(f"{args.prior_sidecar}.val")
         print(f"prior sidecar: {len(train_side)} train / {len(val_side)} val records")
 
-    ds = CharBoundaryDataset(train_records, args.max_bytes, lang_dropout=args.lang_dropout,
+    # lang and prior dropout are applied per batch in the loop, not here, so they can follow
+    # a schedule. 0.0 means "never drop" — the dataset yields the true language token every
+    # time and the loop decides what to blank. (None would mean something else entirely:
+    # language-blind, generic BOS always, which the loop could not undo.)
+    ds = CharBoundaryDataset(train_records, args.max_bytes, lang_dropout=0.0,
                              merge_inflection=args.merge_inflection,
                              use_prior=args.use_prior, wordbanks=wordbanks,
                              prior_soft=args.prior_soft, prior_sidecar=train_side)
@@ -245,6 +263,24 @@ def main():
             byte_ids = batch["byte_ids"].to(device)
             labels = batch["labels"].to(device)
             prior_ids = batch["prior_ids"].to(device) if "prior_ids" in batch else None
+
+            # Curriculum. For the first `--prior-warmup-frac` of training the model gets
+            # neither the language token nor the proposal, so it has to learn boundaries
+            # from bytes alone; both are then introduced at their configured dropout rates.
+            # The point is to build a model that *uses* the prior rather than one that has
+            # outsourced the task to it — v11, trained with the prior available from step 0,
+            # scores jpn 93.3 with it and 21.2 without.
+            warm = step < args.prior_warmup_frac * total_steps
+            p_lang = 1.0 if warm else args.lang_dropout
+            p_prior = 1.0 if warm else args.prior_dropout
+            if p_lang:
+                drop = torch.rand(byte_ids.size(0), device=device) < p_lang
+                byte_ids[:, 0] = torch.where(drop, byte_ids.new_full((1,), BOS_BYTE)[0],
+                                             byte_ids[:, 0])
+            if prior_ids is not None and p_prior:
+                drop = torch.rand(prior_ids.size(0), device=device) < p_prior
+                prior_ids = prior_ids.masked_fill(drop.unsqueeze(1), PRIOR_NONE)
+
             logits = model(byte_ids, prior_ids)
             loss = F.cross_entropy(logits.reshape(-1, 3), labels.reshape(-1), ignore_index=-100)
             if not torch.isfinite(loss):

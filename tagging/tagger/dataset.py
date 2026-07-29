@@ -243,7 +243,8 @@ def maybe_merge_inflection(record, enabled):
 
 class CharBoundaryDataset(Dataset):
     def __init__(self, records, max_bytes=512, lang_dropout=None, merge_inflection=False,
-                 use_prior=False, wordbanks=None, prior_soft=True, prior_sidecar=None):
+                 use_prior=False, wordbanks=None, prior_soft=True, prior_sidecar=None,
+                 prior_dropout=0.0):
         """lang_dropout=None trains language-blind (generic BOS always, the pre-lang
         behavior); a float p trains language-conditioned, replacing the record's lang
         with the generic BOS with probability p so the model also works lang-free.
@@ -258,6 +259,18 @@ class CharBoundaryDataset(Dataset):
         self.wordbanks = wordbanks
         self.prior_soft = prior_soft
         self.prior_sidecar = prior_sidecar
+        # Fraction of examples whose proposal is blanked to PRIOR_NONE — "no proposal
+        # available" — so the model keeps a route to the answer that does not go through
+        # the prior. Measured on v11, which trained without this: Japanese scores 93.3 with
+        # the dictionary and 21.2 without, even with the language token. That is not a model
+        # using a hint, it is a model that has outsourced the task.
+        #
+        # Blanking to NONE rather than to the whitespace proposal is deliberate. Whitespace
+        # on Japanese does not say "I don't know", it asserts the sentence is one word;
+        # training against that would teach the model to distrust whitespace, and the prior
+        # embedding is shared, so the lesson would leak to the languages where whitespace is
+        # exactly right.
+        self.prior_dropout = prior_dropout
 
     def __len__(self):
         return len(self.records)
@@ -271,7 +284,10 @@ class CharBoundaryDataset(Dataset):
         byte_ids, labels = encode_bytes_and_labels(r["text"], tokens, self.max_bytes, lang)
         item = {"byte_ids": byte_ids, "labels": labels}
         if self.use_prior:
-            if self.prior_sidecar is not None:
+            if self.prior_dropout and random.random() < self.prior_dropout:
+                n = min(len(r["text"].encode("utf-8")) + 2, self.max_bytes)
+                item["prior_ids"] = [PRIOR_NONE] * n
+            elif self.prior_sidecar is not None:
                 # precomputed by the Rust binary that also runs at inference
                 item["prior_ids"] = self.prior_sidecar[r["_idx"]]
             else:
