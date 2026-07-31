@@ -13,6 +13,15 @@
 //!
 //! Built by `tagger/build_unidic_artifact.py`; verified at 100% span agreement with fugashi
 //! on the Japanese test split, which is what let us drop the analyzer dependency.
+//!
+//! TODO(sudachi): gold generation is moving to Sudachi (split mode C), which matches our
+//! token policy better than UniDic does — it keeps 日本語 and 訓練士 whole where UniDic
+//! splits them, worth ~0.8 boundary F1 against gold's self-consistent subset. The prior
+//! stays on UniDic for now because a prior is judged on recall rather than precision (it
+//! may over-propose freely; the model deletes boundaries but cannot invent them), and
+//! UniDic measured 99.7% boundary-start recall against Sudachi C's 99.4%. Once gold is
+//! Sudachi-based, revisit: having the proposal and the labels come from one segmentation
+//! policy is probably worth more than 0.3 points of recall.
 
 use std::path::Path;
 

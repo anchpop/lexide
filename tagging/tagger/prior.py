@@ -16,6 +16,14 @@ The proposal is *not* the answer. UniDic follows its own segmentation policy —
 still has to learn the mapping from proposal to our policy. What the prior supplies is the
 part the model cannot get from 52k sentences: knowing that 翻訳 and 苛立ち are words at all.
 """
+# TODO(sudachi): gold generation is moving to Sudachi (split mode C), which matches our token
+# policy better than UniDic — it keeps 日本語 and 訓練士 whole where UniDic splits them. The
+# prior stays on UniDic for now because a prior is judged on recall, not precision: it may
+# over-propose freely, since the model deletes boundaries but cannot invent them, and UniDic
+# measured 99.7% boundary-start recall against Sudachi C's 99.4%. Once gold is Sudachi-based,
+# revisit — one segmentation policy shared by the proposal and the labels is probably worth
+# more than 0.3 points of recall.
+
 # Character classes, following MeCab's char.def: a run of one script is usually one word.
 # The limits say how long an *unknown* run of that class may be grouped into one token —
 # katakana loanwords and numbers run long, kanji compounds are usually 2-3, and a run of
