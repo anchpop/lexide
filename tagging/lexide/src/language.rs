@@ -14,6 +14,8 @@ pub enum Language {
     Russian,
     Japanese,
     Hindi,
+    Thai,
+    ChineseSimplified,
 }
 
 impl Language {
@@ -30,6 +32,8 @@ impl Language {
             Language::Russian => "rus",
             Language::Japanese => "jpn",
             Language::Hindi => "hin",
+            Language::Thai => "tha",
+            Language::ChineseSimplified => "zho-hans",
         }
     }
 }
@@ -47,6 +51,8 @@ impl fmt::Display for Language {
             Language::Russian => write!(f, "Russian"),
             Language::Japanese => write!(f, "Japanese"),
             Language::Hindi => write!(f, "Hindi"),
+            Language::Thai => write!(f, "Thai"),
+            Language::ChineseSimplified => write!(f, "Chinese (Simplified)"),
         }
     }
 }
