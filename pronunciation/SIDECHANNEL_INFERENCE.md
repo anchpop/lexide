@@ -13,12 +13,14 @@ from src.factorized_ctc import FactorizedCTCModel   # train/src on sys.path
 model = FactorizedCTCModel.load_from_dir(snapshot_dir)   # rebuilds arch from saved flags
 model.eval().to(device)
 out = model(input_values)                                # input_values: (B, T) raw-ish waveform
-# out == {"log_probs": (B,T,V), "nonblank_logit": (B,T), "stress_logits": (B,T,3)}
+# phone-only default: language_head_logits is an empty dict (no extra MLP work)
+# pass active_language_heads=["jpn_pitch_accent"] for prosody-aware inference
 ```
 
 `load_from_dir` reads `mel_sidechannel`/`mlp_heads` from the saved `factorized_heads.pt`
-and reconstructs the modules itself — you do **not** pass any flags. The forward returns
-the **same keys** as the base model, so no caller/decoder changes.
+and reconstructs the modules itself — you do **not** pass any flags. Existing callers
+can continue reading `log_probs`, `nonblank_logit`, and `stress_logits`; the additional
+`language_head_logits` mapping is empty unless heads are explicitly activated.
 
 ### Two corrections to what you were told
 - **No new Modal inference path is needed.** Same `load_from_dir` + `model(input_values)`.

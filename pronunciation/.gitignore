@@ -1,0 +1,4 @@
+.work/
+# g2pW bake-off model dir (607MB ONNX + dictionaries), downloaded by the
+# g2pw package for scripts/audit_g2p_backends.py's g2pw-ipa provider.
+G2PWModel/

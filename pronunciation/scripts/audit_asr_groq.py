@@ -58,12 +58,18 @@ GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 LANG_TO_ISO639_1 = {
     "deu": "de", "eng": "en", "fra": "fr", "ita": "it",
     "por": "pt", "rus": "ru", "spa": "es",
+    "tha": "th", "zho-hans": "zh", "hin": "hi", "jpn": "ja",
 }
 
 
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).casefold()
-    text = "".join(" " if c in string.punctuation else c for c in text)
+    # `string.punctuation` covers ASCII only. CJK full stops/commas and Thai
+    # punctuation must normalize the same way or CER measures typography.
+    text = "".join(
+        " " if c in string.punctuation or unicodedata.category(c).startswith("P") else c
+        for c in text
+    )
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -166,6 +172,33 @@ def existing_successes(path: Path) -> set[str]:
     return done
 
 
+def compact_audit(path: Path) -> None:
+    """Make retries an idempotent last-result-wins update by audio path."""
+    if not path.exists():
+        return
+    by_path: dict[str, dict[str, Any]] = {}
+    unkeyed: list[dict[str, Any]] = []
+    with path.open() as source:
+        for line in source:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if rec.get("ok") and "expected" in rec and "whisper_text" in rec:
+                rec["cer"] = text_cer(rec["expected"], rec["whisper_text"])
+                rec["wer"] = text_wer(rec["expected"], rec["whisper_text"])
+                rec["text_metric_version"] = 2
+            key = rec.get("path")
+            if key:
+                by_path[key] = rec
+            else:
+                unkeyed.append(rec)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w") as out:
+        for rec in unkeyed + list(by_path.values()):
+            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    tmp.replace(path)
+
+
 def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -> dict[str, Any]:
     path = Path(record["path"])
     duration, rms = audio_stats(path)
@@ -202,16 +235,19 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
             payload = resp.json()
             text = payload.get("text", "")
 
-            # Per-clip espeak voice (FLEURS dialects) overrides the canonical one.
-            espeak_lang = record.get("espeak_voice") or LANG_TO_ESPEAK.get(record["lang"])
-            expected_phonemes, _, _ = phonemize(record["expected"], espeak_lang) if espeak_lang else ([], [], [])
-            try:
-                actual_phonemes, _, _ = phonemize(text, espeak_lang) if espeak_lang else ([], [], [])
-            except Exception:
-                # If espeak chokes on the Whisper output (rare; usually
-                # non-target-language transliterations), the audit just falls
-                # back to maximum CER for this clip.
-                actual_phonemes = []
+            expected_phonemes: list[str] = []
+            actual_phonemes: list[str] = []
+            if not args.text_only:
+                # Per-clip espeak voice (FLEURS dialects) overrides the canonical one.
+                espeak_lang = record.get("espeak_voice") or LANG_TO_ESPEAK.get(record["lang"])
+                expected_phonemes, _, _ = phonemize(record["expected"], espeak_lang) if espeak_lang else ([], [], [])
+                try:
+                    actual_phonemes, _, _ = phonemize(text, espeak_lang) if espeak_lang else ([], [], [])
+                except Exception:
+                    # If espeak chokes on the Whisper output (rare; usually
+                    # non-target-language transliterations), the audit just falls
+                    # back to maximum CER for this clip.
+                    actual_phonemes = []
 
             expected_sha = hashlib.sha256(record["expected"].encode()).hexdigest()
 
@@ -227,7 +263,7 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
                 no_speech_prob = max(nps) if nps else None
                 compression_ratio = max(cps) if cps else None
 
-            return {
+            result = {
                 **record,
                 "ok": True,
                 "duration_sec": duration,
@@ -241,15 +277,18 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
                 "expected_sha256": expected_sha,
                 "expected_phonemes": expected_phonemes,
                 "actual_phonemes": actual_phonemes,
-                # Field name matches load_asr_audit_exclusions in train_unified.py
-                # so this exclusion file is picked up by the audit-min-per threshold.
-                "per": phoneme_cer(expected_phonemes, actual_phonemes),
                 "cer": text_cer(record["expected"], text),
                 "wer": text_wer(record["expected"], text),
                 # Full verbose_json — keep for future re-analysis without
                 # paying Groq again.
                 "whisper": payload,
             }
+            # Omitting `per` in text-only mode is deliberate: the exclusion
+            # loader then applies its CER/WER thresholds instead of treating a
+            # fabricated phoneme score as truth.
+            if not args.text_only:
+                result["per"] = phoneme_cer(expected_phonemes, actual_phonemes)
+            return result
         except requests.HTTPError as e:
             last_error = (
                 f"HTTP {e.response.status_code}: {e.response.text[:1000]}"
@@ -271,7 +310,7 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", required=True, choices=["fleurs", "tatoeba"],
+    parser.add_argument("--source", required=True, choices=["fleurs", "tatoeba", "kathbath"],
                         help="Which manifest source to audit (selects default --out too).")
     parser.add_argument("--audio-root", type=Path, default=Path("data/audio"))
     parser.add_argument("--out", type=Path, default=None,
@@ -280,10 +319,15 @@ def main() -> None:
     parser.add_argument("--lang", action="append", choices=sorted(LANG_TO_ISO639_1),
                         help="Limit to one or more repo language codes.")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--retries", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--force-language", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--text-only", action="store_true",
+        help="Skip eSpeak/PER and audit transcript CER/WER only (useful while an external G2P is being qualified).",
+    )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -293,6 +337,7 @@ def main() -> None:
 
     records = load_records(args.audio_root, set(args.lang) if args.lang else None, args.source)
     if args.limit is not None:
+        random.Random(args.seed).shuffle(records)
         records = records[: args.limit]
 
     total_seconds = 0.0
@@ -325,6 +370,7 @@ def main() -> None:
                             desc=f"Groq Whisper ({args.source})"):
                 out.write(json.dumps(fut.result(), ensure_ascii=False) + "\n")
                 out.flush()
+    compact_audit(args.out)
 
 
 if __name__ == "__main__":

@@ -67,6 +67,8 @@ class MultilingualNLPInference:
             "rus": "Russian",
             "jpn": "Japanese",
             "hin": "Hindi",
+            "tha": "Thai",
+            "zho-hans": "Chinese",
         }
         
         language_name = language_names.get(language, language)

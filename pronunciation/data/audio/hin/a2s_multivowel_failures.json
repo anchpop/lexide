@@ -1,0 +1,32 @@
+{
+  "description": "Review seeds from the initial GPL Formal A2S extraction where that legacy backend failed and the schwa backend emitted more than one vowel. This is not an exhaustive production fallback list: later inspection found a defective legacy ऑ-vowel path, and production labels now use independently implemented published surface-weight rules.",
+  "status": "legacy-audit-only",
+  "backend_release_sha256": "b17f2915e0c2563ffa1334d9ce793bb7c316c5af19c2144eaf6218578880f5da",
+  "words": [
+    {"word": "एल्प्स", "schwa_ipa": ["eː", "l", "p", "s", "ə"]},
+    {"word": "ऑटर", "schwa_ipa": ["ɔː", "ʈ", "ə", "ɾ"]},
+    {"word": "ऑटो", "schwa_ipa": ["ɔː", "ʈ", "oː"]},
+    {"word": "ऑप्टिक", "schwa_ipa": ["ɔː", "p", "ʈ", "ɪ", "k"]},
+    {"word": "ऑप्शन", "schwa_ipa": ["ɔː", "p", "ʃ", "ə", "n"]},
+    {"word": "ऑफर", "schwa_ipa": ["ɔː", "pʰ", "ə", "ɾ"]},
+    {"word": "ऑफ़िस", "schwa_ipa": ["ɔː", "f", "ɪ", "s"]},
+    {"word": "ऑफिस", "schwa_ipa": ["ɔː", "pʰ", "ɪ", "s"]},
+    {"word": "ऑब्जेक्ट", "schwa_ipa": ["ɔː", "b", "d͡ʒ", "eː", "k", "ʈ"]},
+    {"word": "ऑयल", "schwa_ipa": ["ɔː", "j", "ə", "l"]},
+    {"word": "ऑर्गन्स", "schwa_ipa": ["ɔː", "ɾ", "ɡ", "ə", "n", "s"]},
+    {"word": "ऑर्डर", "schwa_ipa": ["ɔː", "ɾ", "ɖ", "ə", "ɾ"]},
+    {"word": "ऑर्बिट", "schwa_ipa": ["ɔː", "ɾ", "b", "ɪ", "ʈ"]},
+    {"word": "ऑस्कर", "schwa_ipa": ["ɔː", "s", "k", "ə", "ɾ"]},
+    {"word": "कई", "schwa_ipa": ["k", "ə", "iː"]},
+    {"word": "गई", "schwa_ipa": ["ɡ", "ə", "iː"]},
+    {"word": "गईं", "schwa_ipa": ["ɡ", "ə", "iː̃"]},
+    {"word": "गई।", "schwa_ipa": ["ɡ", "ə", "iː"]},
+    {"word": "गए", "schwa_ipa": ["ɡ", "ə", "eː"]},
+    {"word": "गए।", "schwa_ipa": ["ɡ", "ə", "eː"]},
+    {"word": "नई", "schwa_ipa": ["n", "ə", "iː"]},
+    {"word": "नए", "schwa_ipa": ["n", "ə", "eː"]},
+    {"word": "मई", "schwa_ipa": ["m", "ə", "iː"]},
+    {"word": "स्कार्प्स", "schwa_ipa": ["s", "k", "aː", "ɾ", "p", "s", "ə"]},
+    {"word": "ज़ॉञ्ग", "schwa_ipa": ["z", "ɔː", "ɲ", "ə", "ɡ"]}
+  ]
+}

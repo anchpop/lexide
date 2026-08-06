@@ -20,21 +20,29 @@ workdir: .
 setup: |
   cd ~/sky_workdir
   /usr/bin/python3 -m pip install accelerate bitsandbytes datasets jsonlines 'peft>=0.18.1' scikit-learn \
-    sentencepiece tqdm 'transformers>=4.57.0' trl wandb 'Pillow>=9.1.0' 'numpy<2' tf-keras
+    sentencepiece tqdm 'transformers>=5' trl wandb 'Pillow>=9.1.0' 'numpy<2' tf-keras liger-kernel
 
-# Train teacher, then distill into student
+# Retrain the Gemma 4 teacher on the current gold corpus.
 run: |
   cd ~/sky_workdir
   export CUDA_VISIBLE_DEVICES=0
   export MODEL_NAME=${MODEL_NAME}
   export WANDB_PROJECT="lexide"
   export TOKENIZERS_PARALLELISM=false
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   export HF_TOKEN=${HF_TOKEN}
   export WANDB_API_KEY=${WANDB_API_KEY}
   export HF_USERNAME=${HF_USERNAME}
+  export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE}
+  export EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE}
+  export GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS}
+  export GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING}
+  export EVAL_STEPS=${EVAL_STEPS}
+  export RESUME_FROM_CHECKPOINT=${RESUME_FROM_CHECKPOINT:-}
+  export ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION}
+  export USE_LIGER_KERNEL=${USE_LIGER_KERNEL}
 
-  # Step 1: Train teacher model (27b with LoRA)
-  echo "=== STEP 1: Training teacher model (${MODEL_NAME}) ==="
+  echo "=== Training teacher model (${MODEL_NAME}) ==="
   /usr/bin/python3 -m accelerate.commands.launch \
     --mixed_precision bf16 \
     --num_processes 1 \
@@ -42,24 +50,20 @@ run: |
     --dynamo_backend no \
     src/train.py
 
-  # Step 2: Distill teacher into students
-  # Use local adapter first (faster than pulling from HF)
-  export TEACHER_ADAPTER=anchpop/lexide-gemma-4-31B-it
-  for STUDENT in gemma-4-26B-A4B-it gemma-4-E4B-it gemma-4-E2B-it; do
-    echo "=== STEP 2: Distilling into ${STUDENT} ==="
-    export STUDENT_MODEL="${STUDENT}"
-    /usr/bin/python3 -m accelerate.commands.launch \
-      --mixed_precision bf16 \
-      --num_processes 1 \
-      --num_machines 1 \
-      --dynamo_backend no \
-      src/distill.py
-  done
-
 envs:
   # models: gemma-4-E2B-it, gemma-4-E4B-it, gemma-4-26B-A4B-it, gemma-4-31B-it
   MODEL_NAME: gemma-4-31B-it
   HF_USERNAME: anchpop # Optional: auto-creates repo anchpop/lexide-MODEL_NAME on HuggingFace
+  TRAIN_BATCH_SIZE: 8
+  EVAL_BATCH_SIZE: 8
+  GRADIENT_ACCUMULATION_STEPS: 2
+  GRADIENT_CHECKPOINTING: 0
+  EVAL_STEPS: 1000
+  # Fresh runs start from scratch. To resume an interrupted run, pass e.g.
+  # --env RESUME_FROM_CHECKPOINT=./checkpoints/checkpoint-1000 at launch.
+  RESUME_FROM_CHECKPOINT: ""
+  ATTN_IMPLEMENTATION: sdpa
+  USE_LIGER_KERNEL: 1
 
 secrets:
   HF_TOKEN: null

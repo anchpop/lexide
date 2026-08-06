@@ -1,22 +1,21 @@
-data/
-tmp/
-espeak_audit/
-vad_compare/
-.env
-.claude/
-*.wav
-*.mp3
-*.m4a
-*.flac
-*.pt
-*.pth
-*.safetensors
-checkpoints*/
-# tysm LLM caches + speaker-embed cache: hundreds of thousands of tiny files
-# (lang-filter .cache alone is 440k+) that exploded the workdir rsync and aren't
-# needed on the training cluster.
-.cache/
-# rust build artifacts + python bytecode
-target/
-__pycache__/
-*.pyc
+# Launch-from-Linux-box: do NOT upload the 34GB local data/audio via workdir.
+# The dataset ships as .work/pron_audio.tar, staged deliberately by each
+# sky_*.yaml's file_mounts (see `*.tar` below — the tar is excluded here so the
+# workdir copy can't carry it too). Workdir upload is then just ~89MB of code.
+data/audio
+# g2pW's 607MB ONNX model (used only by the local scripts/audit_g2p_backends.py
+# bake-off provider) — never needed on the training cluster.
+G2PWModel
+**/__pycache__
+**/.cache
+*.tar
+.sky-venv
+# Local scratch: Pimsleur download artifacts (8.6G), a Linux-local venv (1.1G)
+# and a pip cache (239M). `*.tar` above already kept the 35G dataset tarball out
+# of the workdir, which made .work look handled — it wasn't, and sky measured a
+# 10.4G workdir against the ~89MB of code this file claims. None of it is usable
+# on the cluster; a venv built here is actively wrong there.
+# The `~/data.tar: .work/pron_audio.tar` file_mount is unaffected: file_mounts
+# are staged deliberately, not filtered through .skyignore — same as `*.tar`
+# has always relied on.
+.work

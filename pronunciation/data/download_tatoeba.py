@@ -20,6 +20,7 @@ import argparse
 import csv
 import json
 import random
+import struct
 import subprocess
 import sys
 import threading
@@ -31,7 +32,15 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-LANGS = ["deu", "eng", "fra", "ita", "por", "rus", "spa"]
+# Internal language id -> Tatoeba's sentence language id. Most are identical;
+# Simplified Mandarin is deliberately named `zho-hans` internally to match the
+# tagging product, while Tatoeba uses ISO 639-3 `cmn` and does not distinguish
+# script in its language code.
+LANG_CONFIG = {
+    "deu": "deu", "eng": "eng", "fra": "fra", "ita": "ita",
+    "por": "por", "rus": "rus", "spa": "spa", "tha": "tha",
+    "zho-hans": "cmn", "hin": "hin", "jpn": "jpn",
+}
 
 # Each thread gets its own requests.Session for keep-alive. Tatoeba's
 # audio endpoint is slow per-request (~15-30 s observed even with no
@@ -45,6 +54,31 @@ USER_AGENT = "lexide-pronunciation-trainer/0.1 (research, contact: anchpop)"
 
 # Thread-local sessions keep connection-pool state per worker.
 _thread_local = threading.local()
+
+
+def repair_streamed_wav_header(path: Path) -> bool:
+    """Replace ffmpeg pipe-output sentinel sizes in an otherwise valid WAV.
+
+    An earlier importer streamed WAV through stdout, leaving RIFF and data
+    lengths at 0xffffffff. The PCM payload is intact, so a deterministic header
+    repair avoids a lossy second encode. Returns whether a repair was made.
+    """
+    with path.open("r+b") as wav:
+        raw = wav.read()
+        if len(raw) < 44 or raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
+            return False
+        data_marker = raw.find(b"data", 12)
+        if data_marker < 0 or data_marker + 8 > len(raw):
+            return False
+        riff_size = struct.unpack_from("<I", raw, 4)[0]
+        data_size = struct.unpack_from("<I", raw, data_marker + 4)[0]
+        if riff_size != 0xFFFFFFFF and data_size != 0xFFFFFFFF:
+            return False
+        wav.seek(4)
+        wav.write(struct.pack("<I", len(raw) - 8))
+        wav.seek(data_marker + 4)
+        wav.write(struct.pack("<I", len(raw) - data_marker - 8))
+    return True
 
 
 def get_session() -> requests.Session:
@@ -67,7 +101,7 @@ def get_session() -> requests.Session:
     return sess
 
 
-def load_join(audio_csv: Path, sentences_csv: Path):
+def load_join(audio_csv: Path, sentences_csv: Path, langs: list[str]):
     """Return per-lang list of records describing audio-bearing sentences.
 
     Each record is a dict with `sentence_id`, `audio_id`, `uploader`,
@@ -101,7 +135,8 @@ def load_join(audio_csv: Path, sentences_csv: Path):
 
             # Filter unreusable licenses. Tatoeba's exporter leaves the
             # license field empty for clips that cannot be redistributed.
-            if not lic or "all rights reserved" in lic.lower() or lic == "(unknown)":
+            if (not lic or lic == r"\N" or
+                    "all rights reserved" in lic.lower() or lic == "(unknown)"):
                 skipped_no_license += 1
                 continue
 
@@ -117,7 +152,8 @@ def load_join(audio_csv: Path, sentences_csv: Path):
 
     # 2) Join sentences.csv → group records by target language.
     # Schema: sentence_id \t lang \t text
-    by_lang: dict[str, list[dict]] = {lang: [] for lang in LANGS}
+    external_to_internal = {LANG_CONFIG[lang]: lang for lang in langs}
+    by_lang: dict[str, list[dict]] = {lang: [] for lang in langs}
     with open(sentences_csv) as f:
         for line in f:
             parts = line.rstrip("\n").split("\t")
@@ -130,8 +166,8 @@ def load_join(audio_csv: Path, sentences_csv: Path):
             meta = audio_by_sid.get(sid)
             if meta is None:
                 continue
-            lang = parts[1]
-            if lang not in by_lang:
+            lang = external_to_internal.get(parts[1])
+            if lang is None:
                 continue
             by_lang[lang].append({
                 "sentence_id": sid,
@@ -178,22 +214,28 @@ def fetch_one(audio_id: int, dest_wav: Path) -> tuple[bool, str]:
     if not mp3_bytes:
         return False, "empty body"
 
-    # ffmpeg: stdin mp3 -> stdout WAV at 16 kHz mono
+    # ffmpeg: stdin mp3 -> finalized WAV at 16 kHz mono. Do not stream WAV to
+    # stdout: a non-seekable RIFF output gets 0xffffffff length fields, which
+    # makes Python's wave module report multi-day clips despite valid audio.
     try:
+        temp_wav = dest_wav.with_suffix(".part.wav")
         result = subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
                 "-i", "pipe:0",
                 "-ac", "1", "-ar", "16000",
-                "-f", "wav", "pipe:1",
+                str(temp_wav),
             ],
             input=mp3_bytes, capture_output=True, timeout=60,
         )
         if result.returncode != 0:
+            temp_wav.unlink(missing_ok=True)
             return False, f"ffmpeg: {result.stderr.decode()[:200]}"
-        dest_wav.write_bytes(result.stdout)
+        temp_wav.replace(dest_wav)
         return True, "ok"
     except Exception as e:
+        if 'temp_wav' in locals():
+            temp_wav.unlink(missing_ok=True)
         return False, f"convert: {e}"
 
 
@@ -206,7 +248,18 @@ def main():
     parser.add_argument("--output-root", type=Path,
                         default=Path(__file__).resolve().parent / "audio")
     parser.add_argument("--samples-per-lang", type=int, default=10_000)
+    parser.add_argument("--langs", nargs="+", choices=LANG_CONFIG,
+                        default=list(LANG_CONFIG),
+                        help="Internal language ids to download (default: all)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--exclude-noncommercial", action="store_true",
+        help="Download/import only licenses without BY-NC/noncommercial terms.",
+    )
+    parser.add_argument(
+        "--existing-only", action="store_true",
+        help="Import already downloaded WAVs without fetching missing candidates.",
+    )
     args = parser.parse_args()
 
     if not args.audio_csv.exists() or not args.sentences_csv.exists():
@@ -216,11 +269,16 @@ def main():
             "Fetch from https://downloads.tatoeba.org/exports/ first."
         )
 
-    by_lang = load_join(args.audio_csv, args.sentences_csv)
+    by_lang = load_join(args.audio_csv, args.sentences_csv, args.langs)
 
     rng = random.Random(args.seed)
-    for lang in LANGS:
+    for lang in args.langs:
         items = by_lang[lang]
+        if args.exclude_noncommercial:
+            items = [item for item in items if (
+                "BY-NC" not in str(item.get("license") or "").upper()
+                and "NONCOMMERCIAL" not in str(item.get("license") or "").upper()
+            )]
         # Stable sample: shuffle then take first N.
         rng.shuffle(items)
         sample = items[: args.samples_per_lang]
@@ -237,11 +295,20 @@ def main():
                 for line in f:
                     rec = json.loads(line)
                     existing_files.add(rec["file"])
+        repaired = sum(
+            repair_streamed_wav_header(lang_dir / filename)
+            for filename in existing_files
+            if (lang_dir / filename).exists()
+            and filename.startswith("tatoeba_")
+        )
+        if repaired:
+            print(f"  [{lang}] repaired {repaired} legacy streamed WAV headers")
 
         new_entries = []
         ok = 0
         skipped_existing = 0
         failed: list[str] = []
+        not_present = 0
 
         def work(rec):
             audio_id = rec["audio_id"]
@@ -249,6 +316,8 @@ def main():
             if fname in existing_files:
                 return (rec, fname, True, "already-in-manifest")
             wav_path = lang_dir / fname
+            if args.existing_only and not wav_path.exists():
+                return (rec, fname, False, "not-present")
             success, msg = fetch_one(audio_id, wav_path)
             return (rec, fname, success, msg)
 
@@ -268,11 +337,17 @@ def main():
                             "voice": rec.get("uploader") or None,
                             "lang": lang,
                             "license": rec.get("license"),
-                            "attribution_url": rec.get("attribution_url"),
+                            "attribution_url": (
+                                rec.get("attribution_url")
+                                or f"https://tatoeba.org/en/sentences/show/{rec['sentence_id']}"
+                            ),
                             "tatoeba_sentence_id": rec["sentence_id"],
                         })
                 else:
-                    failed.append(f"audio={rec['audio_id']}: {msg}")
+                    if msg == "not-present":
+                        not_present += 1
+                    else:
+                        failed.append(f"audio={rec['audio_id']}: {msg}")
                 if (i + 1) % 250 == 0:
                     print(f"  [{lang}] {i + 1}/{len(sample)} "
                           f"ok={ok} skipped={skipped_existing} fail={len(failed)}")
@@ -283,7 +358,7 @@ def main():
                 out.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         print(f"  [{lang}] DONE. ok={ok} skipped={skipped_existing} "
-              f"fail={len(failed)} → {manifest_path}")
+              f"fail={len(failed)} absent={not_present} → {manifest_path}")
         if failed[:5]:
             print(f"  first failures: {failed[:5]}")
 

@@ -45,6 +45,22 @@ NUM_FEATURE_VALUES = 3  # panphon ternary {-1, 0, +1} → encoded as {0, 1, 2}
 NUM_LAYER_MIXTURES = 5  # learned soft selections over encoder hidden states (regularized-heads mode)
 CTC_MASK_VALUE = -1e4  # finite "impossible" log-prob; avoids NaNs in CTC backward
 
+# These heads are factors of the joint CTC symbol, not independent CTC tasks.
+# `target` names the aligned tensor supplied by the dataset.  The extra class
+# for tone/accent means "this phone is not a bearer"; examples in other
+# languages do not use the head at all (and therefore produce no gradient).
+DEFAULT_LANGUAGE_HEAD_SPECS = {
+    "tha_tone": {
+        "lang": "tha", "target": "tone", "num_labels": 6, "weight": 0.3,
+    },
+    "zho_hans_tone": {
+        "lang": "zho-hans", "target": "tone", "num_labels": 6, "weight": 0.3,
+    },
+    "jpn_pitch_accent": {
+        "lang": "jpn", "target": "pitch_accent", "num_labels": 3, "weight": 0.3,
+    },
+}
+
 
 class FactorizedCTCModel(nn.Module):
     def __init__(
@@ -61,8 +77,9 @@ class FactorizedCTCModel(nn.Module):
         acoustic_dim: int = 64,
         n_mels: int = 80,
         feature_emission_weight: float = 0.0,
-        mel_sidechannel: bool = False,
-        mlp_heads: bool = False,
+        mel_sidechannel: bool = True,
+        mlp_heads: bool = True,
+        language_head_specs: dict[str, dict] | None = None,
     ):
         super().__init__()
         if feature_table is not None and aux_feature_table is not None:
@@ -107,6 +124,13 @@ class FactorizedCTCModel(nn.Module):
         self.feature_emission_weight = feature_emission_weight
         self.mel_sidechannel = mel_sidechannel
         self.mlp_heads = mlp_heads
+        self.language_head_specs = {
+            name: dict(spec)
+            for name, spec in (
+                DEFAULT_LANGUAGE_HEAD_SPECS
+                if language_head_specs is None else language_head_specs
+            ).items()
+        }
 
         hidden_size = self.backbone.config.hidden_size
         self.dropout = nn.Dropout(self.backbone.config.final_dropout)
@@ -231,6 +255,12 @@ class FactorizedCTCModel(nn.Module):
                 nn.Dropout(0.1),
                 nn.Linear(256, num_stress_labels),
             )
+        self.language_heads = nn.ModuleDict({
+            name: _mk_head(int(spec["num_labels"]))
+            for name, spec in self.language_head_specs.items()
+        })
+        for head in self.language_heads.values():
+            _zero_head_bias(head)
 
         if feature_table is not None or aux_feature_table is not None:
             table = feature_table if feature_table is not None else aux_feature_table
@@ -277,18 +307,12 @@ class FactorizedCTCModel(nn.Module):
             )
             nn.init.zeros_(self.feature_head.bias)
         elif aux_feature_table is not None:
-            # Mode: auxiliary. Direct phoneme head handles MAIN CTC; feature
-            # head runs a custom factorial/vector-label CTC against
-            # feature-encoded targets. Encoder gets one shared alignment over
-            # whole feature vectors, while comparison stays in feature space.
+            # Mode: auxiliary factors. Direct phone identity and articulatory
+            # feature scores are combined inside the main CTC emission model.
             assert aux_feature_table.shape[0] == vocab_size
             self.num_features = int(aux_feature_table.shape[1])
             self.phoneme_head = nn.Linear(head_input_dim, vocab_size)
-            # The feature head predicts only feature values. Blank/nonblank is
-            # shared with the main CTC route via nonblank_head — the factorial
-            # feature CTC's "label" is a whole feature vector, and the same
-            # blank/nonblank decision separates emit events from blank frames
-            # for both the main and feature objectives.
+            # Blank/nonblank remains shared through nonblank_head.
             self.feature_head = nn.Linear(head_input_dim, self.num_features * NUM_FEATURE_VALUES)
             self.register_buffer("feature_table", aux_feature_table.long())
             mask_ids = sorted(set((special_token_ids or []) + [blank_id]))
@@ -473,7 +497,14 @@ class FactorizedCTCModel(nn.Module):
         out = self.backbone(input_values=input_values, attention_mask=attention_mask)
         return self.dropout(out.last_hidden_state)
 
-    def forward(self, input_values, attention_mask=None, labels=None, label_lengths=None):
+    def forward(
+        self,
+        input_values,
+        attention_mask=None,
+        labels=None,
+        label_lengths=None,
+        active_language_heads: list[str] | tuple[str, ...] | set[str] | None = None,
+    ):
         hidden = self._compute_head_input(input_values, attention_mask)
 
         l_nb = self.nonblank_head(hidden).squeeze(-1)              # (B, T)
@@ -528,11 +559,21 @@ class FactorizedCTCModel(nn.Module):
         log_probs[..., self.blank_id] = log_p_blank.squeeze(-1)
 
         stress_logits = self.stress_head(hidden)
+        # Phone-only inference remains the cheap/backward-compatible default.
+        # Training and prosody-aware inference opt in to the applicable heads.
+        active = set() if active_language_heads is None else set(active_language_heads)
+        unknown_heads = active - set(self.language_heads)
+        if unknown_heads:
+            raise ValueError(f"unknown language heads: {sorted(unknown_heads)}")
+        language_head_logits = {
+            name: self.language_heads[name](hidden) for name in sorted(active)
+        }
 
         result = {
             "log_probs": log_probs,
             "nonblank_logit": l_nb,
             "stress_logits": stress_logits,
+            "language_head_logits": language_head_logits,
         }
         if feature_log_probs is not None:
             result["feature_log_probs"] = feature_log_probs  # (B, T, F, 3)
@@ -565,11 +606,8 @@ class FactorizedCTCModel(nn.Module):
                 zero_infinity=True,
             )
             result["loss"] = loss
-            # Optional legacy factorial feature CTC is computed by the
-            # training loop, not here — it needs phoneme_ids to encode targets
-            # as feature sequences via the feature_table. In the unified
-            # feature-emission setup, this stays disabled and the feature head
-            # is trained through the main CTC score above.
+            # The trainer's prosody-aware joint CTC composes additional target
+            # factors around this normalized phone distribution.
 
         return result
 
@@ -598,6 +636,10 @@ class FactorizedCTCModel(nn.Module):
             "regularized_heads": self.regularized_heads,
             "mel_sidechannel": self.mel_sidechannel,
             "mlp_heads": self.mlp_heads,
+            "language_head_specs": self.language_head_specs,
+            "language_heads": {
+                name: head.state_dict() for name, head in self.language_heads.items()
+            },
         }
         if self.regularized_heads:
             payload["head_base_dim"] = self.head_base_dim
@@ -671,6 +713,7 @@ class FactorizedCTCModel(nn.Module):
             feature_emission_weight=heads.get("feature_emission_weight", 0.0),
             mel_sidechannel=mel_sidechannel,
             mlp_heads=mlp_heads,
+            language_head_specs=heads.get("language_head_specs"),
             **reg_kwargs,
         )
         if regularized:
@@ -683,6 +726,9 @@ class FactorizedCTCModel(nn.Module):
             model.mel_proj.load_state_dict(heads["mel_proj"])
         model.nonblank_head.load_state_dict(heads["nonblank_head"])
         model.stress_head.load_state_dict(heads["stress_head"])
+        for name, state in heads.get("language_heads", {}).items():
+            if name in model.language_heads:
+                model.language_heads[name].load_state_dict(state)
         if mode == "factorized":
             model.feature_head.load_state_dict(heads["feature_head"])
         elif mode == "aux":
@@ -695,6 +741,7 @@ class FactorizedCTCModel(nn.Module):
     def head_parameters(self):
         yield from self.nonblank_head.parameters()
         yield from self.stress_head.parameters()
+        yield from self.language_heads.parameters()
         # Yield whichever heads actually exist. In aux mode BOTH exist; the
         # optimizer must step the feature head too (otherwise aux CTC's
         # gradients accumulate but never apply, and the encoder is shaped by

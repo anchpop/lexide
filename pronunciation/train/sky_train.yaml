@@ -1,0 +1,72 @@
+resources:
+  cloud: lambda
+  accelerators: GH200:1
+  disk_size: 200
+
+  autostop:
+    idle_minutes: 120
+    down: true
+
+workdir: .
+
+file_mounts:
+  ~/.netrc: ~/.netrc
+  # One-tarball dataset staging: ~450k loose wavs choke rsync, and the Hub's
+  # 256-commits/hour ceiling makes a loose-file dataset repo a multi-day
+  # upload. Rebuild after any data or label change with:
+  #   python train/scripts/preprocess.py   (writes .work/pron_audio.tar)
+  ~/data.tar: .work/pron_audio.tar
+
+setup: |
+  cd ~/sky_workdir
+  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  pip install transformers datasets soundfile tqdm wandb panphon
+
+run: |
+  if [ ! -e ~/data/eng/phonemes.jsonl ]; then
+    mkdir -p ~/data && tar -xf ~/data.tar -C ~/data && rm -f ~/data.tar
+  fi
+  echo "data langs: $(ls ~/data | tr '\n' ' ')"
+
+  # THE champion recipe. Every one of its settings is the default in
+  # train_unified.py's argparse, so this run deliberately passes nothing but
+  # the output destinations — a flag here would mean "deviate from champion".
+  # For the record, the defaults it relies on:
+  #   backbone  xls-r-2b @ lr 1e-5, processor wav2vec2-xlsr-53-espeak-cv-ft
+  #   heads     mlp_heads, head_lr 1e-3, regularized_heads off
+  #   input     mel side-channel on; audio_degrade on @ p=0.6
+  #   data      narrowed labels, source_cap_second, min_rms 0.005,
+  #             min_whisper_logprob -0.7, max_audio_sec 16, val_split 0.05
+  #   loss      stress 0.3 (warmup 400), vad 0.05, invalid_mass 0.05
+  #   training  bf16, batch 16, 12 epochs, grad_clip inf, no checkpointing,
+  #             16 workers, all languages
+  # The side-channel is why audio_degrade matters: it amplifies noise it never
+  # saw in training (+8 clean / -10 noisy without degradation), so the 60%
+  # corruption schedule is what makes the side-channel win hold up on noisy
+  # input rather than trade one regression for another.
+  #
+  # A smoke run before burning GH200 hours is this same file with
+  #   --langs eng --epochs 1 --max-train-batches 20 --max-eval-batches 5
+  # appended to the command below.
+  bash train/train.sh \
+    --save-dir checkpoints-champion \
+    --hf-repo anchpop/lexide-pronunciation
+
+# --hf-repo is not optional in practice, even though argparse defaults it to
+# None. train_unified saves every epoch into the SAME --save-dir, so each save
+# destroys the previous one; per-epoch history exists only as Hub commits. Drop
+# it and you keep exactly one checkpoint -- the last -- which is the wrong one
+# whenever a later epoch overfits. It is also the only copy that outlives the
+# node: `autostop.down: true` TERMINATES the instance (Lambda has no stop-only
+# mode), taking local checkpoints with it 120 idle minutes after training ends.
+#
+# HF_TOKEN is read from the launching shell, so export it before `sky launch`:
+#   set -a; . .env; set +a          # pronunciation/.env, gitignored
+# The repo root (../.env) carries the same token and is where it has always
+# lived; pronunciation/.env now mirrors it so this directory is self-contained.
+#
+# W&B needs no secret: ~/.netrc is file_mounted above and carries the
+# api.wandb.ai login, which is what the wandb client actually reads.
+
+secrets:
+  HF_TOKEN: null

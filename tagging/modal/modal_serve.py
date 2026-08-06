@@ -238,7 +238,7 @@ def main(action: str = "merge"):
     Local entrypoint for testing and setup.
 
     Args:
-        action: Either "merge" to download and merge the model, or "test" to test inference
+        action: "merge", "test" for English, or "test-all" for every trained language
     """
     if action == "merge":
         print("Downloading and merging model...")
@@ -253,7 +253,7 @@ def main(action: str = "merge"):
         print("Testing model inference...")
 
         # Get the server URL
-        url = serve.web_url
+        url = serve.get_web_url()
         print(f"Server URL: {url}")
 
         # Use the same prompt format as the Rust code (matches parsing.rs::create_prompt)
@@ -281,6 +281,91 @@ Task: Analyze tokens (idx,token,ws,POS,lemma,dep,head)
         print(f"\n✓ Test successful!")
         print(f"\nPrompt:\n{test_prompt}")
         print(f"Result:\n{result}")
+    elif action == "test-all":
+        import concurrent.futures
+        import requests
+
+        tests = [
+            ("eng", "English", "The children are reading a new book."),
+            ("deu", "German", "Die Kinder lesen heute ein neues Buch."),
+            ("fra", "French", "Les enfants lisent un nouveau livre."),
+            ("spa", "Spanish", "Los niños leen un libro nuevo."),
+            ("kor", "Korean", "아이들이 새 책을 읽고 있습니다."),
+            ("por", "Portuguese", "As crianças estão lendo um livro novo."),
+            ("ita", "Italian", "I bambini leggono un nuovo libro."),
+            ("rus", "Russian", "Дети читают новую книгу."),
+            ("jpn", "Japanese", "子供たちは新しい本を読んでいます。"),
+            ("hin", "Hindi", "बच्चे एक नई किताब पढ़ रहे हैं।"),
+            ("tha", "Thai", "เด็กๆ กำลังอ่านหนังสือเล่มใหม่"),
+            ("zho-hans", "Chinese", "孩子们正在读一本新书。"),
+        ]
+        url = serve.get_web_url()
+        print(f"Testing {len(tests)} languages at {url}")
+
+        def run_test(test):
+            code, language, sentence = test
+            prompt = (
+                f"Language: {language}\nSentence: {sentence}\n"
+                "Task: Analyze tokens (idx,token,ws,POS,lemma,dep,head)\n\nAnalysis:\n"
+            )
+            response = requests.post(
+                f"{url}/v1/chat/completions",
+                json={
+                    "model": "lexide-gemma-4-31b",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                    "max_tokens": 512,
+                },
+                timeout=600,
+            )
+            response.raise_for_status()
+            result = response.json()["choices"][0]["message"]["content"]
+            return code, language, sentence, result
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tests)) as pool:
+            futures = [pool.submit(run_test, test) for test in tests]
+            results = [future.result() for future in futures]
+
+        def validate(sentence, result):
+            body = result.split("Here's the token analysis:")[-1].split("</analysis>")[0]
+            rows = []
+            for line in body.splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 7 and parts[0].strip().isdigit():
+                    rows.append(parts[:7])
+            errors = []
+            if not rows:
+                return ["no parseable token rows"]
+            indices = [int(row[0]) for row in rows]
+            if indices != list(range(1, len(rows) + 1)):
+                errors.append(f"non-sequential indices: {indices}")
+            heads = []
+            for row in rows:
+                try:
+                    heads.append(int(row[6]))
+                except ValueError:
+                    errors.append(f"invalid head: {row[6]!r}")
+            if heads and (heads.count(0) != 1 or any(h < 0 or h > len(rows) for h in heads)):
+                errors.append(f"invalid dependency heads: {heads}")
+            whitespace = {
+                "none": "", "_": " ", "nbsp": "\u00a0", "narnbsp": "\u202f",
+                "thinsp": "\u2009", "hairsp": "\u200a", "zwsp": "\u200b",
+                "ideogrp": "\u3000",
+            }
+            reconstructed = "".join(row[1] + whitespace.get(row[2], row[2]) for row in rows)
+            if reconstructed != sentence:
+                errors.append(f"reconstruction mismatch: {reconstructed!r}")
+            return errors
+
+        failures = 0
+        for code, language, sentence, result in results:
+            errors = validate(sentence, result)
+            status = "PASS" if not errors else f"FAIL ({'; '.join(errors)})"
+            failures += bool(errors)
+            print(f"\n{'=' * 72}\n{code} / {language}: {status}\nSentence: {sentence}\n{result}")
+        if failures:
+            raise RuntimeError(f"{failures}/{len(results)} multilingual smoke tests failed")
+        print(f"\n✓ All {len(results)} language results passed structural validation")
     elif action == "fix":
         print("Fixing config.json on volume...")
         fix_config.remote()
@@ -291,4 +376,4 @@ Task: Analyze tokens (idx,token,ws,POS,lemma,dep,head)
         print("Done!")
     else:
         print(f"Unknown action: {action}")
-        print("Valid actions: merge, test, fix, add-processor")
+        print("Valid actions: merge, test, test-all, fix, add-processor")

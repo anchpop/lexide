@@ -9,7 +9,8 @@ Pipeline per MP3:
   1. Decode to 16 kHz mono via ffmpeg.
   2. silero-vad → list of (start, end) speech timestamps.
   3. For each speech segment of reasonable duration:
-     - Send to Groq Whisper (no `language` param → it detects).
+     - Send to Cloudflare Workers AI Whisper (no `language` param →
+       it detects).
      - If detected_language == target, phonemize via espeak-ng, save
        a WAV with filename `pimsleur_<lesson_id>_<seg_idx>.wav`, and
        append to manifest with source="pimsleur".
@@ -19,7 +20,8 @@ external ground-truth to audit against, so we trust its output.
 
 Requires:
   - silero-vad via torch.hub (lazy-loaded, no separate pip install)
-  - GROQ_API_KEY in env or .env file
+  - CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN in env or .env file
+    (token needs the account-scoped Workers AI permission)
   - ffmpeg on PATH
   - espeak-ng on PATH
 """
@@ -27,6 +29,7 @@ Requires:
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures as futures
 import json
 import os
@@ -36,6 +39,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -50,20 +54,22 @@ from tqdm import tqdm
 # Reuse the same espeak phonemizer the training pipeline uses.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "train" / "scripts"))
-from preprocess import phonemize, LANG_TO_ESPEAK  # noqa: E402
+from preprocess import phonemize, LANG_TO_ESPEAK, BACKEND_REQUIRED_LANGS  # noqa: E402
 
-GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+CF_AI_BASE = "https://api.cloudflare.com/client/v4/accounts"
 
 
 class DiskWriteError(Exception):
     """Raised when sf.write fails for what looks like a filesystem-level
     problem (read-only mount, disk full, missing path). These have to abort
     the whole run — silently continuing turns every Whisper success into a
-    lost segment AND burns Groq quota.
+    lost segment AND spends transcription budget on work we can't keep.
     """
 
-# Whisper's verbose_json returns the detected language as a lowercase full
-# English name ("english", "french") rather than an ISO code.
+# Groq's verbose_json returned the detected language as a lowercase full
+# English name ("english", "french"); Cloudflare returns an ISO code ("en",
+# "fr"). whisper_lang_matches() accepts either, so manifests written by both
+# backends compare correctly and this table stays useful for the old rows.
 LANG_TO_WHISPER_NAME = {
     "deu": "german", "eng": "english", "fra": "french", "ita": "italian",
     "por": "portuguese", "rus": "russian", "spa": "spanish",
@@ -76,6 +82,7 @@ LANG_TO_WHISPER_NAME = {
     "pan": "punjabi", "ron": "romanian", "swa": "swahili", "swe": "swedish",
     "tgl": "tagalog", "tha": "thai", "tur": "turkish", "twi": "twi",
     "ukr": "ukrainian", "urd": "urdu", "vie": "vietnamese",
+    "zho-hans": "chinese",
 }
 
 LANG_TO_ISO639_1 = {
@@ -88,6 +95,7 @@ LANG_TO_ISO639_1 = {
     "nor": "no", "pus": "ps", "pol": "pl", "pan": "pa", "ron": "ro",
     "swa": "sw", "swe": "sv", "tgl": "tl", "tha": "th", "tur": "tr",
     "ukr": "uk", "urd": "ur", "vie": "vi",
+    "zho-hans": "zh",
 }
 
 
@@ -120,7 +128,10 @@ def lesson_id_from_path(mp3_path: Path, pimsleur_root: Path) -> str:
 # Languages we currently train on. We process these FIRST so the user
 # can start a training run as soon as their lessons are extracted,
 # without waiting for the non-target languages to finish.
-TARGET_LANGS = ("deu", "eng", "fra", "ita", "por", "rus", "spa")
+TARGET_LANGS = (
+    "deu", "eng", "fra", "ita", "por", "rus", "spa",
+    "tha", "zho-hans", "hin", "jpn",
+)
 
 # Pimsleur folder name → (3-letter lang code, espeak voice code).
 # Comprehensive coverage of the Pimsleur Complete Collection — process
@@ -134,6 +145,8 @@ PIMSLEUR_FOLDER_TO_LANG = {
     "Armenian Eastern": ("hye", "hy"),
     "Brazilian Portuguese": ("por", "pt-br"),
     "Cantonese Chinese": ("yue", "yue"),
+    "Mandarin Chinese": ("zho-hans", "cmn"),
+    "Chinese Mandarin": ("zho-hans", "cmn"),
     "Castilian Spanish": ("spa", "es"),
     "Croatian": ("hrv", "hr"),
     "Czech": ("ces", "cs"),
@@ -236,36 +249,46 @@ def vad_segments(audio: np.ndarray, vad_model, get_speech_timestamps) -> list[di
                                  min_silence_duration_ms=800)
 
 
-def transcribe_clip(wav_bytes: bytes, api_key: str, model: str,
-                    retries: int = 1, timeout: float = 60.0) -> dict[str, Any]:
-    """Send a single WAV clip to Groq Whisper with no language hint.
+def transcribe_clip(wav_bytes: bytes, creds: tuple[str, str], model: str,
+                    retries: int = 2, timeout: float = 180.0) -> dict[str, Any]:
+    """Send a single WAV clip to Cloudflare Workers AI Whisper, no language hint.
 
-    Returns the full verbose_json payload alongside an "ok" flag so the
-    caller can store every Whisper signal in the manifest (segments,
-    avg_logprob, no_speech_prob, compression_ratio, etc). Throwing away
-    those signals at extraction time means later filtering needs another
-    Groq call per clip; storing them is free.
+    Returns the full result payload alongside an "ok" flag so the caller can
+    store every Whisper signal in the manifest (segments, avg_logprob,
+    no_speech_prob, compression_ratio, word timestamps). Throwing those away
+    at extraction time means later filtering needs another API call per clip;
+    storing them is free.
 
-    retries=1 is intentional: we'd rather give up early on a failing call
-    and let the segment retry on the next orchestrator pass (manifest-
-    based skip-set + partial-success preservation make that cheap) than
-    burn 3-4x the daily Groq quota on retry-then-fail loops. The sleeps
-    on 429 / transient errors are generous so the one retry actually
-    gets some breathing room.
+    Cloudflare serves the same @cf/openai/whisper-large-v3-turbo weights Groq
+    did, and its `segments` entries carry avg_logprob / no_speech_prob /
+    compression_ratio under exactly the names the manifest builder already
+    reads — so the payload drops straight in. It also returns word-level
+    timestamps, which Groq's verbose_json did not. Language moves: Groq put it
+    at the top level, Cloudflare puts it in `transcription_info` (as an ISO
+    code, "ja", where Groq said "japanese").
+
+    Audio goes as base64 inside JSON, which inflates the body ~33%.
+
+    Why this replaced Groq: the free on_demand tier capped at 200k requests/day
+    and, once spent, returned 429 on every call for a full day — indistinguish-
+    able from a transient failure, so the retry passes silently burned VAD work
+    transcribing nothing. Cloudflare bills ~$0.00051/audio-minute (about $0.80
+    for the entire Pimsleur corpus) with no daily wall, and measured 64/64
+    successes at both 8 and 24 concurrent requests where Groq failed ~60% at 32.
+    Retries are cheap now that a failure means a real error rather than an
+    exhausted quota, so this retries twice instead of once.
     """
-    fields = [
-        ("model", model),
-        ("temperature", "0"),
-        ("response_format", "verbose_json"),
-    ]
+    account_id, api_token = creds
+    url = f"{CF_AI_BASE}/{account_id}/ai/run/@cf/openai/{model}"
+    body = json.dumps({"audio": base64.b64encode(wav_bytes).decode()})
     last_error = None
     for attempt in range(retries + 1):
         try:
             resp = requests.post(
-                GROQ_URL,
-                headers={"Authorization": f"Bearer {api_key}"},
-                data=dict(fields),
-                files={"file": ("clip.wav", wav_bytes, "audio/wav")},
+                url,
+                headers={"Authorization": f"Bearer {api_token}",
+                         "Content-Type": "application/json"},
+                data=body,
                 timeout=timeout,
             )
             if resp.status_code == 429:
@@ -274,12 +297,13 @@ def transcribe_clip(wav_bytes: bytes, api_key: str, model: str,
                 last_error = "429"
                 continue
             resp.raise_for_status()
-            payload = resp.json()
+            result = (resp.json() or {}).get("result") or {}
+            info = result.get("transcription_info") or {}
             return {
                 "ok": True,
-                "text": (payload.get("text") or "").strip(),
-                "language": payload.get("language") or "",
-                "payload": payload,  # Full verbose_json — keep everything
+                "text": (result.get("text") or "").strip(),
+                "language": info.get("language") or "",
+                "payload": result,  # segments + word timestamps + usage
                 "error": None,
             }
         except Exception as e:
@@ -292,7 +316,7 @@ def transcribe_clip(wav_bytes: bytes, api_key: str, model: str,
 def process_lesson(mp3_path: Path, lesson_id: str,
                    target_lang: str, espeak_lang: str | None,
                    vad_fn, save_audio,
-                   audio_dir: Path, api_key: str, model: str,
+                   audio_dir: Path, creds: tuple[str, str], model: str,
                    workers: int = 8,
                    skip_seg_idxs: set[int] | None = None) -> tuple[list[dict], bool]:
     """Process one Pimsleur lesson.
@@ -355,7 +379,7 @@ def process_lesson(mp3_path: Path, lesson_id: str,
     # Second pass: parallel Whisper. Each call is one segment.
     def whisper_one(item):
         seg_idx, start, end, clip, wav_bytes = item
-        w = transcribe_clip(wav_bytes, api_key, model)
+        w = transcribe_clip(wav_bytes, creds, model)
         return seg_idx, start, end, clip, w
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -390,7 +414,11 @@ def process_lesson(mp3_path: Path, lesson_id: str,
         text = whisper["text"]
         if not text or len(text) < 2:
             continue
-        if espeak_lang is not None:
+        # The espeak gate only screens for text espeak can label, so it does
+        # not apply to backend languages (eSpeak is never their label source;
+        # their G2P sidecars do their own explicit excluding). It would also
+        # wrongly drop every segment on machines without the espeak fork.
+        if espeak_lang is not None and target_lang not in BACKEND_REQUIRED_LANGS:
             try:
                 phonemes, _, _ = phonemize(text, espeak_lang)
             except Exception:
@@ -404,8 +432,8 @@ def process_lesson(mp3_path: Path, lesson_id: str,
             sf.write(dest, clip, 16000)
         except (OSError, sf.LibsndfileError) as e:
             # Filesystem failure (read-only mount, disk full, vanished path).
-            # Abort the whole run — continuing would burn Groq quota on
-            # successes that can't be persisted.
+            # Abort the whole run — continuing would keep paying to
+            # transcribe successes that can't be persisted.
             raise DiskWriteError(f"sf.write failed at {dest}: {e}") from e
 
         # Extract the highest-signal Whisper fields into the manifest
@@ -500,12 +528,17 @@ def main() -> None:
                         help="Limit to one or more target language codes.")
     parser.add_argument("--max-lessons-per-lang", type=int, default=None)
     parser.add_argument("--model", default="whisper-large-v3-turbo")
-    parser.add_argument("--workers", type=int, default=8,
+    parser.add_argument("--workers", type=int, default=6,
                         help="Concurrent Whisper requests per lesson.")
     parser.add_argument("--lesson-workers", type=int, default=4,
                         help="How many lessons to process concurrently. Total "
                              "Whisper calls in flight = workers * lesson-workers. "
-                             "4*8=32 is a comfortable load for Groq.")
+                             "6*4=24 is the concurrency measured clean against "
+                             "Cloudflare Workers AI: 64/64 successes at both 8 "
+                             "and 24 in flight, ~10.9 req/s and a ~1.35s median. "
+                             "No client-side rate limiter — the Groq tier needed "
+                             "one (400 RPM, and 32 in flight failed ~60% of "
+                             "calls); Cloudflare did not.")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--recover-partials", action="store_true",
@@ -547,9 +580,14 @@ def main() -> None:
         for lang in by_lang:
             by_lang[lang] = by_lang[lang][: args.max_lessons_per_lang]
 
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise SystemExit("GROQ_API_KEY is not set")
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    missing = [n for n, v in (("CLOUDFLARE_ACCOUNT_ID", account_id),
+                              ("CLOUDFLARE_API_TOKEN", api_token)) if not v]
+    if missing:
+        raise SystemExit(f"{' and '.join(missing)} not set (needs an "
+                         f"account-scoped Workers AI token)")
+    creds = (account_id, api_token)
 
     print("Loading silero-vad...")
     vad_model, vad_utils = torch.hub.load(
@@ -686,7 +724,7 @@ def main() -> None:
             entries, ok = process_lesson(
                 mp3, lid, lang, lesson_espeak,
                 vad_fn, save_audio,
-                st["audio_dir"], api_key, args.model,
+                st["audio_dir"], creds, args.model,
                 workers=args.workers,
                 skip_seg_idxs=skip,
             )

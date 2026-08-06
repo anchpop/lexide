@@ -22,9 +22,32 @@ LANG_CONFIG = {
     "por": "pt-BR",
     "spa": "es-ES",
     "rus": "ru-RU",
+    "tha": "th-TH",
+    "zho-hans": "cmn-CN",
+    "hin": "hi-IN",
+    "jpn": "ja-JP",
 }
 
 TAGGING_DATA = Path(__file__).resolve().parent.parent.parent / "tagging" / "train" / "data"
+
+
+def make_client() -> texttospeech.TextToSpeechClient:
+    """Authenticate with GOOGLE_CLOUD_API_KEY (env or repo .env), else ADC.
+
+    The API key path is what works on the Linux box, which has no gcloud
+    application-default credentials.
+    """
+    key = os.environ.get("GOOGLE_CLOUD_API_KEY")
+    if not key:
+        env_file = Path(__file__).resolve().parents[1] / ".env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith("GOOGLE_CLOUD_API_KEY="):
+                    key = line.split("=", 1)[1].strip().strip("'\"")
+                    break
+    if key:
+        return texttospeech.TextToSpeechClient(client_options={"api_key": key})
+    return texttospeech.TextToSpeechClient()
 
 
 def get_chirp3_voices(client: texttospeech.TextToSpeechClient, language_code: str) -> list[str]:
@@ -93,7 +116,7 @@ def generate_for_language(
     rps: float,
     extremes: int,
 ):
-    client = texttospeech.TextToSpeechClient()
+    client = make_client()
     language_code = LANG_CONFIG[lang]
     voices = get_chirp3_voices(client, language_code)
     if not voices:
@@ -107,7 +130,7 @@ def generate_for_language(
     shuffled = all_sentences.copy()
     rng.shuffle(shuffled)
 
-    if max_sentences is not None:
+    if max_sentences:
         sentences = shuffled[:max_sentences]
     else:
         sentences = shuffled
@@ -151,7 +174,9 @@ def generate_for_language(
         print(f"{lang}: all sentences already generated, skipping")
         return
 
-    print(f"{lang}: {len(todo)} sentences to generate ({len(existing)} already done)")
+    chars = sum(len(sentence) for sentence, _ in todo)
+    print(f"{lang}: {len(todo)} sentences to generate ({len(existing)} already done), "
+          f"{chars:,} chars ≈ ${chars / 1e6 * 30:.2f} at Chirp3-HD list price")
 
     audio_config = texttospeech.AudioConfig(
         audio_encoding=texttospeech.AudioEncoding.LINEAR16,
@@ -199,8 +224,11 @@ def main():
     parser.add_argument("--langs", nargs="+", default=list(LANG_CONFIG.keys()),
                         choices=list(LANG_CONFIG.keys()),
                         help="Languages to generate (default: all)")
-    parser.add_argument("--max-sentences", type=int, default=None,
-                        help="Max sentences per language (default: all)")
+    parser.add_argument("--max-sentences", type=int, default=5000,
+                        help="Max sentences per language. The default keeps a "
+                             "4-language run around $30 at Chirp3-HD list "
+                             "price and near source-parity with the core "
+                             "languages' tts split; pass 0 for all.")
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent / "audio",
                         help="Output root directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")

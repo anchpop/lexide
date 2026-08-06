@@ -22,6 +22,12 @@ LANG_CONFIG = {
     "por": "pt_br",
     "spa": "es_419",
     "rus": "ru_ru",
+    # New learner languages. Keep the repository's language identifiers here;
+    # the values are FLEURS' config/directory identifiers.
+    "tha": "th_th",
+    "zho-hans": "cmn_hans_cn",
+    "hin": "hi_in",
+    "jpn": "ja_jp",
 }
 
 # FLEURS audio dialects that differ from the canonical espeak voice in
@@ -31,6 +37,13 @@ LANG_CONFIG = {
 # mislabel c/z as θ. Langs not listed match the canonical voice (left as None).
 FLEURS_ESPEAK_VOICE = {
     "spa": "es-419",
+}
+
+# Source metadata repairs verified against the corresponding recordings.
+# Keyed by original FLEURS audio id so a re-download remains deterministic.
+TEXT_CORRECTIONS = {
+    ("hin", "1485690589703092330.wav"): "300 और गाड़ियों से संख्या बनती हैं, 1,300 गाडियाँ जो मंगवाई गई हैं ताकि भीड़भाड़ से निजात मिल सके।",
+    ("hin", "960460417485172369.wav"): "300 और गाड़ियों से संख्या बनती हैं, 1,300 गाडियाँ जो मंगवाई गई हैं ताकि भीड़भाड़ से निजात मिल सके।",
 }
 
 
@@ -106,6 +119,7 @@ def download_for_language(lang: str, output_root: Path):
             if meta is None:
                 continue
             sentence, gender = meta
+            sentence = TEXT_CORRECTIONS.get((lang, audio_filename), sentence)
             rid = recording_id(lang, audio_filename)
             wav_path = out_dir / f"{rid}.wav"
             if not wav_path.exists():
@@ -115,6 +129,8 @@ def download_for_language(lang: str, output_root: Path):
                 "file": f"{rid}.wav",
                 "sentence": sentence,
                 "source": "fleurs",
+                "license": "CC BY 4.0",
+                "attribution_url": "https://huggingface.co/datasets/google/fleurs",
                 "voice": None,
                 "espeak_voice": FLEURS_ESPEAK_VOICE.get(lang),
                 "gender": gender or None,

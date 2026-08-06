@@ -1,14 +1,14 @@
-"""Train the unified factorized-CTC + stress model end-to-end.
+"""Train one joint factorized CTC pronunciation model end-to-end.
 
 Three heads on top of a single Wav2Vec2 backbone:
   - nonblank   (binary)     — addresses CTC blank-dominance (factorized CTC)
   - phoneme    (V-way)      — joint with nonblank → standard CTC log-probs
-  - stress     (3-way)      — per-frame stress prediction (none/primary/secondary)
+  - stress     (3-way)      — part of each emitted joint CTC symbol
+  - language-specific prosody — selected per example and joined to that symbol
 
-Stress supervision uses online torchaudio.forced_align on the model's *own*
-factorized log-probs to assign per-frame stress labels. To avoid garbage
-supervision during the cold start, stress loss is disabled until --stress-warmup-steps
-have elapsed (by which point phoneme alignment is reasonable).
+There is one blank and one CTC alignment.  During warmup only phone symbols
+participate; afterwards the emitted alphabet is phone × stress × the applicable
+language factor.  Other-language batches do not reference that head's graph.
 
 Fresh from facebook/wav2vec2-xls-r-2b — no external model dependencies, no
 warm-start from earlier phoneme model.
@@ -23,7 +23,6 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-import torchaudio.functional as AF
 from torch.utils.data import DataLoader, ConcatDataset, Subset, random_split
 from tqdm import tqdm
 
@@ -32,11 +31,12 @@ import wandb
 from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec2Processor
 
 from .dataset import (
-    StressDataset, collate_fn, collate_fn_augment, NUM_STRESS_LABELS,
+    StressDataset, collate_fn, collate_fn_augment,
     make_train_collate,
     LengthBucketedBatchSampler, get_audio_lengths,
 )
 from .factorized_ctc import FactorizedCTCModel
+from .joint_ctc import joint_ctc_loss
 
 
 def load_processor(model_name: str):
@@ -105,74 +105,6 @@ def load_asr_audit_exclusions(
     by_lang = ", ".join(f"{lang}={len(exclusions[lang])}" for lang in sorted(exclusions))
     print(f"Loaded ASR-audit exclusions: {total}" + (f" ({by_lang})" if by_lang else ""))
     return exclusions
-
-
-WAV2VEC2_CONV_RATIO = 320  # 16kHz / 320 = 50 fps frames
-
-
-def make_labels(phoneme_ids: torch.Tensor, phoneme_lens: torch.Tensor) -> torch.Tensor:
-    labels = phoneme_ids.clone()
-    L_max = labels.shape[1]
-    valid = torch.arange(L_max, device=labels.device).unsqueeze(0) < phoneme_lens.unsqueeze(1)
-    labels[~valid] = -100
-    return labels
-
-
-def _walk_vectorized(alignments: torch.Tensor, stress_seq: torch.Tensor, blank_id: int) -> torch.Tensor:
-    """Map a single-sample CTC alignment to per-frame stress labels via tensor ops.
-
-    Mirror of the approach in train.py. CTC forced_align separates same-token
-    target positions with at least one blank, so a `current != previous` transition
-    cleanly marks each new phoneme.
-    """
-    L = stress_seq.shape[0]
-    is_non_blank = alignments != blank_id
-    shifted = torch.cat(
-        [alignments.new_full((1,), blank_id), alignments[:-1]], dim=0,
-    )
-    is_transition = (alignments != shifted) & is_non_blank
-    phoneme_pos = is_transition.long().cumsum(0) - 1
-    in_range = (phoneme_pos >= 0) & (phoneme_pos < L)
-    phoneme_pos_safe = phoneme_pos.clamp(0, max(L - 1, 0))
-    labels = stress_seq[phoneme_pos_safe]
-    return torch.where(is_non_blank & in_range, labels, torch.zeros_like(labels))
-
-
-def compute_frame_stress_labels(log_probs, phoneme_ids, stress_seq, phoneme_lens,
-                                audio_lens, blank_id):
-    """Per-sample forced alignment → per-frame stress targets.
-
-    Uses our factorized model's own log-probs (which sum to 1 over the vocab
-    by construction). Per-sample because batched torchaudio.forced_align was
-    unreliable in the version used by train.py.
-    """
-    batch_size, max_frames = log_probs.shape[:2]
-    device = log_probs.device
-    frame_labels = torch.zeros(batch_size, max_frames, dtype=torch.long, device=device)
-    frame_masks = torch.zeros(batch_size, max_frames, dtype=torch.bool, device=device)
-
-    audio_lens_cpu = audio_lens.tolist()
-    phoneme_lens_cpu = phoneme_lens.tolist()
-
-    for i in range(batch_size):
-        n_frames = min(audio_lens_cpu[i] // WAV2VEC2_CONV_RATIO, max_frames)
-        n_phonemes = phoneme_lens_cpu[i]
-        if n_frames <= 0 or n_phonemes == 0 or n_frames < n_phonemes:
-            continue
-
-        try:
-            lp = log_probs[i, :n_frames].unsqueeze(0)
-            targets = phoneme_ids[i, :n_phonemes].unsqueeze(0)
-            alignments, _ = AF.forced_align(lp, targets, blank=blank_id)
-            labels = _walk_vectorized(
-                alignments.squeeze(0), stress_seq[i, :n_phonemes], blank_id,
-            )
-            frame_labels[i, :n_frames] = labels
-            frame_masks[i, :n_frames] = True
-        except Exception:
-            continue
-
-    return frame_labels, frame_masks
 
 
 def vad_loss(nonblank_logit, vad_probs, vad_lens, n_frames):
@@ -256,20 +188,6 @@ def distill_kl_loss(
     return (temperature ** 2) * per_frame.sum() / denom
 
 
-def distill_stress_kl(
-    student_stress_logits: torch.Tensor,
-    teacher_stress_logits: torch.Tensor,
-    frame_mask: torch.Tensor,
-) -> torch.Tensor:
-    """Per-frame KL(teacher ‖ student) on the 3-way stress head (valid frames)."""
-    s = F.log_softmax(student_stress_logits.float(), dim=-1)
-    t = F.log_softmax(teacher_stress_logits.float(), dim=-1)
-    per_frame = (t.exp() * (t - s)).sum(dim=-1)              # (B, T)
-    per_frame = per_frame * frame_mask
-    denom = frame_mask.sum().clamp(min=1)
-    return per_frame.sum() / denom
-
-
 def check_finite(name: str, value, *, enabled: bool) -> None:
     """Fail fast with a useful tensor name when debugging NaNs/Infs."""
     if not enabled or not torch.is_tensor(value):
@@ -350,126 +268,27 @@ def check_parameter_grads(model, *, enabled: bool) -> None:
         )
 
 
-def factorial_feature_ctc_loss(
-    feature_log_probs: torch.Tensor,
-    nonblank_logit: torch.Tensor,
-    feature_targets: torch.Tensor,
-    input_lengths: torch.Tensor,
-    target_lengths: torch.Tensor,
-) -> torch.Tensor:
-    """CTC over vector-valued feature labels with one shared alignment.
-
-    feature_log_probs: (B, T, F, K) log P(feature_f=value | frame)
-    nonblank_logit:    (B, T) shared blank/nonblank logit
-    feature_targets:   (B, P, F) target feature values in {0, 1, 2}
-
-    For target position p at frame t, the emit score uses the mean feature
-    log-probability for that whole target vector:
-        score(vec_p | t) = mean_f log P(feature_f = vec_p[f] | t)
-    This is the log geometric mean of per-feature probabilities. It keeps the
-    "all features should match" product-style signal while keeping the aux loss
-    scale comparable to a single categorical head instead of growing with F.
-
-    Then run the usual CTC forward recursion over interleaved blank / emit
-    states, with skip transitions blocked for repeated feature vectors.
-    """
-    B, T_max, F_dim, K = feature_log_probs.shape
-    P_max = feature_targets.shape[1]
-    active = input_lengths > 0
-    if not active.any():
-        return feature_log_probs.new_zeros(())
-
-    lp = feature_log_probs.float()
-    blank_lp = F.logsigmoid(-nonblank_logit).float()                  # (B, T)
-    emit_base = F.logsigmoid(nonblank_logit).float()                  # (B, T)
-    neg_inf = torch.finfo(lp.dtype).min
-
-    if P_max == 0:
-        blank_mask = torch.arange(T_max, device=lp.device)[None, :] < input_lengths[:, None]
-        losses = -(blank_lp * blank_mask).sum(dim=1)
-        return losses[active].mean()
-
-    targets = feature_targets.long().clamp(min=0, max=K - 1)           # (B, P, F)
-
-    # emit_scores[b,t,p] = log P(nonblank_t) + mean_f log P(feature_f=target[p,f] | t)
-    gather_idx = targets.unsqueeze(1).unsqueeze(-1).expand(B, T_max, P_max, F_dim, 1)
-    lp_expanded = lp.unsqueeze(2).expand(B, T_max, P_max, F_dim, K)
-    emit_scores = torch.gather(lp_expanded, dim=4, index=gather_idx).squeeze(-1).mean(dim=-1)
-    emit_scores = emit_scores + emit_base.unsqueeze(-1)                # (B, T, P)
-
-    p_idx = torch.arange(P_max, device=lp.device)
-    p_valid = p_idx.unsqueeze(0) < target_lengths.unsqueeze(1)          # (B, P)
-
-    repeated = torch.zeros(B, P_max, dtype=torch.bool, device=lp.device)
-    if P_max > 1:
-        repeated[:, 1:] = (targets[:, 1:] == targets[:, :-1]).all(dim=2)
-        repeated &= p_valid
-    min_input_lengths = target_lengths + repeated.sum(dim=1)
-    possible = input_lengths >= min_input_lengths
-
-    S_max = 2 * P_max + 1
-    s_idx = torch.arange(S_max, device=lp.device)
-    is_emit_state = s_idx % 2 == 1
-    emit_pos = s_idx // 2
-    state_valid = s_idx.unsqueeze(0) < (2 * target_lengths + 1).unsqueeze(1)
-
-    state_scores = lp.new_full((B, T_max, S_max), neg_inf)
-    state_scores[:, :, 0::2] = blank_lp.unsqueeze(-1)
-    if P_max > 0:
-        state_scores[:, :, 1::2] = emit_scores
-    state_scores = torch.where(state_valid.unsqueeze(1), state_scores, state_scores.new_full((), neg_inf))
-
-    skip_mask = torch.zeros(B, S_max, dtype=torch.bool, device=lp.device)
-    if P_max > 1:
-        emit_positions_for_state = emit_pos.unsqueeze(0).expand(B, S_max)
-        emit_positions_safe = emit_positions_for_state.clamp(max=P_max - 1)
-        repeated_for_state = torch.gather(repeated, dim=1, index=emit_positions_safe)
-        skip_mask = (
-            is_emit_state.unsqueeze(0)
-            & (s_idx.unsqueeze(0) >= 3)
-            & state_valid
-            & ~repeated_for_state
-        )
-
-    alpha = lp.new_full((B, S_max), neg_inf)
-    alpha[:, 0] = state_scores[:, 0, 0]
-    if P_max > 0:
-        alpha[:, 1] = torch.where(target_lengths > 0, state_scores[:, 0, 1], alpha[:, 1])
-    alpha = torch.where(state_valid, alpha, alpha.new_full((), neg_inf))
-
-    for t in range(1, T_max):
-        from_prev_state = torch.cat([alpha.new_full((B, 1), neg_inf), alpha[:, :-1]], dim=1)
-        from_skip = torch.cat([alpha.new_full((B, 2), neg_inf), alpha[:, :-2]], dim=1)
-        from_skip = torch.where(skip_mask, from_skip, alpha.new_full((B, S_max), neg_inf))
-        transitions = torch.logsumexp(
-            torch.stack([alpha, from_prev_state, from_skip], dim=0),
-            dim=0,
-        )
-        next_alpha = transitions + state_scores[:, t]
-        next_alpha = torch.where(state_valid, next_alpha, next_alpha.new_full((), neg_inf))
-        frame_active = t < input_lengths
-        alpha = torch.where(frame_active.unsqueeze(1), next_alpha, alpha)
-
-    last_emit_state = (2 * target_lengths - 1).clamp(min=0)
-    last_blank_state = 2 * target_lengths
-    final_emit = torch.gather(alpha, dim=1, index=last_emit_state.unsqueeze(1)).squeeze(1)
-    final_blank = torch.gather(alpha, dim=1, index=last_blank_state.unsqueeze(1)).squeeze(1)
-    loglik = torch.logsumexp(torch.stack([final_emit, final_blank], dim=0), dim=0)
-
-    losses = -loglik / target_lengths.clamp(min=1).float()
-    losses = torch.where(possible, losses, losses.new_zeros(()))
-    return losses[active].mean()
+def active_language_heads(model, batch) -> list[str]:
+    """Return only heads with at least one trustworthy target in this batch."""
+    active = []
+    for name, spec in model.language_head_specs.items():
+        availability = batch[f"{spec['target']}_available"]
+        if any(
+            lang == spec["lang"] and bool(availability[i].item())
+            for i, lang in enumerate(batch["langs"])
+        ):
+            active.append(name)
+    return active
 
 
 def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 blank_id, stress_active: bool, stress_weight: float,
                 vad_weight: float, invalid_mass_weight: float,
-                feature_aux_weight: float, grad_clip_norm: float,
+                grad_clip_norm: float,
                 debug_finite: bool, max_train_batches: int | None,
                 teacher=None, teacher_vocab_remap=None,
                 distill_weight: float = 0.0,
-                distill_temperature: float = 1.0,
-                distill_stress_weight: float = 0.0):
+                distill_temperature: float = 1.0):
     model.train()
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -477,24 +296,18 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
     )
 
     total_ctc = 0.0
-    total_stress = 0.0
     total_vad = 0.0
     total_invalid = 0.0
-    total_aux = 0.0
     total_distill = 0.0
-    n_stress_batches = 0
     n_vad_batches = 0
     n_invalid_batches = 0
-    n_aux_batches = 0
     n_distill_batches = 0
     n_batches = 0
     total_samples = 0
     total_audio_sec = 0.0
     grad_norms = []
     nonblank_means = []
-    stress_correct = 0
-    stress_total = 0
-    timings = {"data": 0.0, "forward": 0.0, "forced_align": 0.0, "loss_backward": 0.0}
+    timings = {"data": 0.0, "forward": 0.0, "joint_ctc": 0.0, "loss_backward": 0.0}
 
     torch.cuda.reset_peak_memory_stats()
     epoch_start = time.perf_counter()
@@ -507,19 +320,21 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
 
         audio = batch["audio"].to(device, non_blocking=True)
         audio_mask = batch["audio_mask"].to(device, non_blocking=True)
-        audio_lens = batch["audio_lens"].to(device, non_blocking=True)
         phoneme_ids = batch["phoneme_ids"].to(device, non_blocking=True)
         phoneme_lens = batch["phoneme_lens"].to(device, non_blocking=True)
         stress_seq = batch["stress_seq"].to(device, non_blocking=True)
-        labels = make_labels(phoneme_ids, phoneme_lens)
+        tone_seq = batch["tone_seq"].to(device, non_blocking=True)
+        pitch_accent_seq = batch["pitch_accent_seq"].to(device, non_blocking=True)
 
         torch.cuda.synchronize()
         t_fwd = time.perf_counter()
+        batch_language_heads = active_language_heads(model, batch) if stress_active else []
         with autocast_ctx:
-            outputs = model(audio, attention_mask=audio_mask, labels=labels,
-                            label_lengths=phoneme_lens)
-            ctc_loss = outputs["loss"]
-        check_finite("loss/ctc", ctc_loss, enabled=debug_finite)
+            outputs = model(
+                audio,
+                attention_mask=audio_mask,
+                active_language_heads=batch_language_heads,
+            )
         for name, value in outputs.items():
             if name == "log_probs":
                 check_ctc_log_probs(f"outputs/{name}", value, model, enabled=debug_finite)
@@ -528,31 +343,33 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         torch.cuda.synchronize()
         timings["forward"] += time.perf_counter() - t_fwd
 
-        stress_loss = torch.zeros((), device=device)
-        if stress_active:
-            t_fa = time.perf_counter()
-            # forced_align needs fp32 log-probs for numerical stability.
-            log_probs_fp32 = outputs["log_probs"].detach().float()
-            frame_labels, frame_masks = compute_frame_stress_labels(
-                log_probs_fp32, phoneme_ids, stress_seq, phoneme_lens,
-                audio_lens, blank_id,
-            )
-            torch.cuda.synchronize()
-            timings["forced_align"] += time.perf_counter() - t_fa
-
-            valid = frame_masks.view(-1)
-            if valid.sum() > 0:
-                stress_logits = outputs["stress_logits"]
-                flat_logits = stress_logits.view(-1, NUM_STRESS_LABELS)[valid].float()
-                flat_labels = frame_labels.view(-1)[valid]
-                stress_loss = F.cross_entropy(flat_logits, flat_labels)
-                check_finite("loss/stress", stress_loss, enabled=debug_finite)
-                with torch.no_grad():
-                    preds = flat_logits.argmax(dim=-1)
-                    stress_correct += (preds == flat_labels).sum().item()
-                    stress_total += flat_labels.shape[0]
-                n_stress_batches += 1
-                total_stress += stress_loss.item()
+        t_joint = time.perf_counter()
+        n_frames = model.backbone._get_feat_extract_output_lengths(
+            audio_mask.sum(-1)
+        ).to(torch.long)
+        ctc_loss = joint_ctc_loss(
+            phone_log_probs=outputs["log_probs"],
+            phone_targets=phoneme_ids,
+            target_lengths=phoneme_lens,
+            input_lengths=n_frames,
+            phone_blank_id=blank_id,
+            stress_logits=outputs["stress_logits"] if stress_active else None,
+            stress_weight=stress_weight,
+            stress_targets=stress_seq,
+            language_head_logits=(
+                outputs["language_head_logits"] if stress_active else {}
+            ),
+            language_head_specs=(model.language_head_specs if stress_active else {}),
+            aligned_targets={"tone": tone_seq, "pitch_accent": pitch_accent_seq},
+            factor_available={
+                "tone": batch["tone_available"],
+                "pitch_accent": batch["pitch_accent_available"],
+            },
+            langs=batch["langs"],
+        )
+        check_finite("loss/ctc", ctc_loss, enabled=debug_finite)
+        torch.cuda.synchronize()
+        timings["joint_ctc"] += time.perf_counter() - t_joint
 
         vl = torch.zeros((), device=device)
         if vad_weight > 0 and batch.get("vad_probs") is not None:
@@ -579,27 +396,6 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             check_finite("loss/off_manifold", im_loss, enabled=debug_finite)
             total_invalid += im_loss.item()
             n_invalid_batches += 1
-
-        aux_loss = torch.zeros((), device=device)
-        if feature_aux_weight > 0 and "feature_log_probs" in outputs:
-            # Factorial feature CTC. Targets are feature vectors looked up from
-            # the phoneme sequence; the dynamic program keeps one shared CTC
-            # alignment over whole vectors instead of 24 independent alignments.
-            flp = outputs["feature_log_probs"]         # (B, T, F, 3)
-            backbone = model.backbone
-            n_frames_feat = backbone._get_feat_extract_output_lengths(
-                audio_mask.sum(-1)
-            ).to(torch.long)
-            ft = model.feature_table                  # (V, F), values in {0,1,2}
-            safe_ids = phoneme_ids.clamp(min=0, max=ft.shape[0] - 1)
-            feat_targets = ft[safe_ids]               # (B, P, F), values in {0,1,2}
-            aux_loss = factorial_feature_ctc_loss(
-                flp, outputs["nonblank_logit"], feat_targets,
-                n_frames_feat, phoneme_lens,
-            )
-            check_finite("loss/feature_aux", aux_loss, enabled=debug_finite)
-            total_aux += aux_loss.item()
-            n_aux_batches += 1
 
         distill_loss = torch.zeros((), device=device)
         if teacher is not None and distill_weight > 0:
@@ -642,16 +438,9 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             check_finite("loss/distill", distill_loss, enabled=debug_finite)
             total_distill += distill_loss.item()
             n_distill_batches += 1
-            if distill_stress_weight > 0:
-                distill_loss = distill_loss + distill_stress_weight * distill_stress_kl(
-                    outputs["stress_logits"], teacher_out["stress_logits"], frame_mask,
-                )
-
         loss = (ctc_loss
-                + stress_weight * stress_loss
                 + vad_weight * vl
                 + invalid_mass_weight * im_loss
-                + feature_aux_weight * aux_loss
                 + distill_weight * distill_loss)
         check_finite("loss/total", loss, enabled=debug_finite)
 
@@ -681,8 +470,8 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         postfix = {"ctc": f"{ctc_loss.item():.3f}", "p_nb": f"{nonblank_means[-1]:.2f}"}
         if teacher is not None and n_distill_batches > 0:
             postfix["kd"] = f"{distill_loss.item():.3f}"
-        if stress_active and n_stress_batches > 0:
-            postfix["stress"] = f"{stress_loss.item():.3f}"
+        if stress_active:
+            postfix["joint"] = "prosody"
         postfix["g"] = f"{grad_norm.item():.1f}"
         pbar.set_postfix(**postfix)
         last_end = time.perf_counter()
@@ -695,11 +484,8 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
 
     return {
         "ctc_loss": total_ctc / nb,
-        "stress_loss": total_stress / max(n_stress_batches, 1) if n_stress_batches else 0.0,
-        "stress_acc": stress_correct / stress_total if stress_total else 0.0,
         "vad_loss": total_vad / max(n_vad_batches, 1) if n_vad_batches else 0.0,
         "off_manifold": total_invalid / max(n_invalid_batches, 1) if n_invalid_batches else 0.0,
-        "aux_ctc_loss": total_aux / max(n_aux_batches, 1) if n_aux_batches else 0.0,
         "distill_loss": total_distill / max(n_distill_batches, 1) if n_distill_batches else 0.0,
         "wallclock_sec": epoch_sec,
         "samples_per_sec": total_samples / epoch_sec,
@@ -707,7 +493,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         "peak_mem_gb": peak_mem_gb,
         "ms_per_batch_data": timings["data"] / nb * 1000,
         "ms_per_batch_forward": timings["forward"] / nb * 1000,
-        "ms_per_batch_forced_align": timings["forced_align"] / nb * 1000,
+        "ms_per_batch_joint_ctc": timings["joint_ctc"] / nb * 1000,
         "ms_per_batch_loss_backward": timings["loss_backward"] / nb * 1000,
         "grad_norm_mean": sum(grad_norms) / max(len(grad_norms), 1),
         "grad_norm_max": max(grad_norms, default=0.0),
@@ -717,77 +503,82 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
 
 @torch.no_grad()
 def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool,
-               debug_finite: bool = False, max_eval_batches: int | None = None):
+               stress_weight: float, debug_finite: bool = False,
+               max_eval_batches: int | None = None):
     model.eval()
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         if use_bf16 else contextlib.nullcontext()
     )
     total_ctc = 0.0
-    total_stress = 0.0
     n_batches = 0
-    n_stress_batches = 0
-    stress_correct = 0
-    stress_total = 0
-    per_class_correct = [0] * NUM_STRESS_LABELS
-    per_class_total = [0] * NUM_STRESS_LABELS
+    lang_loss_sum: dict[str, float] = {}
+    lang_count: dict[str, int] = {}
 
     for batch in tqdm(loader, desc="Eval"):
         audio = batch["audio"].to(device, non_blocking=True)
         audio_mask = batch["audio_mask"].to(device, non_blocking=True)
-        audio_lens = batch["audio_lens"].to(device, non_blocking=True)
         phoneme_ids = batch["phoneme_ids"].to(device, non_blocking=True)
         phoneme_lens = batch["phoneme_lens"].to(device, non_blocking=True)
         stress_seq = batch["stress_seq"].to(device, non_blocking=True)
-        labels = make_labels(phoneme_ids, phoneme_lens)
+        tone_seq = batch["tone_seq"].to(device, non_blocking=True)
+        pitch_accent_seq = batch["pitch_accent_seq"].to(device, non_blocking=True)
 
         with autocast_ctx:
-            outputs = model(audio, attention_mask=audio_mask, labels=labels,
-                            label_lengths=phoneme_lens)
-        check_finite("eval/loss", outputs["loss"], enabled=debug_finite)
+            outputs = model(
+                audio,
+                attention_mask=audio_mask,
+                active_language_heads=(
+                    active_language_heads(model, batch) if stress_active else []
+                ),
+            )
         for name, value in outputs.items():
             if name == "log_probs":
                 check_ctc_log_probs(f"eval/outputs/{name}", value, model, enabled=debug_finite)
             else:
                 check_finite(f"eval/outputs/{name}", value, enabled=debug_finite)
 
-        total_ctc += outputs["loss"].item()
+        n_frames = model.backbone._get_feat_extract_output_lengths(
+            audio_mask.sum(-1)
+        ).to(torch.long)
+        ctc_loss = joint_ctc_loss(
+            phone_log_probs=outputs["log_probs"],
+            phone_targets=phoneme_ids,
+            target_lengths=phoneme_lens,
+            input_lengths=n_frames,
+            phone_blank_id=blank_id,
+            stress_logits=outputs["stress_logits"] if stress_active else None,
+            stress_weight=stress_weight,
+            stress_targets=stress_seq,
+            language_head_logits=(
+                outputs["language_head_logits"] if stress_active else {}
+            ),
+            language_head_specs=(model.language_head_specs if stress_active else {}),
+            aligned_targets={"tone": tone_seq, "pitch_accent": pitch_accent_seq},
+            factor_available={
+                "tone": batch["tone_available"],
+                "pitch_accent": batch["pitch_accent_available"],
+            },
+            langs=batch["langs"],
+            reduction="none",
+        )
+        check_finite("eval/loss", ctc_loss, enabled=debug_finite)
+        total_ctc += ctc_loss.mean().item()
         n_batches += 1
-
-        if stress_active:
-            log_probs_fp32 = outputs["log_probs"].float()
-            frame_labels, frame_masks = compute_frame_stress_labels(
-                log_probs_fp32, phoneme_ids, stress_seq, phoneme_lens,
-                audio_lens, blank_id,
-            )
-            valid = frame_masks.view(-1)
-            if valid.sum() > 0:
-                stress_logits = outputs["stress_logits"]
-                flat_logits = stress_logits.view(-1, NUM_STRESS_LABELS)[valid].float()
-                flat_labels = frame_labels.view(-1)[valid]
-                stress_loss = F.cross_entropy(flat_logits, flat_labels)
-                total_stress += stress_loss.item()
-                n_stress_batches += 1
-                preds = flat_logits.argmax(dim=-1)
-                stress_correct += (preds == flat_labels).sum().item()
-                stress_total += flat_labels.shape[0]
-                for c in range(NUM_STRESS_LABELS):
-                    mask_c = flat_labels == c
-                    per_class_correct[c] += (preds[mask_c] == c).sum().item()
-                    per_class_total[c] += mask_c.sum().item()
+        # Per-language val loss: the joint mean hides a single broken
+        # language (e.g. a bad new-language sidecar) behind seven good ones.
+        for lang, sample_loss in zip(batch["langs"], ctc_loss.tolist()):
+            lang_loss_sum[lang] = lang_loss_sum.get(lang, 0.0) + sample_loss
+            lang_count[lang] = lang_count.get(lang, 0) + 1
         if max_eval_batches is not None and n_batches >= max_eval_batches:
             break
 
-    per_class_acc = {
-        f"val_stress_acc_class_{c}": per_class_correct[c] / per_class_total[c]
-        if per_class_total[c] > 0 else 0.0
-        for c in range(NUM_STRESS_LABELS)
-    }
     return {
         "ctc_loss": total_ctc / max(n_batches, 1),
-        "stress_loss": total_stress / max(n_stress_batches, 1) if n_stress_batches else 0.0,
-        "stress_acc": stress_correct / stress_total if stress_total else 0.0,
-        "per_class": per_class_acc,
+        "per_lang_ctc": {
+            lang: lang_loss_sum[lang] / lang_count[lang]
+            for lang in sorted(lang_loss_sum)
+        },
     }
 
 
@@ -797,15 +588,16 @@ def main():
     parser.add_argument("--model-name", type=str, default="facebook/wav2vec2-xls-r-2b")
     parser.add_argument("--processor-source", type=str,
                         default="facebook/wav2vec2-xlsr-53-espeak-cv-ft")
-    parser.add_argument("--epochs", type=int, default=7)
+    parser.add_argument("--epochs", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--backbone-lr", type=float, default=1e-5)
     parser.add_argument("--head-lr", type=float, default=1e-3)
     parser.add_argument("--max-audio-sec", type=float, default=16.0)
     parser.add_argument("--val-split", type=float, default=0.05)
     parser.add_argument("--stress-weight", type=float, default=0.3,
-                        help="Coefficient on stress CE loss (CTC is the primary task).")
-    parser.add_argument("--vad-weight", type=float, default=0.0,
+                        help="Inverse temperature for the normalized stress factor "
+                             "inside joint CTC. This is not a separate loss weight.")
+    parser.add_argument("--vad-weight", type=float, default=0.05,
                         help="Coefficient on VAD-anchor BCE loss on the nonblank head. "
                              "Soft regularizer pulling the nonblank decision toward "
                              "earshot VAD output. 0 disables. ~0.1 is a reasonable start.")
@@ -821,17 +613,14 @@ def main():
                              "phoneme combinations not present in the vocab.")
     parser.add_argument("--use-aux-features", action="store_true",
                         help="Enable articulatory feature heads alongside the direct "
-                             "phoneme head. By default, features participate as "
+                             "phoneme head. Features participate as "
                              "weighted factors inside the main phoneme CTC emission "
-                             "score via --feature-emission-weight. A legacy separate "
-                             "factorial feature CTC can additionally be enabled with "
-                             "--feature-aux-weight. Mutually exclusive with "
+                             "score via --feature-emission-weight. Mutually exclusive with "
                              "--use-features.")
     parser.add_argument("--feature-aux-weight", type=float, default=0.0,
-                        help="Coefficient on the factorial feature CTC loss. Only "
-                             "meaningful with --use-aux-features. Normally 0 when "
-                             "--feature-emission-weight is active, since features "
-                             "already participate in the main CTC emission score.")
+                        help="Removed historical second-CTC path; must remain 0. "
+                             "Articulatory features may only participate in the "
+                             "main CTC emission score.")
     parser.add_argument("--feature-emission-weight", type=float, default=0.3,
                         help="In --use-aux-features mode, include the articulatory "
                              "feature heads as weighted factors inside the main "
@@ -847,17 +636,20 @@ def main():
                              "signal; (3) shared Linear(K*H+64, 768)→GELU→Dropout base feeding "
                              "all four heads, so phoneme and feature heads share a learned "
                              "projection (they predict overlapping information by construction).")
-    parser.add_argument("--mel-sidechannel", action="store_true",
+    parser.add_argument("--mel-sidechannel", action=argparse.BooleanOptionalAction,
+                        default=True,
                         help="Concatenate a raw log-mel side-channel (projected to "
                              "acoustic_dim) onto the FINAL encoder layer feeding the heads — "
                              "the regularized-heads acoustic channel WITHOUT the K-layer "
                              "mixture (which empirically collapsed to L48+L0). Gives heads "
                              "the low-level acoustic the final layer abstracts away.")
-    parser.add_argument("--mlp-heads", action="store_true",
+    parser.add_argument("--mlp-heads", action=argparse.BooleanOptionalAction,
+                        default=True,
                         help="Make the nonblank + phoneme heads 2-layer MLPs "
                              "(din→din→GELU→dout) instead of single linears. A cheap "
                              "'bigger head' on top of the 2B encoder.")
-    parser.add_argument("--audio-degrade", action="store_true",
+    parser.add_argument("--audio-degrade", action=argparse.BooleanOptionalAction,
+                        default=True,
                         help="Training-time audio degradation augmentation (noise/reverb/"
                              "band-limit/clip/EQ, identity- and length-preserving). For "
                              "noise-robustness of the mel side-channel — see dataset.degrade_waveform.")
@@ -865,9 +657,9 @@ def main():
                         help="Per-clip probability of applying audio degradation "
                              "(the rest stay clean so studio-quality perf is preserved).")
     parser.add_argument("--stress-warmup-steps", type=int, default=400,
-                        help="Disable stress loss for this many steps so phoneme "
-                             "model can converge enough for forced alignment to be meaningful. "
-                             "At ~440 steps/epoch this gives 1 epoch of CTC-only warmup.")
+                        help="Use phone-only CTC for this many steps, then switch to "
+                             "joint phone × stress × language-prosody CTC. At ~440 "
+                             "steps/epoch, 400 gives about one phone-only epoch.")
     parser.add_argument("--min-rms", type=float, default=0.005)
     parser.add_argument("--min-whisper-logprob", type=float, default=-0.7,
                         help="Drop Pimsleur clips whose Whisper avg_logprob is "
@@ -881,9 +673,7 @@ def main():
                              "sources (FLEURS, Tatoeba, etc.). Rows whose current "
                              "target text still matches the audited expected_sha256 "
                              "and have CER/WER/PER above the corresponding threshold "
-                             "are excluded from training. If not set, defaults to "
-                             "fleurs_asr_exclusions.jsonl + tatoeba_asr_exclusions.jsonl "
-                             "if those files exist.")
+                             "are excluded from training. Off unless passed explicitly.")
     parser.add_argument("--audit-min-per", type=float, default=1e-12)
     parser.add_argument("--audit-min-cer", type=float, default=1e-12)
     parser.add_argument("--audit-min-wer", type=float, default=1e-12)
@@ -893,7 +683,8 @@ def main():
     parser.add_argument("--fleurs-audit-min-per", type=float, default=None)
     parser.add_argument("--fleurs-audit-min-cer", type=float, default=None)
     parser.add_argument("--fleurs-audit-min-wer", type=float, default=None)
-    parser.add_argument("--use-narrowed", action="store_true",
+    parser.add_argument("--use-narrowed", action=argparse.BooleanOptionalAction,
+                        default=True,
                         help="Train on the narrowed phonemes file (coda-nasal vowels "
                              "nasalized + English flaps) where it exists, else fall back "
                              "to phonemes.jsonl. A full drop-in from espeak_audit/narrow.py.")
@@ -922,9 +713,7 @@ def main():
                         help="Softmax temperature for distillation; KL is scaled "
                              "by T² (Hinton). 1.0 is an exact no-op.")
     parser.add_argument("--distill-stress-weight", type=float, default=0.0,
-                        help="Optional KL distillation on the stress head (added "
-                             "to the KD term). 0 = off; the existing forced-align "
-                             "hard-stress path is unchanged either way.")
+                        help="Removed separate-head distillation path; must remain 0.")
     parser.add_argument("--save-dir", type=Path, default=Path("checkpoints-unified"))
     parser.add_argument("--wandb-project", type=str, default="lexide-pronunciation")
     parser.add_argument("--num-workers", type=int, default=16)
@@ -945,7 +734,7 @@ def main():
                              "mostly. With it on (default), eng pimsleur "
                              "drops to ~17k (matching the next biggest, fra). "
                              "Pass --no-source-cap-second to opt out.")
-    parser.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gradient-checkpointing",
                         action=argparse.BooleanOptionalAction,
                         default=False)
@@ -968,6 +757,19 @@ def main():
                              "Both flags must be set together — there's no default, so this "
                              "path can't trigger by accident.")
     args = parser.parse_args()
+
+    if args.stress_weight <= 0:
+        raise SystemExit("--stress-weight must be positive")
+    if args.feature_aux_weight != 0.0:
+        raise SystemExit(
+            "--feature-aux-weight was removed because it created a second CTC "
+            "alignment; use --feature-emission-weight inside the main CTC."
+        )
+    if args.distill_stress_weight != 0.0:
+        raise SystemExit(
+            "--distill-stress-weight was removed; prosody supervision belongs "
+            "inside the joint CTC objective."
+        )
 
     if (args.resume_from is None) != (args.resume_epoch is None):
         raise SystemExit("--resume-from and --resume-epoch must be provided together.")
@@ -1091,26 +893,17 @@ def main():
         t_params = sum(p.numel() for p in teacher.parameters())
         extra = model.vocab_size - teacher.vocab_size
         print(f"Distillation ON: teacher {args.distill_teacher} ({t_params:,} params, "
-              f"frozen) | weight={args.distill_weight} T={args.distill_temperature} "
-              f"stress_weight={args.distill_stress_weight}")
+              f"frozen) | weight={args.distill_weight} T={args.distill_temperature}")
         print(f"  KD vocab remap: teacher {teacher.vocab_size} -> student "
               f"{model.vocab_size} classes by token string"
               + (f" ({extra} student-only tokens get no KD signal, hard-label only)"
                  if extra else " (identical vocab)"))
 
-    # Resolve audit-path inputs. The old `--fleurs-audit-path` is honored
-    # as an alias; the new `--audit-path` is the canonical multi-file form.
-    # Default: pick up both fleurs and tatoeba files from train/ if they exist.
+    # Resolve explicit audit-path inputs. The old `--fleurs-audit-path` is
+    # honored as an alias; no audit sidecar is auto-discovered.
     audit_paths = list(args.audit_path or [])
     if args.fleurs_audit_path is not None:
         audit_paths.append(args.fleurs_audit_path)
-    if not audit_paths:
-        train_dir = Path(__file__).resolve().parents[1]
-        for fname in ("fleurs_asr_exclusions.jsonl", "tatoeba_asr_exclusions.jsonl",
-                      "lang_exclusions.jsonl"):
-            p = train_dir / fname
-            if p.exists():
-                audit_paths.append(p)
     min_per = args.fleurs_audit_min_per if args.fleurs_audit_min_per is not None else args.audit_min_per
     min_cer = args.fleurs_audit_min_cer if args.fleurs_audit_min_cer is not None else args.audit_min_cer
     min_wer = args.fleurs_audit_min_wer if args.fleurs_audit_min_wer is not None else args.audit_min_wer
@@ -1206,8 +999,8 @@ def main():
 
     # Length-bucketed batch sampler — pre-compute audio lengths for train_ds
     # (cheap: reads cached `n_audio_samples` from each sample dict, no audio
-    # I/O). Groups same-length clips into batches so the factorial CTC DP
-    # doesn't OOM on a worst-case (long clip × long target) batch.
+    # I/O). Groups same-length clips to limit padding and the materialized
+    # joint CTC alphabet on a worst-case long batch.
     train_lengths = get_audio_lengths(train_ds)
     print(f"Audio length stats: min={min(train_lengths)}, max={max(train_lengths)}, "
           f"median={sorted(train_lengths)[len(train_lengths)//2]}")
@@ -1308,7 +1101,6 @@ def main():
             stress_active=stress_active, stress_weight=args.stress_weight,
             vad_weight=args.vad_weight,
             invalid_mass_weight=args.invalid_mass_weight if args.use_features else 0.0,
-            feature_aux_weight=args.feature_aux_weight if args.use_aux_features else 0.0,
             grad_clip_norm=args.grad_clip_norm,
             debug_finite=args.debug_finite,
             max_train_batches=args.max_train_batches,
@@ -1316,11 +1108,11 @@ def main():
             teacher_vocab_remap=teacher_vocab_remap,
             distill_weight=args.distill_weight,
             distill_temperature=args.distill_temperature,
-            distill_stress_weight=args.distill_stress_weight,
         )
         val_stats = eval_epoch(
             model, val_loader, device,
-            use_bf16=args.bf16, blank_id=model.blank_id, stress_active=stress_active,
+            use_bf16=args.bf16, blank_id=model.blank_id,
+            stress_active=stress_active, stress_weight=args.stress_weight,
             debug_finite=args.debug_finite,
             max_eval_batches=args.max_eval_batches,
         )
@@ -1329,25 +1121,23 @@ def main():
         val_loss = val_stats["ctc_loss"]
         print(
             f"Epoch {epoch}: ctc_train={train_stats['ctc_loss']:.4f} "
-            f"ctc_val={val_loss:.4f} stress_acc={val_stats['stress_acc']:.3f} "
+            f"ctc_val={val_loss:.4f} "
             f"p_nb={train_stats['nonblank_prob_mean']:.3f} "
             f"wall={train_stats['wallclock_sec']:.1f}s mem={train_stats['peak_mem_gb']:.1f}GB"
         )
+        print("  val by lang: " + " ".join(
+            f"{lang}={loss:.3f}" for lang, loss in val_stats["per_lang_ctc"].items()
+        ))
 
         lrs = scheduler.get_last_lr()
         log_dict = {
             "epoch": epoch,
             "train/ctc_loss": train_stats["ctc_loss"],
-            "train/stress_loss": train_stats["stress_loss"],
-            "train/stress_acc": train_stats["stress_acc"],
             "train/vad_loss": train_stats["vad_loss"],
             "train/off_manifold": train_stats["off_manifold"],
-            "train/aux_ctc_loss": train_stats["aux_ctc_loss"],
             "train/distill_loss": train_stats["distill_loss"],
             "train/nonblank_prob_mean": train_stats["nonblank_prob_mean"],
             "val/ctc_loss": val_stats["ctc_loss"],
-            "val/stress_loss": val_stats["stress_loss"],
-            "val/stress_acc": val_stats["stress_acc"],
             "lr/backbone": lrs[0],   # backbone_decay (same LR as backbone_no_decay)
             "lr/heads": lrs[2],      # head_decay (same LR as head_no_decay)
             "stress_active": int(stress_active),
@@ -1357,11 +1147,14 @@ def main():
             "perf/peak_mem_gb": train_stats["peak_mem_gb"],
             "perf/ms_per_batch_data": train_stats["ms_per_batch_data"],
             "perf/ms_per_batch_forward": train_stats["ms_per_batch_forward"],
-            "perf/ms_per_batch_forced_align": train_stats["ms_per_batch_forced_align"],
+            "perf/ms_per_batch_joint_ctc": train_stats["ms_per_batch_joint_ctc"],
             "perf/ms_per_batch_loss_backward": train_stats["ms_per_batch_loss_backward"],
             "grad/norm_mean": train_stats["grad_norm_mean"],
             "grad/norm_max": train_stats["grad_norm_max"],
-            **val_stats["per_class"],
+            **{
+                f"val/ctc_loss_{lang}": loss
+                for lang, loss in val_stats["per_lang_ctc"].items()
+            },
         }
         wandb.log(log_dict)
 

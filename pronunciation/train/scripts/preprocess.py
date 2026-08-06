@@ -16,6 +16,7 @@ dataset.py.
 """
 
 import argparse
+import hashlib
 import json
 import re
 import os
@@ -37,6 +38,7 @@ LANG_TO_ESPEAK = {
     "por": "pt-br",
     "spa": "es",
     "rus": "ru",
+    "zho-hans": "cmn",  # Simplified-script Standard Mandarin
     # Languages added via Pimsleur — phonemes.jsonl gets regenerated for
     # these too so future training runs can opt into them just by adding
     # to --langs. espeak voice picked per language.
@@ -76,6 +78,13 @@ LANG_TO_ESPEAK = {
     # in main() filters them out). Audio + transcripts are still on disk
     # in their manifest.jsonl.
 }
+
+# Languages whose training labels come from a qualified external backend
+# (LANGUAGE_EXPANSION.md; mirrors build_external_phoneme_sidecars.CONFIG).
+# Their LANG_TO_ESPEAK entries exist for audits and tooling, but main() never
+# emits phonemes.jsonl for them from eSpeak: it refreshes the G2P audit +
+# sidecar chain itself, so running preprocess is the whole label pipeline.
+BACKEND_REQUIRED_LANGS = {"tha", "zho-hans", "hin", "jpn"}
 
 STRESS_NONE = 0
 STRESS_PRIMARY = 1
@@ -212,6 +221,22 @@ VOCAB_EXTENSIONS: set[str] = {
     # vowels (ã ɔ̃ ɛ̃ …). panphon featurizes all cleanly. Freq 40–49k in-corpus.
     "ə̃", "ʌ̃", "æ̃", "ɨ̃", "ɯ̃", "ɒ̃", "ø̃",
     "aː̃", "eː̃", "iː̃", "oː̃", "uː̃", "yː̃", "øː̃", "ɛː̃", "ɔː̃", "ɑː̃",
+    # Thai TLTK/Vachana inventory. These are phonemic aspiration, length, and
+    # vowel-quality distinctions; tone is kept in a separate aligned field.
+    "tɕʰ", "uə", "ɯə", "əː", "ɯː",
+    # Mainland Mandarin g2pM + pinyin-to-IPA inventory. Falling diphthongs and
+    # syllabic apicals remain single CTC units, matching the backend's phones;
+    # citation tone letters are removed into the aligned `tone` field.
+    "ɤ", "ʈʂ", "ʈʂʰ", "ɻ̩", "ɹ̩", "tsʰ", "ɥ",
+    "ei̯", "au̯", "ou̯", "ai̯",
+    # Japanese OpenJTalk surface phones: devoiced high vowels, palatalized /r/,
+    # and geminates derived from its moraic closure (`cl`) label.
+    "ɯ̥ᵝ", "i̥", "ɾʲ", "ɕː", "pʲː", "tɕː", "kʲː", "ɸː", "hː", "dʑː", "ɾː",
+    # Hindi schwa-classifier inventory. Aspiration, breathy voice,
+    # retroflexion, and dental place are contrastive and must not be split or
+    # discarded. Stress is supplied separately by the surface-weight rules.
+    "ɦ", "d͡ʒ", "t͡ʃ", "t̪ʰ", "bʱ", "d̪ʱ", "t͡ʃʰ", "ɡʱ",
+    "ɽʱ", "d͡ʒʱ", "ɖʱ",
 }
 
 
@@ -392,6 +417,110 @@ def load_stress_overrides(path: Path) -> dict[str, list[str]]:
     return overrides
 
 
+def load_phoneme_backend(path: Path) -> dict[str, dict]:
+    """Load a complete external-transcription sidecar keyed by audio file.
+
+    Each JSONL row must contain `file` and `sentence_sha256`, plus either
+    `phonemes` and `stress`, or an explicit `exclude_reason`. Exclusions make
+    backend failures auditable while preserving the completeness invariant:
+    every manifest row has a deliberate disposition. The text hash prevents
+    a transcription generated for an older sentence from being silently
+    reused. Optional suprasegmental fields are preserved in output.
+    """
+    records: dict[str, dict] = {}
+    with open(path) as f:
+        for line_no, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            required = {"file", "sentence_sha256"}
+            missing = required - rec.keys()
+            if missing:
+                raise ValueError(
+                    f"{path}:{line_no}: missing fields {sorted(missing)}"
+                )
+            if rec["file"] in records:
+                raise ValueError(f"{path}:{line_no}: duplicate file {rec['file']!r}")
+            excluded = bool(rec.get("exclude_reason"))
+            if excluded and ("phonemes" in rec or "stress" in rec):
+                raise ValueError(
+                    f"{path}:{line_no}: excluded row must not carry phonemes/stress"
+                )
+            if not excluded and not {"phonemes", "stress"} <= rec.keys():
+                raise ValueError(
+                    f"{path}:{line_no}: row needs phonemes/stress or exclude_reason"
+                )
+            if not excluded and len(rec["phonemes"]) != len(rec["stress"]):
+                raise ValueError(
+                    f"{path}:{line_no}: phonemes/stress length mismatch"
+                )
+            records[rec["file"]] = rec
+    return records
+
+
+def run_narrowing(lang: str, data_dir: Path) -> None:
+    """Regenerate phonemes_narrowed.jsonl for a language just labeled.
+
+    Training reads the narrowed file (--use-narrowed is the default), so a
+    stale one silently hides newly-labeled clips from training. Pass-through
+    languages are a dependency-free broad copy; English and the nasal
+    languages recompute their acoustic evidence from the measure cache, and
+    clips the cache doesn't cover simply stay broad (narrow.py reports the
+    abstain counts — re-run espeak_audit/measure_corpus.py to narrow them).
+    """
+    audit_dir = Path(__file__).resolve().parents[2] / "espeak_audit"
+    sys.path.insert(0, str(audit_dir))
+    try:
+        import narrow
+    finally:
+        sys.path.remove(str(audit_dir))
+    # narrow's module-level audio root; the acoustic measure cache resolves
+    # its own paths independently, so pointing this at --data-dir is safe.
+    narrow.AUDIO = data_dir
+    narrow.run([lang])
+
+
+def ensure_backend_sidecar(lang: str, data_dir: Path) -> Path:
+    """Bring a backend-required language's label chain up to date, in place.
+
+    Runs the incremental G2P audit (free when the manifest is unchanged; the
+    language's G2P tool is only needed for new/changed rows) and rebuilds the
+    hash-bound sidecar from it. This keeps preprocess self-contained: new
+    Pimsleur/Tatoeba rows just work, with no separate steps to remember.
+    """
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        import audit_g2p_backends
+        import build_external_phoneme_sidecars
+    finally:
+        sys.path.remove(str(scripts_dir))
+
+    provider, _ = build_external_phoneme_sidecars.CONFIG[lang]
+    lang_dir = data_dir / lang
+    audit_g2p_backends.run_audit(
+        lang, provider,
+        manifest=lang_dir / "manifest.jsonl",
+        output=lang_dir / f"g2p_audit_{provider}.jsonl",
+    )
+    return build_external_phoneme_sidecars.build_sidecar(lang, data_root=data_dir)
+
+
+def parse_phoneme_backend_args(values: list[str] | None) -> dict[str, Path]:
+    """Parse repeatable LANG=JSONL command-line values."""
+    result: dict[str, Path] = {}
+    for value in values or []:
+        if "=" not in value:
+            raise ValueError(f"Expected LANG=JSONL for --phoneme-backend, got {value!r}")
+        lang, raw_path = value.split("=", 1)
+        if not lang or not raw_path:
+            raise ValueError(f"Expected LANG=JSONL for --phoneme-backend, got {value!r}")
+        if lang in result:
+            raise ValueError(f"Duplicate --phoneme-backend for {lang!r}")
+        result[lang] = Path(raw_path)
+    return result
+
+
 def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[tuple[int, int]]]:
     """Run espeak-ng and parse IPA output into (phonemes, stress_labels, word_spans).
 
@@ -504,6 +633,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 VAD_COMPUTE_BIN = REPO_ROOT / "vad_compare" / "target" / "release" / "vad_compute"
 VAD_COMPUTE_MANIFEST = REPO_ROOT / "vad_compare" / "Cargo.toml"
 
+# The single tarball every sky_*.yaml stages onto the GPU node. Lives under
+# .work/ so it is gitignored, and matches .skyignore's `*.tar` so the workdir
+# upload never carries it — file_mounts ships it deliberately instead.
+DATASET_TAR = REPO_ROOT / ".work" / "pron_audio.tar"
+
 
 # Some source corpora ship empty/corrupt recordings: Google FLEURS es_419
 # has 490 clips (17.5% of the split) that are digital silence at the source,
@@ -563,6 +697,61 @@ def regenerate_vad(phonemes_path: Path, audio_dir: Path) -> None:
     )
 
 
+def newest_mtime(data_dir: Path) -> float:
+    """Newest mtime under data_dir, ignoring .cache. Used to decide whether the
+    staging tar is stale. Walks ~450k entries, which costs a second or two on
+    SSD — cheap next to repacking 34 GB we already packed."""
+    newest = 0.0
+    stack = [data_dir]
+    while stack:
+        with os.scandir(stack.pop()) as it:
+            for entry in it:
+                if entry.name == ".cache":
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                else:
+                    newest = max(newest, entry.stat(follow_symlinks=False).st_mtime)
+    return newest
+
+
+def build_dataset_tar(data_dir: Path, output: Path = DATASET_TAR) -> Path:
+    """Pack data/audio into the one tarball the training launchers stage.
+
+    Half a million loose wavs defeat every transport we've tried: rsync crawls,
+    and the Hub caps repository commits at 256/hour, which turns a loose-file
+    dataset repo into a multi-day upload that stalls out. So the dataset moves
+    as a single file — sky's file_mounts rsyncs it to the node, the run: block
+    untars it into ~/data, and the loader still opens loose wavs from there.
+
+    Always packs the WHOLE data_dir, even under --langs: training reads every
+    language, so a tar of one language would be a footgun.
+
+    Writes to a .partial path and renames, so an interrupted run leaves the
+    previous good tar in place rather than a truncated one a launcher would
+    cheerfully upload.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists() and output.stat().st_mtime >= newest_mtime(data_dir):
+        size_gb = output.stat().st_size / 1e9
+        print(f"staging tar up to date: {output} ({size_gb:.1f} GB)")
+        return output
+
+    # Named ".partial.tar", not ".tar.partial", so it still matches .skyignore's
+    # `*.tar` — a leftover partial must never ride along in the workdir upload.
+    tmp = output.with_name(output.stem + ".partial.tar")
+    tmp.unlink(missing_ok=True)
+    print(f"packing {data_dir} -> {output} ...")
+    subprocess.run(
+        ["tar", "-cf", str(tmp), "-C", str(data_dir), "--exclude=.cache", "."],
+        check=True,
+    )
+    tmp.replace(output)
+    size_gb = output.stat().st_size / 1e9
+    print(f"wrote staging tar: {output} ({size_gb:.1f} GB)")
+    return output
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path,
@@ -575,7 +764,22 @@ def main():
                              "Use only when you're certain vad coverage is "
                              "current — by default we keep vad in lockstep "
                              "with phonemes.")
+    parser.add_argument(
+        "--allow-noncommercial", action="store_true",
+        help="Include CC BY-NC/noncommercial source rows. By default these "
+             "remain in the auditable manifest/sidecars but are excluded from "
+             "phonemes.jsonl so normal training output is commercially usable.",
+    )
+    parser.add_argument(
+        "--phoneme-backend", action="append", default=None, metavar="LANG=JSONL",
+        help="Override the sidecar for LANG with a specific JSONL instead of "
+             "the auto-refreshed canonical one. Rarely needed: backend "
+             "languages regenerate their audit + sidecar automatically. Rows "
+             "must be hash-bound to the manifest sentence; missing/stale rows "
+             "fail closed.",
+    )
     args = parser.parse_args()
+    backend_paths = parse_phoneme_backend_args(args.phoneme_backend)
 
     langs_with_unknowns: list[str] = []
     for lang_dir in sorted(args.data_dir.iterdir()):
@@ -584,8 +788,8 @@ def main():
         lang = lang_dir.name
         if args.langs and lang not in args.langs:
             continue
-        if lang not in LANG_TO_ESPEAK:
-            print(f"Skipping {lang} (no espeak mapping)")
+        if lang not in LANG_TO_ESPEAK and lang not in backend_paths:
+            print(f"Skipping {lang} (no espeak mapping or external backend)")
             continue
 
         manifest_path = lang_dir / "manifest.jsonl"
@@ -603,6 +807,17 @@ def main():
             for line in f:
                 records.append(json.loads(line))
 
+        backend_path = backend_paths.get(lang)
+        if backend_path is None and lang in BACKEND_REQUIRED_LANGS:
+            # eSpeak is never the label source for these languages. Refresh
+            # the audit + sidecar chain right here so a preprocess run after
+            # new data lands is complete on its own.
+            backend_path = ensure_backend_sidecar(lang, args.data_dir)
+        backend_records = load_phoneme_backend(backend_path) if backend_path else None
+        if backend_records is not None:
+            print(f"{lang}: using external phoneme backend {backend_path} "
+                  f"({len(backend_records)} rows)")
+
         # Load rhythmic-group sidecar for override languages. Missing sidecar
         # just means no overrides apply — espeak stress is used as-is.
         stress_overrides: dict[str, list[str]] = {}
@@ -619,6 +834,8 @@ def main():
 
         override_applied = 0
         override_align_failures = 0
+        backend_excluded = 0
+        license_excluded = 0
         silent_dropped = 0
         # token -> (count, first-example sentence). Buffered per-lang so we
         # can report all unknowns and skip writing the file if any are found
@@ -626,6 +843,12 @@ def main():
         unknown_examples: dict[str, tuple[int, str]] = {}
         entries: list[dict] = []
         for rec in tqdm(records, desc=lang):
+            license_name = str(rec.get("license") or "")
+            if not args.allow_noncommercial and (
+                    "BY-NC" in license_name.upper()
+                    or "NONCOMMERCIAL" in license_name.upper()):
+                license_excluded += 1
+                continue
             # Drop empty/corrupt source recordings before doing any work —
             # silent audio paired with a transcript is pure label noise.
             if is_silent(lang_dir / rec["file"]):
@@ -640,9 +863,27 @@ def main():
             # Note: Tatoeba uses `voice` for the uploader's display
             # name (a human, not an espeak voice), so we deliberately
             # read `espeak_voice` only.
-            espeak_voice = rec.get("espeak_voice") or LANG_TO_ESPEAK[lang]
-            phonemes, stress, word_spans = phonemize(rec["sentence"], espeak_voice)
-            if rec["file"] in stress_overrides:
+            backend_rec = backend_records.get(rec["file"]) if backend_records is not None else None
+            if backend_records is not None:
+                if backend_rec is None:
+                    raise ValueError(
+                        f"{backend_path}: no transcription for {lang}/{rec['file']}"
+                    )
+                sentence_hash = hashlib.sha256(rec["sentence"].encode()).hexdigest()
+                if backend_rec["sentence_sha256"] != sentence_hash:
+                    raise ValueError(
+                        f"{backend_path}: stale transcription for {lang}/{rec['file']}"
+                    )
+                if backend_rec.get("exclude_reason"):
+                    backend_excluded += 1
+                    continue
+                phonemes = list(backend_rec["phonemes"])
+                stress = list(backend_rec["stress"])
+                word_spans = []
+            else:
+                espeak_voice = rec.get("espeak_voice") or LANG_TO_ESPEAK[lang]
+                phonemes, stress, word_spans = phonemize(rec["sentence"], espeak_voice)
+            if backend_rec is None and rec["file"] in stress_overrides:
                 new_stress = apply_stress_override(
                     phonemes, word_spans, rec["sentence"],
                     stress_overrides[rec["file"]],
@@ -666,7 +907,19 @@ def main():
                 "phonemes": phonemes,
                 "stress": stress,
                 "source": rec.get("source"),
+                "license": rec.get("license"),
+                "phoneme_backend": (
+                    backend_rec.get("backend", "external")
+                    if backend_rec is not None else "espeak"
+                ),
             }
+            if backend_rec is not None:
+                for k in (
+                    "tone", "pitch_accent", "pitch_accent_exclude_reason",
+                    "syllables", "stress_source",
+                ):
+                    if k in backend_rec:
+                        entry[k] = backend_rec[k]
             # Propagate Whisper signal fields from the manifest. Only
             # present for Pimsleur (extracted with download_pimsleur.py).
             # FLEURS / Tatoeba rows lack these and pass them through as None.
@@ -704,10 +957,18 @@ def main():
         if silent_dropped:
             print(f"{lang}: dropped {silent_dropped} silent/empty recording(s) "
                   f"(peak < {SILENCE_PEAK_FLOOR:g}, e.g. corrupt FLEURS source audio)")
+        if backend_excluded:
+            print(f"{lang}: external backend explicitly excluded "
+                  f"{backend_excluded} recording(s)")
+        if license_excluded:
+            print(f"{lang}: excluded {license_excluded} noncommercial recording(s); "
+                  f"pass --allow-noncommercial only for an explicitly NC run")
         if lang in OVERRIDE_LANGS and stress_overrides:
             print(f"{lang}: applied stress override to {override_applied} records, "
                   f"{override_align_failures} alignment failures "
                   f"(fell back to espeak stress)")
+
+        run_narrowing(lang, args.data_dir)
 
         if not args.skip_vad:
             print(f"{lang}: regenerating vad.jsonl ...")
@@ -717,6 +978,12 @@ def main():
         print(f"\n{len(langs_with_unknowns)} language(s) had unknown tokens "
               f"and were NOT written: {', '.join(langs_with_unknowns)}")
         sys.exit(1)
+
+    # Last step, unconditionally: the dataset isn't usable by a training run
+    # until it's packed. Doing it here is the whole point of preprocess being
+    # self-contained — finishing this script means there is nothing left to do
+    # before `sky launch`.
+    build_dataset_tar(args.data_dir)
 
 
 if __name__ == "__main__":

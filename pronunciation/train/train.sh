@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
 #
-# Shared launcher for every sky_*.yaml in this directory.
-#
-# Each variant's `run:` block calls `bash train/train.sh <variant flags>`.
-# The variant flags are forwarded to train_unified.py via "$@" and override
-# (or extend) the defaults below.
+# Launcher for sky_train.yaml.
 #
 # What this script does, in order:
 #   - export the env vars every run needs
-#   - install panphon (idempotent on warm clusters; required for any run
-#     touching feature heads)
-#   - pull the latest anchpop/lexide-pronunciation-audio HF dataset
-#   - launch train_unified with the common flags + variant-specific "$@"
+#   - install panphon (idempotent on warm clusters)
+#   - assert the staged dataset is present at ~/data
+#   - launch train_unified, forwarding "$@"
 #
-# Run-specific flags expected to come in via "$@":
-#   --vad-weight {0 | 0.05}
-#   --use-features / --use-aux-features / --feature-emission-weight / ...
-#   --regularized-heads
-#   --save-dir checkpoints-...
-#   --hf-repo anchpop/lexide-pronunciation-unified-...
-#   --resume-from / --resume-epoch    (for resume variants)
+# This used to pass seventeen flags pinning the champion recipe. Every one of
+# them turned out to already be train_unified.py's argparse default — model,
+# lrs, epochs, batch, bf16, worker count, and the mel-sidechannel / mlp-heads /
+# audio-degrade / use-narrowed booleans alike — so they only obscured which
+# settings a run actually chose. They're gone: the defaults ARE the champion,
+# and anything passed via "$@" now means "deliberately deviate from it".
 
 set -euo pipefail
 
@@ -40,31 +34,25 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Idempotent: no-op if already installed (sky exec on warm cluster).
 pip install --quiet panphon
 
-# Pull (or refresh) audio + phoneme labels from the private HF dataset —
-# UNLESS data was pre-mounted via sky's file_mounts (rsync from local). The
-# HF↔Lambda link is slow (an hour-plus for our ~19 GB); rsync from local
-# usually drains the same payload in 15-30 min. If any lang's phonemes.jsonl
-# is already present we trust the mount and skip the download.
-if compgen -G "$HOME/data/*/phonemes.jsonl" > /dev/null; then
-  echo "Using pre-mounted dataset at ~/data (skipping HF download)"
-else
-  hf download anchpop/lexide-pronunciation-audio --repo-type dataset --local-dir ~/data
+# The dataset arrives as one tarball staged by sky's file_mounts and untarred
+# into ~/data by the calling yaml's run: block. There is no download fallback
+# on purpose: ~450k loose wavs defeat every remote transport we tried — rsync
+# crawls on them, and the Hub's 256-commits/hour ceiling turned a loose-file
+# dataset repo into a multi-day upload that stalled outright. One rsync'd file
+# beats both. Build it with `python train/scripts/preprocess.py`.
+#
+# Fail closed: a missing mount used to silently fall through to a slow
+# re-download, but the worse failure is training on a partial corpus.
+if ! compgen -G "$HOME/data/*/phonemes.jsonl" > /dev/null; then
+  echo "ERROR: no dataset at ~/data (expected ~/data/<lang>/phonemes.jsonl)." >&2
+  echo "  The calling sky_*.yaml should untar ~/data.tar into ~/data before this runs." >&2
+  echo "  Rebuild the tar locally with: python train/scripts/preprocess.py" >&2
+  exit 1
 fi
+echo "Using dataset at ~/data: $(ls ~/data | tr '\n' ' ')"
 
-# Common train_unified knobs. Variant-specific flags come in via "$@" and
-# argparse's last-wins behavior lets variants override any of these if needed.
+# --data-dir is the only setting this script pins: it's where the yaml untarred
+# the dataset, not a modelling choice. Everything else is left at its default.
 python -m src.train_unified \
   --data-dir ~/data \
-  --model-name facebook/wav2vec2-xls-r-2b \
-  --processor-source facebook/wav2vec2-xlsr-53-espeak-cv-ft \
-  --gradient-checkpointing \
-  --epochs 7 \
-  --batch-size 16 \
-  --backbone-lr 1e-5 \
-  --head-lr 1e-3 \
-  --stress-weight 0.3 \
-  --stress-warmup-steps 400 \
-  --num-workers 16 \
-  --bf16 \
-  --use-narrowed \
   "$@"

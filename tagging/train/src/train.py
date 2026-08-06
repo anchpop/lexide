@@ -109,7 +109,8 @@ def setup_model_and_tokenizer(model_args: ModelArguments):
         quantization_config=bnb_config,
         device_map="auto",
         trust_remote_code=model_args.trust_remote_code,
-        torch_dtype=torch.bfloat16
+        torch_dtype=torch.bfloat16,
+        attn_implementation=os.getenv("ATTN_IMPLEMENTATION", "sdpa"),
     )
     
     model.config.use_cache = False
@@ -170,6 +171,11 @@ def main():
 
     data_args = DataArguments()
     lora_args = LoraArguments()
+    train_batch_size = int(os.getenv("TRAIN_BATCH_SIZE", "8"))
+    eval_batch_size = int(os.getenv("EVAL_BATCH_SIZE", "8"))
+    gradient_accumulation_steps = int(os.getenv("GRADIENT_ACCUMULATION_STEPS", "2"))
+    gradient_checkpointing = os.getenv("GRADIENT_CHECKPOINTING", "0") == "1"
+    eval_steps = int(os.getenv("EVAL_STEPS", "1000"))
 
     # Extract short model name for wandb
     short_model_name = model_args.model_name.split("/")[-1]
@@ -182,7 +188,12 @@ def main():
             "model": model_args.model_name,
             "lora_r": lora_args.lora_r,
             "lora_alpha": lora_args.lora_alpha,
-            "max_length": data_args.max_length
+            "max_length": data_args.max_length,
+            "train_batch_size": train_batch_size,
+            "eval_batch_size": eval_batch_size,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "gradient_checkpointing": gradient_checkpointing,
+            "eval_steps": eval_steps,
         }
     )
     
@@ -210,10 +221,12 @@ def main():
     training_args = TrainingArguments(
         output_dir="./checkpoints",
         num_train_epochs=3,
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=2,
-        gradient_accumulation_steps=4,
-        gradient_checkpointing=True,
+        per_device_train_batch_size=train_batch_size,
+        per_device_eval_batch_size=eval_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        gradient_checkpointing=gradient_checkpointing,
+        train_sampling_strategy="group_by_length",
+        use_liger_kernel=os.getenv("USE_LIGER_KERNEL", "1") == "1",
         warmup_steps=500,
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
@@ -222,9 +235,9 @@ def main():
         bf16=torch.cuda.is_bf16_supported(),
         logging_steps=100,
         eval_strategy="steps",
-        eval_steps=500,
+        eval_steps=eval_steps,
         save_strategy="steps",
-        save_steps=500,
+        save_steps=eval_steps,
         save_total_limit=3,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
@@ -235,10 +248,17 @@ def main():
         ddp_find_unused_parameters=False if accelerator.distributed_type != "NO" else None
     )
     
-    data_collator = DataCollatorForLanguageModeling(
+    causal_lm_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False
     )
+
+    def data_collator(features):
+        batch = causal_lm_collator(features)
+        # Gemma 4 requires one text/image discriminator per padded token. This
+        # corpus is text-only, so create the all-text tensor after dynamic padding.
+        batch["mm_token_type_ids"] = torch.zeros_like(batch["input_ids"])
+        return batch
     
     trainer = Trainer(
         model=model,
@@ -250,7 +270,8 @@ def main():
     )
     
     print("Starting training...")
-    trainer.train()
+    resume_from_checkpoint = os.getenv("RESUME_FROM_CHECKPOINT")
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint or None)
     
     print("Saving final model...")
     trainer.save_model("./final_model")

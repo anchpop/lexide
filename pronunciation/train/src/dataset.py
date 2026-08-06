@@ -1,4 +1,4 @@
-"""Dataset: load audio + pre-computed espeak phonemes with stress labels."""
+"""Dataset: load audio + aligned phoneme/prosody labels for joint CTC."""
 
 import hashlib
 import json
@@ -22,12 +22,7 @@ VAD_TRAILING_SILENCE_RMS = 5e-4
 
 
 class StressDataset(Dataset):
-    """Yields (audio, phoneme_token_ids, stress_per_phoneme) triples.
-
-    The phoneme token IDs are mapped to the base model's tokenizer vocabulary
-    so that torchaudio's forced_align can align them against the frozen CTC
-    logits at training time.
-    """
+    """Yield audio and aligned factors of the joint CTC target symbol."""
 
     def __init__(
         self,
@@ -139,15 +134,58 @@ class StressDataset(Dataset):
                 skipped["unreadable"] += 1
                 continue
 
-            # Map espeak phonemes to base model's vocabulary
+            # Map phones and every aligned prosody field together.  Unknown
+            # phones are dropped consistently across all factors; preprocessing
+            # is expected to make this path unreachable for promoted data.
+            tones = rec.get("tone")
+            accents = rec.get("pitch_accent")
+            tone_available = tones is not None
+            pitch_accent_available = accents is not None
+            if len(rec["stress"]) != len(rec["phonemes"]):
+                raise ValueError(f"{phonemes_path}:{rec['file']}: stress length mismatch")
+            if tones is not None and len(tones) != len(rec["phonemes"]):
+                raise ValueError(f"{phonemes_path}:{rec['file']}: tone length mismatch")
+            if accents is not None and len(accents) != len(rec["phonemes"]):
+                raise ValueError(
+                    f"{phonemes_path}:{rec['file']}: pitch_accent length mismatch"
+                )
             phoneme_ids = []
             stress_seq = []
-            for phoneme, stress in zip(rec["phonemes"], rec["stress"]):
+            tone_seq = []
+            pitch_accent_seq = []
+            for pos, (phoneme, stress) in enumerate(zip(rec["phonemes"], rec["stress"])):
                 tid = tokenizer.convert_tokens_to_ids(phoneme)
                 if tid == unk_id or tid is None:
-                    continue  # Skip unknown phonemes — forced align can't place them
+                    continue
                 phoneme_ids.append(tid)
                 stress_seq.append(stress)
+
+                tone = tones[pos] if tones is not None else None
+                if tone is None:
+                    tone_seq.append(0)  # explicit non-tone-bearing joint class
+                else:
+                    tone = int(tone)
+                    if tone not in (1, 2, 3, 4, 5):
+                        raise ValueError(
+                            f"{phonemes_path}:{rec['file']}: invalid tone {tone}"
+                        )
+                    tone_seq.append(tone)
+
+                accent = accents[pos] if accents is not None else None
+                if accent is None:
+                    pitch_accent_seq.append(0)  # not a mora-bearing phone
+                elif isinstance(accent, dict):
+                    mora = int(accent["mora"])
+                    nucleus = int(accent["nucleus"])
+                    # 1 = mora without nucleus; 2 = accent nucleus/downstep.
+                    pitch_accent_seq.append(2 if nucleus > 0 and mora == nucleus else 1)
+                else:
+                    accent = int(accent)
+                    if accent not in (0, 1, 2):
+                        raise ValueError(
+                            f"{phonemes_path}:{rec['file']}: invalid pitch accent {accent}"
+                        )
+                    pitch_accent_seq.append(accent)
 
             if not phoneme_ids:
                 skipped["no_phonemes"] += 1
@@ -160,6 +198,10 @@ class StressDataset(Dataset):
                 "wav_path": str(wav_path),
                 "phoneme_ids": phoneme_ids,
                 "stress_seq": stress_seq,
+                "tone_seq": tone_seq,
+                "pitch_accent_seq": pitch_accent_seq,
+                "tone_available": tone_available,
+                "pitch_accent_available": pitch_accent_available,
                 "lang": rec["lang"],
                 # Source class (fleurs / tatoeba / pimsleur / tts). Used by
                 # --source-cap-second in train_unified.py to balance per-lang
@@ -199,6 +241,12 @@ class StressDataset(Dataset):
             "audio": torch.from_numpy(audio).float(),
             "phoneme_ids": torch.tensor(sample["phoneme_ids"], dtype=torch.long),
             "stress_seq": torch.tensor(sample["stress_seq"], dtype=torch.long),
+            "tone_seq": torch.tensor(sample["tone_seq"], dtype=torch.long),
+            "pitch_accent_seq": torch.tensor(
+                sample["pitch_accent_seq"], dtype=torch.long,
+            ),
+            "tone_available": sample["tone_available"],
+            "pitch_accent_available": sample["pitch_accent_available"],
             "lang": sample["lang"],
             "vad_probs": torch.tensor(vad_probs, dtype=torch.float32),  # may be empty
         }
@@ -408,6 +456,8 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
     audio_mask = torch.zeros(len(augmented), max_audio, dtype=torch.long)
     phoneme_batch = torch.zeros(len(augmented), max_phonemes, dtype=torch.long)
     stress_batch = torch.zeros(len(augmented), max_phonemes, dtype=torch.long)
+    tone_batch = torch.zeros(len(augmented), max_phonemes, dtype=torch.long)
+    pitch_accent_batch = torch.zeros(len(augmented), max_phonemes, dtype=torch.long)
     audio_lens = torch.zeros(len(augmented), dtype=torch.long)
     phoneme_lens = torch.zeros(len(augmented), dtype=torch.long)
     vad_batch = torch.zeros(len(augmented), max_vad) if max_vad > 0 else None
@@ -422,6 +472,8 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
         audio_mask[i, :a] = 1
         phoneme_batch[i, :p] = item["phoneme_ids"]
         stress_batch[i, :p] = item["stress_seq"]
+        tone_batch[i, :p] = item["tone_seq"]
+        pitch_accent_batch[i, :p] = item["pitch_accent_seq"]
         audio_lens[i] = a
         phoneme_lens[i] = p
         if vad_batch is not None:
@@ -436,6 +488,14 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
         "phoneme_ids": phoneme_batch,
         "phoneme_lens": phoneme_lens,
         "stress_seq": stress_batch,
+        "tone_seq": tone_batch,
+        "pitch_accent_seq": pitch_accent_batch,
+        "tone_available": torch.tensor(
+            [item["tone_available"] for item in augmented], dtype=torch.bool,
+        ),
+        "pitch_accent_available": torch.tensor(
+            [item["pitch_accent_available"] for item in augmented], dtype=torch.bool,
+        ),
         "vad_probs": vad_batch,   # (B, T_vad) or None if no VAD data in batch
         "vad_lens": vad_lens,
         "langs": [item["lang"] for item in augmented],

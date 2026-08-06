@@ -45,8 +45,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "espeak_audit"))
-from measure_corpus import MODEL, CACHE, AUDIO, cache_path  # noqa: E402
-from nasal_acoustic import _measure_clip  # noqa: E402  (harmonic A1-P0 per clip)
+AUDIO = REPO / "data" / "audio"
+MODEL = "vad-clean"
 
 VOW = set("aeiouɛɔøœəɐɨʊɪyɯɤʌɒæɑ")
 NASAL_C = {"n", "m", "ŋ", "ɲ", "ɴ"}
@@ -128,6 +128,7 @@ def load_clip_segs(lang, rows):
     """{file: segments} from the measure cache, keyed by each clip's CURRENT
     phonemes (exact phon_key) so a stale entry from changed labels is never used.
     Supplies alignment boundaries for both the flap and the harmonic step."""
+    from measure_corpus import cache_path  # lazy: pass-through langs need no audit stack
     out = {}
     for row in rows:
         cp = cache_path(lang, row["file"], _phon_key(row["phonemes"]))
@@ -143,6 +144,7 @@ def compute_harmonic(lang, clip_segs, workers=8):
     would need its own (phon_key-aware) invalidation — complexity + staleness bugs
     for no Modal saving. The threshold/baselines (the tunable part) are recomputed
     here anyway, so re-running narrow.py is the single, always-fresh local step."""
+    from nasal_acoustic import _measure_clip  # lazy: requires Praat only for nasal langs
     keys, jobs = [], []
     for file, segs in clip_segs.items():
         spans = [(t["start"], t["end"]) for t in segs if t.get("start") is not None]
@@ -226,8 +228,12 @@ def run(langs, mode="acoustic", depth=DEFAULT_DEPTH, out_name="phonemes_narrowed
         if not pf.exists():
             continue
         rows = [json.loads(l) for l in pf.read_text().splitlines() if l.strip()]
-        # Boundaries from the measure cache (flap + harmonic both read these).
-        clip_segs = load_clip_segs(lang, rows)
+        # Only English flapping and the six nasal languages need acoustic
+        # dependencies. Every other language is a complete pass-through copy.
+        clip_segs = (
+            load_clip_segs(lang, rows)
+            if lang == "eng" or lang in NASALIZE_LANGS else {}
+        )
 
         # Acoustic nasal: recompute harmonic A1-P0 locally + within-speaker baselines
         # (only the 6 nasal langs nasalize; others get flap/pass-through either way).

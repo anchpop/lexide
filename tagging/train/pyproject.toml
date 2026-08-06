@@ -15,7 +15,7 @@ dependencies = [
     "sentencepiece>=0.2.1",
     "torch>=2.8.0",
     "tqdm>=4.67.1",
-    "transformers>=4.57.0",
+    "transformers>=5",
     "trl>=0.23.1",
     "wandb>=0.22.2",
 ]

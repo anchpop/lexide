@@ -63,14 +63,17 @@ These are hard-won and override generic ML instincts. Violating them has burned 
    (`preprocess.VOCAB_EXTENSIONS`). Add real phonemes as real classes — don't collapse
    them into near-neighbors to fit an old vocab.
 
-7. **Stress is suprasegmental.** It's a property of the vowel, modeled by a separate
-   head — not inline CTC tokens.
+7. **Stress is suprasegmental.** It has a separate factor head rather than inline
+   tokenizer entries, but that factor is composed into the same joint CTC symbol
+   and alignment as the phone. Tone/accent factors follow the same rule and are
+   masked when the language or trustworthy label does not apply.
 
 ## Architecture
 
 - **Model** (`train/src/factorized_ctc.py`): `facebook/wav2vec2-xls-r-2b` backbone +
   **factorized CTC head** — a `nonblank_head` (is this frame a phone or blank?) and a
-  `phoneme_head` (which phone?), plus a separate `stress_head`. A `regularized_heads`
+  `phoneme_head` (which phone?), plus stress and language-specific prosody factor
+  heads in one Cartesian joint CTC alphabet. A `regularized_heads`
   variant learns a soft mixture over encoder layers; the simpler `mode=off` variant is
   the "vad-clean" model. VAD loss is confidence-weighted.
 - **Published model (champion)**: `anchpop/lexide-pronunciation` (HF), pinned at commit
@@ -82,7 +85,8 @@ These are hard-won and override generic ML instincts. Violating them has burned 
   - *Lineage*: the previous champion `unified-vad-clean` @`2926e06` is retained as a
     **private** HF repo (it's the distillation teacher), as is the tiny on-device student
     `distill-distilhubert`. All the other old pronunciation experiment repos were deleted.
-- **Languages**: 7 core (deu eng fra ita por rus spa) with FLEURS+Tatoeba+TTS+Pimsleur;
+- **Languages**: 7 established core (deu eng fra ita por rus spa), plus configured
+  expansion targets (hin jpn tha zho-hans), with FLEURS+Tatoeba+TTS+Pimsleur;
   several Pimsleur-only langs (ara ces dan fas …) ride along.
 - **Labels**: espeak-ng (the maintainer's **fork**, see gotchas) → `phonemes.jsonl`
   (broad) → optional `phonemes_narrowed.jsonl` (narrowed; see `espeak_audit/`).

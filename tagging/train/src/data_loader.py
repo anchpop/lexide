@@ -9,6 +9,9 @@ from transformers import AutoTokenizer
 import random
 
 
+RANDOM_SEED = 1234
+
+
 class MultilingualNLPDataset:
     def __init__(self, data_dir: str = "data", max_length: int = 512):
         self.data_dir = Path(data_dir)
@@ -24,13 +27,16 @@ class MultilingualNLPDataset:
             "rus": "Russian",
             "jpn": "Japanese",
             "hin": "Hindi",
+            "tha": "Thai",
+            "zho-hans": "Chinese",
         }
 
     def load_data(self, languages: Optional[List[str]] = None):
         if languages is None:
             languages = list(self.language_map.keys())
 
-        all_data = []
+        grouped_data = []
+        rng = random.Random(RANDOM_SEED)
 
         for lang in languages:
             file_path = self.data_dir / f"cleaned_{lang}.jsonl"
@@ -38,23 +44,25 @@ class MultilingualNLPDataset:
                 print(f"Warning: {file_path} not found, skipping {lang}")
                 continue
 
+            language_data = []
             with jsonlines.open(file_path) as reader:
                 for line_num, obj in enumerate(reader, 1):
                     try:
                         processed = self.process_sample(obj, lang)
                         if processed:
-                            all_data.append(processed)
+                            language_data.append(processed)
                     except Exception as e:
                         print(f"Error parsing {file_path} line {line_num}:")
                         print(f"  Error: {e}")
                         print(f"  Sample: {obj}")
                         raise
 
-        # Shuffle before grouping to avoid alphabetical ordering
-        random.shuffle(all_data)
+            # Group only within a language. Mixing a globally shuffled list here labels
+            # multilingual groups as whichever language happened to come first.
+            rng.shuffle(language_data)
+            grouped_data.extend(self.group_sentences(language_data, rng))
 
-        # Group sentences randomly (1-5 sentences per sample)
-        grouped_data = self.group_sentences(all_data)
+        rng.shuffle(grouped_data)
 
         train_size = int(0.9 * len(grouped_data))
         val_size = int(0.05 * len(grouped_data))
@@ -93,7 +101,7 @@ class MultilingualNLPDataset:
         }
         return sentence[-1] in punctuation_marks
 
-    def group_sentences(self, all_data: List[Dict]) -> List[Dict]:
+    def group_sentences(self, all_data: List[Dict], rng: random.Random) -> List[Dict]:
         """Group sentences randomly, 1-5 per group. Only merge sentences ending with punctuation."""
         grouped = []
         i = 0
@@ -114,10 +122,10 @@ class MultilingualNLPDataset:
                 continue
 
             # 1 in 10 chance of single sentence, otherwise try to add 1-4 more
-            if random.random() < 0.1:
+            if rng.random() < 0.1:
                 max_additional = 0
             else:
-                max_additional = random.randint(1, 4)
+                max_additional = rng.randint(1, 4)
 
             # Try to add more sentences (only if they end with punctuation)
             added = 0
@@ -143,7 +151,7 @@ class MultilingualNLPDataset:
 
         return grouped
 
-    def process_sample(self, sample: Dict, language: str) -> Dict:
+    def process_sample(self, sample: Dict, language: str) -> Optional[Dict]:
         tokens = []
         whitespaces = []
         pos_tags = []
@@ -153,6 +161,17 @@ class MultilingualNLPDataset:
 
         # Handle both old format ("doc") and new format ("tokens")
         token_list = sample.get("tokens", sample.get("doc", []))
+        canonical_sentence = "".join(token["text"] + token["whitespace"] for token in token_list)
+
+        # A head outside [0, n] means the annotation itself is corrupt (e.g. a
+        # merged token whose neighbors were never renumbered). Skip the sample
+        # loudly rather than teach the model a malformed tree.
+        bad_heads = [int(t["head"]) for t in token_list
+                     if not 0 <= int(t["head"]) <= len(token_list)]
+        if bad_heads:
+            print(f"Warning: skipping {language} sample with out-of-range "
+                  f"dependency heads {bad_heads}: {canonical_sentence[:60]!r}")
+            return None
 
         for token in token_list:
             tokens.append(token["text"])
@@ -160,7 +179,7 @@ class MultilingualNLPDataset:
             pos_tags.append(token["pos"])
             lemmas.append(token["lemma"])
             dep_tags.append(token["dep"])
-            dep_heads.append(str(token["head"]))  # Convert to string for consistency
+            dep_heads.append(str(int(token["head"])))
 
         # Tokenization-aware transformation: move trailing normal spaces to next token's beginning
         for i in range(len(tokens) - 1):
@@ -171,7 +190,9 @@ class MultilingualNLPDataset:
         return {
             "language": language,
             "language_name": self.language_map[language],
-            "sentence": sample["sentence"],
+            # The annotations are authoritative when a source sentence disagrees around
+            # whitespace or a merged term: input text must reconstruct from target tokens.
+            "sentence": canonical_sentence,
             "tokens": tokens,
             "whitespaces": whitespaces,
             "pos_tags": pos_tags,
@@ -257,15 +278,13 @@ def prepare_dataset_for_training(tokenizer, max_length: int = 512):
         model_inputs = tokenizer(
             examples["full_text"],
             max_length=max_length,
-            padding="max_length",
+            # Let the collator pad each batch only to its longest example. Gold
+            # analyses are usually far shorter than 512 tokens, so global max-length
+            # padding wastes most of the Gemma training compute.
+            padding=False,
             truncation=True,
             return_tensors=None,
         )
-
-        model_inputs["labels"] = model_inputs["input_ids"].copy()
-
-        # Gemma 4 requires mm_token_type_ids (0 = text token)
-        model_inputs["mm_token_type_ids"] = [[0] * len(ids) for ids in model_inputs["input_ids"]]
 
         return model_inputs
 

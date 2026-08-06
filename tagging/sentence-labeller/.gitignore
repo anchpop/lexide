@@ -11,3 +11,5 @@ __pycache__/
 # matching the repo's "regenerate, don't commit" policy for data. Publish to HF to share.
 data/
 
+# tysm audit-pass caches (same regenerate-don't-commit policy as .cache/)
+.cache-*/
