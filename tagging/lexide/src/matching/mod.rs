@@ -9,7 +9,9 @@ mod discontinuous_lemma_matcher;
 mod lemma_matcher;
 mod text_matcher;
 
-pub use dependency_matcher::{DependencyMatch, DependencyMatcher, TreeNode};
+pub use dependency_matcher::{
+    DependencyMatch, DependencyMatcher, NodeMatcher, PatternNode, TreeNode,
+};
 pub use discontinuous_lemma_matcher::{
     DiscontinuousLemmaMatcher, DiscontinuousMatch, GapConstraint,
 };
