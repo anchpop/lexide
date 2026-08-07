@@ -14,6 +14,8 @@ from pathlib import Path
 from google.cloud import texttospeech
 from tqdm import tqdm
 
+from wav_utils import repair_streamed_wav_header
+
 LANG_CONFIG = {
     "eng": "en-US",
     "deu": "de-DE",
@@ -98,6 +100,10 @@ def synthesize_one(client, sentence, voice_name, language_code, audio_config, ou
 
     wav_path = out_dir / f"{h}.wav"
     wav_path.write_bytes(response.audio_content)
+    # Some TTS responses carry ffmpeg-style sentinel (0xffffffff) chunk sizes;
+    # patch them to the real lengths so `wave`-based tooling sees the true
+    # duration. No-op on well-formed files, lossless (no re-encode).
+    repair_streamed_wav_header(wav_path)
 
     return {
         "file": f"{h}.wav",
