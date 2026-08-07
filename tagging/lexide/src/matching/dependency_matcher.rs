@@ -1,10 +1,15 @@
+use crate::pos::PartOfSpeech;
 use crate::{dep::DependencyRelation, Token, Tokenization};
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryFrom;
 
 /// A tree node representing a token and its dependency children.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct TreeNode {
+    /// Index of this token in the tokenization the tree was built from.
+    /// Hand-built pattern trees may leave this 0; matching never reads it on
+    /// patterns, only on subject trees (to report matched token indices).
+    pub index: usize,
     pub token: Token,
     pub children: Vec<(DependencyRelation, TreeNode)>,
 }
@@ -20,12 +25,165 @@ pub struct DependencyMatch<'a, K = String> {
     pub matched_node: &'a TreeNode,
     /// Matched label
     pub matched_label: K,
+    /// Indices (into the tokenization the subject tree was built from) of the
+    /// tokens bound by the pattern's nodes, sorted. Lets callers report which
+    /// words of the sentence realized the pattern.
+    pub matched_token_indices: Vec<usize>,
+}
+
+/// How a single pattern node decides whether it matches a token.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub enum NodeMatcher {
+    /// Exact lemma match — the classic behavior for citation-form patterns.
+    Lemma(String),
+    /// Lemma must be one of `lemmas`; if `pos` is non-empty, the token's POS
+    /// must also be in `pos`. Used for pronoun/determiner sets that can
+    /// realize an argument slot (e.g. French dative clitics me/te/lui/...).
+    LemmaSet {
+        lemmas: BTreeSet<String>,
+        pos: BTreeSet<PartOfSpeech>,
+    },
+    /// Wildcard: any token whose POS is in the set. Used for open argument
+    /// slots ("quelqu'un"/"someone" filled by an arbitrary noun phrase).
+    AnyPos(BTreeSet<PartOfSpeech>),
+}
+
+impl NodeMatcher {
+    fn matches(&self, token: &Token) -> bool {
+        match self {
+            NodeMatcher::Lemma(lemma) => token.lemma.lemma == *lemma,
+            NodeMatcher::LemmaSet { lemmas, pos } => {
+                lemmas.contains(&token.lemma.lemma) && (pos.is_empty() || pos.contains(&token.pos))
+            }
+            NodeMatcher::AnyPos(pos) => pos.contains(&token.pos),
+        }
+    }
+
+    /// The lemmas a matching token can have, or `None` if any lemma can match.
+    /// Used to index patterns by their root for fast candidate lookup.
+    fn anchor_lemmas(&self) -> Option<Vec<&str>> {
+        match self {
+            NodeMatcher::Lemma(lemma) => Some(vec![lemma.as_str()]),
+            NodeMatcher::LemmaSet { lemmas, .. } => {
+                Some(lemmas.iter().map(|l| l.as_str()).collect())
+            }
+            NodeMatcher::AnyPos(_) => None,
+        }
+    }
+}
+
+/// A pattern over dependency trees. Unlike [`TreeNode`] (which is a concrete
+/// parse), pattern nodes can be wildcards or lemma sets, and each child edge
+/// accepts a set of dependency relations (e.g. `{iobj, obj}` for a clitic
+/// realization of a case-marked argument slot).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct PatternNode {
+    pub matcher: NodeMatcher,
+    pub children: Vec<(BTreeSet<DependencyRelation>, PatternNode)>,
+}
+
+impl From<&TreeNode> for PatternNode {
+    /// A concrete parse tree used as a pattern matches by exact lemma at every
+    /// node, with each child edge requiring the parse's dependency relation —
+    /// the classic citation-form behavior.
+    fn from(tree: &TreeNode) -> Self {
+        PatternNode {
+            matcher: NodeMatcher::Lemma(tree.token.lemma.lemma.clone()),
+            children: tree
+                .children
+                .iter()
+                .map(|(dep, child)| (BTreeSet::from([*dep]), PatternNode::from(child)))
+                .collect(),
+        }
+    }
+}
+
+impl From<&PatternNode> for PatternNode {
+    fn from(pattern: &PatternNode) -> Self {
+        pattern.clone()
+    }
+}
+
+impl PatternNode {
+    /// If this pattern matches at `node`, returns the indices (into the
+    /// tokenization the subject tree was built from) of the tokens bound by
+    /// the pattern's nodes, sorted and deduplicated.
+    fn matches(&self, node: &TreeNode) -> Option<Vec<usize>> {
+        let mut indices = Vec::new();
+        if self.matches_node(node, &mut indices) {
+            indices.sort_unstable();
+            indices.dedup();
+            Some(indices)
+        } else {
+            None
+        }
+    }
+
+    /// Whether this pattern matches at `node`, appending the bound token
+    /// indices on success and leaving `indices` untouched on failure.
+    ///
+    /// A subject tree built by [`TreeNode::try_from`] is an owned, acyclic
+    /// tree, so matching needs no cycle guard — walking it always terminates.
+    fn matches_node(&self, node: &TreeNode, indices: &mut Vec<usize>) -> bool {
+        if !self.matcher.matches(&node.token) {
+            return false;
+        }
+
+        let checkpoint = indices.len();
+        indices.push(node.index);
+
+        let mut claimed = vec![false; node.children.len()];
+        if self.assign_children(node, 0, &mut claimed, indices) {
+            true
+        } else {
+            indices.truncate(checkpoint);
+            false
+        }
+    }
+
+    /// Assign this pattern's children to *distinct* children of `node`,
+    /// backtracking when a choice paints a later requirement into a corner.
+    ///
+    /// Distinctness is what makes a pattern that requires, say, two `conj`
+    /// children actually require two of them — matching both requirements
+    /// against the same subject child would report a phrase that isn't there.
+    fn assign_children(
+        &self,
+        node: &TreeNode,
+        requirement: usize,
+        claimed: &mut Vec<bool>,
+        indices: &mut Vec<usize>,
+    ) -> bool {
+        let Some((deps, child_pattern)) = self.children.get(requirement) else {
+            return true; // every requirement satisfied
+        };
+
+        for (i, (child_dep, child_node)) in node.children.iter().enumerate() {
+            if claimed[i] || !deps.contains(child_dep) {
+                continue;
+            }
+            let checkpoint = indices.len();
+            claimed[i] = true;
+            if child_pattern.matches_node(child_node, indices)
+                && self.assign_children(node, requirement + 1, claimed, indices)
+            {
+                return true;
+            }
+            claimed[i] = false;
+            indices.truncate(checkpoint);
+        }
+        false
+    }
 }
 
 /// A pattern matcher that operates on dependency tree structures.
 ///
 /// Searches for tree patterns within a tokenization's dependency tree,
 /// making it useful for finding syntactic patterns based on grammatical structure.
+///
+/// Patterns are [`PatternNode`]s; anything convertible to one is accepted —
+/// in particular a concrete [`TreeNode`] (e.g. the parse of a dictionary
+/// citation form), which matches by exact lemmas.
 ///
 /// # Example
 ///
@@ -43,7 +201,7 @@ pub struct DependencyMatch<'a, K = String> {
 ///     ],
 /// };
 ///
-/// let matcher = DependencyMatcher::new(&[love_pattern]);
+/// let matcher = DependencyMatcher::new(&[("love_obj".to_string(), love_pattern)]);
 /// let matches = matcher.find_all(&tree);
 ///
 /// for match_result in matches {
@@ -58,8 +216,11 @@ pub struct DependencyMatcher<K = String>
 where
     K: Clone,
 {
-    patterns: Vec<(K, TreeNode)>,
+    patterns: Vec<(K, PatternNode)>,
     root_index: HashMap<String, Vec<usize>>,
+    /// Patterns whose root has no anchor lemma (wildcard roots); checked at
+    /// every node.
+    unanchored: Vec<usize>,
 }
 
 impl TryFrom<Tokenization> for TreeNode {
@@ -90,31 +251,47 @@ impl TryFrom<Tokenization> for TreeNode {
 }
 
 impl<K: Clone> DependencyMatcher<K> {
-    /// Creates a new dependency matcher from tree patterns.
+    /// Creates a new dependency matcher from patterns.
     ///
     /// # Arguments
     ///
-    /// * `patterns` - A slice of TreeNode patterns to match
+    /// * `patterns` - labeled patterns: anything convertible to a
+    ///   [`PatternNode`], including concrete [`TreeNode`]s (exact-lemma
+    ///   matching) and hand-built `PatternNode`s (wildcards / lemma sets).
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let patterns = vec![love_pattern, run_pattern];
+    /// let patterns = vec![("love".to_string(), love_pattern)];
     /// let matcher = DependencyMatcher::new(&patterns);
     /// ```
-    pub fn new(patterns: &[(K, TreeNode)]) -> Self {
-        // Build index: lemma -> pattern indices that start with this lemma
+    pub fn new<P>(patterns: &[(K, P)]) -> Self
+    where
+        for<'a> PatternNode: From<&'a P>,
+    {
+        let patterns: Vec<(K, PatternNode)> = patterns
+            .iter()
+            .map(|(k, p)| (k.clone(), PatternNode::from(p)))
+            .collect();
+
+        // Build index: lemma -> pattern indices whose root can have this lemma
         let mut root_index: HashMap<String, Vec<usize>> = HashMap::new();
-        for (idx, pattern) in patterns.iter().enumerate() {
-            root_index
-                .entry(pattern.1.token.lemma.lemma.clone())
-                .or_default()
-                .push(idx);
+        let mut unanchored = Vec::new();
+        for (idx, (_, pattern)) in patterns.iter().enumerate() {
+            match pattern.matcher.anchor_lemmas() {
+                Some(lemmas) => {
+                    for lemma in lemmas {
+                        root_index.entry(lemma.to_string()).or_default().push(idx);
+                    }
+                }
+                None => unanchored.push(idx),
+            }
         }
 
         Self {
-            patterns: patterns.to_vec(),
+            patterns,
             root_index,
+            unanchored,
         }
     }
 
@@ -127,7 +304,7 @@ impl<K: Clone> DependencyMatcher<K> {
     /// # Returns
     ///
     /// A vector of matches, where each match contains the pattern index and matched node.
-    pub fn find_all<'a>(&'a self, tree: &'a TreeNode) -> Vec<DependencyMatch<'a, K>> {
+    pub fn find_all<'t>(&self, tree: &'t TreeNode) -> Vec<DependencyMatch<'t, K>> {
         let mut matches = Vec::new();
         self.traverse_and_match(tree, &mut matches);
         matches
@@ -154,19 +331,29 @@ impl<K: Clone> DependencyMatcher<K> {
         self.patterns.len()
     }
 
-    fn traverse_and_match<'a>(
-        &'a self,
-        node: &'a TreeNode,
-        matches: &mut Vec<DependencyMatch<'a, K>>,
+    /// Pattern indices that could match at a node with this root lemma.
+    fn candidate_indices<'s>(&'s self, lemma: &str) -> impl Iterator<Item = usize> + 's {
+        self.root_index
+            .get(lemma)
+            .into_iter()
+            .flatten()
+            .copied()
+            .chain(self.unanchored.iter().copied())
+    }
+
+    fn traverse_and_match<'t>(
+        &self,
+        node: &'t TreeNode,
+        matches: &mut Vec<DependencyMatch<'t, K>>,
     ) {
         let mut visited = HashSet::new();
         self.traverse_and_match_impl(node, matches, &mut visited);
     }
 
-    fn traverse_and_match_impl<'a>(
-        &'a self,
-        node: &'a TreeNode,
-        matches: &mut Vec<DependencyMatch<'a, K>>,
+    fn traverse_and_match_impl<'t>(
+        &self,
+        node: &'t TreeNode,
+        matches: &mut Vec<DependencyMatch<'t, K>>,
         visited: &mut HashSet<*const TreeNode>,
     ) {
         // Use pointer address to detect cycles
@@ -177,18 +364,17 @@ impl<K: Clone> DependencyMatcher<K> {
         visited.insert(node_ptr);
 
         // Check if this node starts any patterns
-        if let Some(pattern_indices) = self.root_index.get(&node.token.lemma.lemma) {
-            for &pattern_idx in pattern_indices {
-                let (label, pattern) = &self.patterns[pattern_idx];
+        for pattern_idx in self.candidate_indices(&node.token.lemma.lemma) {
+            let (label, pattern) = &self.patterns[pattern_idx];
 
-                // Check if this node matches the pattern (with children)
-                if node.matches_pattern(pattern) {
-                    matches.push(DependencyMatch {
-                        pattern_index: pattern_idx,
-                        matched_node: node,
-                        matched_label: label.clone(),
-                    });
-                }
+            // Check if this node matches the pattern (with children)
+            if let Some(matched_token_indices) = pattern.matches(node) {
+                matches.push(DependencyMatch {
+                    pattern_index: pattern_idx,
+                    matched_node: node,
+                    matched_label: label.clone(),
+                    matched_token_indices,
+                });
             }
         }
 
@@ -212,14 +398,12 @@ impl<K: Clone> DependencyMatcher<K> {
         visited.insert(node_ptr);
 
         // Check if this node starts any patterns
-        if let Some(pattern_indices) = self.root_index.get(&node.token.lemma.lemma) {
-            for &pattern_idx in pattern_indices {
-                let (_, pattern) = &self.patterns[pattern_idx];
+        for pattern_idx in self.candidate_indices(&node.token.lemma.lemma) {
+            let (_, pattern) = &self.patterns[pattern_idx];
 
-                // Check if this node matches the pattern (with children)
-                if node.matches_pattern(pattern) {
-                    return true;
-                }
+            // Check if this node matches the pattern (with children)
+            if pattern.matches(node).is_some() {
+                return true;
             }
         }
 
@@ -239,110 +423,21 @@ impl TreeNode {
     /// Returns a map from pattern index to all locations where that pattern was found.
     #[cfg(test)]
     fn find_multiple<'a>(&'a self, patterns: &[&TreeNode]) -> HashMap<usize, Vec<&'a TreeNode>> {
-        // Build index: lemma -> pattern indices that start with this lemma
-        let mut root_index: HashMap<String, Vec<usize>> = HashMap::new();
-        for (idx, pattern) in patterns.iter().enumerate() {
-            root_index
-                .entry(pattern.token.lemma.lemma.clone())
-                .or_default()
-                .push(idx);
-        }
-
-        let mut results = HashMap::new();
-        self.traverse_with_patterns(patterns, &root_index, &mut results);
-        results
-    }
-
-    #[cfg(test)]
-    fn traverse_with_patterns<'a>(
-        &'a self,
-        patterns: &[&TreeNode],
-        root_index: &HashMap<String, Vec<usize>>,
-        results: &mut HashMap<usize, Vec<&'a TreeNode>>,
-    ) {
-        let mut visited = HashSet::new();
-        self.traverse_with_patterns_impl(patterns, root_index, results, &mut visited);
-    }
-
-    #[cfg(test)]
-    fn traverse_with_patterns_impl<'a>(
-        &'a self,
-        patterns: &[&TreeNode],
-        root_index: &HashMap<String, Vec<usize>>,
-        results: &mut HashMap<usize, Vec<&'a TreeNode>>,
-        visited: &mut HashSet<*const TreeNode>,
-    ) {
-        // Use pointer address to detect cycles
-        let node_ptr = self as *const TreeNode;
-        if visited.contains(&node_ptr) {
-            return; // Already visited this node, avoid infinite loop
-        }
-        visited.insert(node_ptr);
-
-        // Check if this node starts any patterns
-        if let Some(pattern_indices) = root_index.get(&self.token.lemma.lemma) {
-            for &pattern_idx in pattern_indices {
-                let pattern = patterns[pattern_idx];
-
-                // Check if this node matches the pattern (with children)
-                if self.matches_pattern(pattern) {
-                    results.entry(pattern_idx).or_default().push(self);
-                }
-            }
-        }
-
-        // Recursively traverse children
-        for (_, child) in &self.children {
-            child.traverse_with_patterns_impl(patterns, root_index, results, visited);
-        }
-    }
-
-    fn matches_pattern(&self, pattern: &TreeNode) -> bool {
-        let mut visited = HashSet::new();
-        self.matches_pattern_impl(pattern, &mut visited)
-    }
-
-    fn matches_pattern_impl(
-        &self,
-        pattern: &TreeNode,
-        visited: &mut HashSet<*const TreeNode>,
-    ) -> bool {
-        // Lemmas must match (already checked by caller, but defensive)
-        if self.token.lemma != pattern.token.lemma {
-            return false;
-        }
-
-        // Use pointer address to detect cycles in the tree being searched
-        let node_ptr = self as *const TreeNode;
-        if visited.contains(&node_ptr) {
-            // If we've seen this node before, treat it as having no children
-            return pattern.children.is_empty();
-        }
-        visited.insert(node_ptr);
-
-        // Build map of what children we need from the pattern
-        let mut needed = pattern
-            .children
+        let labeled: Vec<(usize, PatternNode)> = patterns
             .iter()
-            .map(|(dep, tree)| (*dep, tree))
-            .collect::<HashMap<_, _>>();
+            .enumerate()
+            .map(|(idx, tree)| (idx, PatternNode::from(*tree)))
+            .collect();
+        let matcher = DependencyMatcher::new(&labeled);
 
-        // Check each of our direct children only
-        for (child_dep, child_tree) in &self.children {
-            if let Entry::Occupied(entry) = needed.entry(*child_dep) {
-                let pattern_child = entry.get();
-                // Only check if the direct child's lemma matches - don't recurse deeply
-                if child_tree.token.lemma == pattern_child.token.lemma {
-                    // Now recursively check if this child's children match the pattern's children
-                    if child_tree.matches_pattern_impl(pattern_child, visited) {
-                        entry.remove();
-                    }
-                }
-            }
+        let mut results: HashMap<usize, Vec<&TreeNode>> = HashMap::new();
+        for m in matcher.find_all(self) {
+            results
+                .entry(m.pattern_index)
+                .or_default()
+                .push(m.matched_node);
         }
-
-        // Pattern matches if all needed children were found
-        needed.is_empty()
+        results
     }
 }
 
@@ -370,6 +465,7 @@ fn build_tree_node_impl(
     if visited.contains(&token_idx) {
         // Break the cycle by returning a node with no children
         return TreeNode {
+            index: token_idx,
             token,
             children: Vec::new(),
         };
@@ -392,7 +488,11 @@ fn build_tree_node_impl(
     // Unmark this token as we backtrack (allows the token to appear in other branches)
     visited.remove(&token_idx);
 
-    TreeNode { token, children }
+    TreeNode {
+        index: token_idx,
+        token,
+        children,
+    }
 }
 
 #[cfg(test)]
@@ -495,6 +595,7 @@ mod tests {
     fn test_find_multiple_basic() {
         // Big tree: "I love programming"
         let big_tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -511,6 +612,7 @@ mod tests {
                 (
                     DependencyRelation::Nsubj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "I".to_string(),
@@ -529,6 +631,7 @@ mod tests {
                 (
                     DependencyRelation::Obj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "programming".to_string(),
@@ -549,6 +652,7 @@ mod tests {
 
         // Pattern 1: just "love"
         let pattern1 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -566,6 +670,7 @@ mod tests {
 
         // Pattern 2: "programming"
         let pattern2 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "programming".to_string(),
@@ -583,6 +688,7 @@ mod tests {
 
         // Pattern 3: "I"
         let pattern3 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "I".to_string(),
@@ -612,6 +718,7 @@ mod tests {
     fn test_find_multiple_with_structure() {
         // Big tree: "I love programming"
         let big_tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -628,6 +735,7 @@ mod tests {
                 (
                     DependencyRelation::Nsubj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "I".to_string(),
@@ -646,6 +754,7 @@ mod tests {
                 (
                     DependencyRelation::Obj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "programming".to_string(),
@@ -666,6 +775,7 @@ mod tests {
 
         // Pattern 1: "love" with Obj child
         let pattern1 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -681,6 +791,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Obj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "programming".to_string(),
@@ -700,6 +811,7 @@ mod tests {
 
         // Pattern 2: "love" with Nsubj child (also should match)
         let pattern2 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -715,6 +827,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Nsubj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "I".to_string(),
@@ -734,6 +847,7 @@ mod tests {
 
         // Pattern 3: "love" with wrong child (should NOT match)
         let pattern3 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -749,6 +863,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Obj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "coding".to_string(),
@@ -779,6 +894,7 @@ mod tests {
     #[test]
     fn test_find_multiple_empty_patterns() {
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -802,6 +918,7 @@ mod tests {
     #[test]
     fn test_find_multiple_single_node_tree() {
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -818,6 +935,7 @@ mod tests {
         };
 
         let pattern1 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -834,6 +952,7 @@ mod tests {
         };
 
         let pattern2 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "walk".to_string(),
@@ -860,6 +979,7 @@ mod tests {
     #[test]
     fn test_find_multiple_all_patterns_fail() {
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -876,6 +996,7 @@ mod tests {
         };
 
         let pattern1 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "walk".to_string(),
@@ -892,6 +1013,7 @@ mod tests {
         };
 
         let pattern2 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "jump".to_string(),
@@ -918,6 +1040,7 @@ mod tests {
         // Tree: "I love programming and love coding"
         // Two "love" nodes with different children
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -934,6 +1057,7 @@ mod tests {
                 (
                     DependencyRelation::Nsubj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "I".to_string(),
@@ -952,6 +1076,7 @@ mod tests {
                 (
                     DependencyRelation::Obj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "programming".to_string(),
@@ -970,6 +1095,7 @@ mod tests {
                 (
                     DependencyRelation::Conj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "love".to_string(),
@@ -985,6 +1111,7 @@ mod tests {
                         children: vec![(
                             DependencyRelation::Obj,
                             TreeNode {
+                                index: 0,
                                 token: Token {
                                     text: Text {
                                         text: "coding".to_string(),
@@ -1007,6 +1134,7 @@ mod tests {
 
         // Pattern: "love" with "programming" as object
         let pattern1 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -1022,6 +1150,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Obj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "programming".to_string(),
@@ -1041,6 +1170,7 @@ mod tests {
 
         // Pattern: "love" with "coding" as object
         let pattern2 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -1056,6 +1186,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Obj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "coding".to_string(),
@@ -1085,6 +1216,7 @@ mod tests {
     #[test]
     fn test_find_multiple_duplicate_patterns() {
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -1101,6 +1233,7 @@ mod tests {
         };
 
         let pattern = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -1130,6 +1263,7 @@ mod tests {
     fn test_find_multiple_deep_nesting() {
         // Create a deeply nested tree: "I think you said he loves programming"
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "think".to_string(),
@@ -1146,6 +1280,7 @@ mod tests {
                 (
                     DependencyRelation::Nsubj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "I".to_string(),
@@ -1164,6 +1299,7 @@ mod tests {
                 (
                     DependencyRelation::Ccomp,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "said".to_string(),
@@ -1180,6 +1316,7 @@ mod tests {
                             (
                                 DependencyRelation::Nsubj,
                                 TreeNode {
+                                    index: 0,
                                     token: Token {
                                         text: Text {
                                             text: "you".to_string(),
@@ -1198,6 +1335,7 @@ mod tests {
                             (
                                 DependencyRelation::Ccomp,
                                 TreeNode {
+                                    index: 0,
                                     token: Token {
                                         text: Text {
                                             text: "loves".to_string(),
@@ -1214,6 +1352,7 @@ mod tests {
                                         (
                                             DependencyRelation::Nsubj,
                                             TreeNode {
+                                                index: 0,
                                                 token: Token {
                                                     text: Text {
                                                         text: "he".to_string(),
@@ -1232,6 +1371,7 @@ mod tests {
                                         (
                                             DependencyRelation::Obj,
                                             TreeNode {
+                                                index: 0,
                                                 token: Token {
                                                     text: Text {
                                                         text: "programming".to_string(),
@@ -1258,6 +1398,7 @@ mod tests {
 
         // Pattern for "programming" at depth 4
         let pattern1 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "programming".to_string(),
@@ -1275,6 +1416,7 @@ mod tests {
 
         // Pattern for "love" with children at depth 3
         let pattern2 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -1290,6 +1432,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Nsubj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "he".to_string(),
@@ -1309,6 +1452,7 @@ mod tests {
 
         // Pattern for "say" at depth 2
         let pattern3 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "say".to_string(),
@@ -1338,6 +1482,7 @@ mod tests {
     fn test_find_multiple_pattern_subset_relationship() {
         // Tree with nested structure
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -1354,6 +1499,7 @@ mod tests {
                 (
                     DependencyRelation::Nsubj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "I".to_string(),
@@ -1372,6 +1518,7 @@ mod tests {
                 (
                     DependencyRelation::Obj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "marathon".to_string(),
@@ -1392,6 +1539,7 @@ mod tests {
 
         // Pattern 1: just "run" (no children required)
         let pattern1 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -1409,6 +1557,7 @@ mod tests {
 
         // Pattern 2: "run" with Nsubj
         let pattern2 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -1424,6 +1573,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Nsubj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "I".to_string(),
@@ -1443,6 +1593,7 @@ mod tests {
 
         // Pattern 3: "run" with both Nsubj and Obj
         let pattern3 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -1459,6 +1610,7 @@ mod tests {
                 (
                     DependencyRelation::Nsubj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "I".to_string(),
@@ -1477,6 +1629,7 @@ mod tests {
                 (
                     DependencyRelation::Obj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "marathon".to_string(),
@@ -1508,6 +1661,7 @@ mod tests {
     #[test]
     fn test_find_multiple_pattern_requires_missing_child() {
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -1523,6 +1677,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Nsubj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "I".to_string(),
@@ -1542,6 +1697,7 @@ mod tests {
 
         // Pattern requires an Obj child that doesn't exist
         let pattern = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -1557,6 +1713,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Obj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "marathon".to_string(),
@@ -1585,6 +1742,7 @@ mod tests {
     fn test_find_multiple_multiple_occurrences_same_pattern() {
         // Tree with multiple "I" nodes
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "think".to_string(),
@@ -1601,6 +1759,7 @@ mod tests {
                 (
                     DependencyRelation::Nsubj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "I".to_string(),
@@ -1619,6 +1778,7 @@ mod tests {
                 (
                     DependencyRelation::Ccomp,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "know".to_string(),
@@ -1635,6 +1795,7 @@ mod tests {
                             (
                                 DependencyRelation::Nsubj,
                                 TreeNode {
+                                    index: 0,
                                     token: Token {
                                         text: Text {
                                             text: "I".to_string(),
@@ -1653,6 +1814,7 @@ mod tests {
                             (
                                 DependencyRelation::Obj,
                                 TreeNode {
+                                    index: 0,
                                     token: Token {
                                         text: Text {
                                             text: "you".to_string(),
@@ -1676,6 +1838,7 @@ mod tests {
 
         // Pattern for "I"
         let pattern = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "I".to_string(),
@@ -1745,6 +1908,7 @@ mod tests {
 
         // Pattern: "love"
         let pattern = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -1815,6 +1979,7 @@ mod tests {
 
         // Pattern 1: "love"
         let pattern1 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -1832,6 +1997,7 @@ mod tests {
 
         // Pattern 2: "programming"
         let pattern2 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "programming".to_string(),
@@ -1908,6 +2074,7 @@ mod tests {
 
         // Pattern that exists
         let pattern_exists = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -1925,6 +2092,7 @@ mod tests {
 
         // Pattern that doesn't exist
         let pattern_missing = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "hate".to_string(),
@@ -1953,6 +2121,7 @@ mod tests {
     #[test]
     fn test_dependency_matcher_pattern_count() {
         let pattern1 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -1969,6 +2138,7 @@ mod tests {
         };
 
         let pattern2 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "run".to_string(),
@@ -1985,6 +2155,7 @@ mod tests {
         };
 
         let pattern3 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "walk".to_string(),
@@ -2015,6 +2186,7 @@ mod tests {
         // This should NOT match because A is not a direct child of E
 
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "E".to_string(),
@@ -2030,6 +2202,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Ccomp,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "B".to_string(),
@@ -2045,6 +2218,7 @@ mod tests {
                     children: vec![(
                         DependencyRelation::Ccomp,
                         TreeNode {
+                            index: 0,
                             token: Token {
                                 text: Text {
                                     text: "C".to_string(),
@@ -2060,6 +2234,7 @@ mod tests {
                             children: vec![(
                                 DependencyRelation::Ccomp,
                                 TreeNode {
+                                    index: 0,
                                     token: Token {
                                         text: Text {
                                             text: "D".to_string(),
@@ -2075,6 +2250,7 @@ mod tests {
                                     children: vec![(
                                         DependencyRelation::Nsubj,
                                         TreeNode {
+                                            index: 0,
                                             token: Token {
                                                 text: Text {
                                                     text: "A".to_string(),
@@ -2100,6 +2276,7 @@ mod tests {
 
         // Pattern: E with A as direct Nsubj child
         let pattern = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "E".to_string(),
@@ -2115,6 +2292,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Nsubj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "A".to_string(),
@@ -2151,6 +2329,7 @@ mod tests {
         // This SHOULD match because A is a direct child of E
 
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "E".to_string(),
@@ -2167,6 +2346,7 @@ mod tests {
                 (
                     DependencyRelation::Nsubj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "A".to_string(),
@@ -2185,6 +2365,7 @@ mod tests {
                 (
                     DependencyRelation::Obj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "B".to_string(),
@@ -2205,6 +2386,7 @@ mod tests {
 
         // Pattern: E with A as direct Nsubj child
         let pattern = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "E".to_string(),
@@ -2220,6 +2402,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Nsubj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "A".to_string(),
@@ -2259,6 +2442,7 @@ mod tests {
 
         // Tree for "Contrôlez-vous."
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "Contrôlez".to_string(),
@@ -2275,6 +2459,7 @@ mod tests {
                 (
                     DependencyRelation::Punct,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "-".to_string(),
@@ -2293,6 +2478,7 @@ mod tests {
                 (
                     DependencyRelation::Obj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "vous".to_string(),
@@ -2311,6 +2497,7 @@ mod tests {
                 (
                     DependencyRelation::Punct,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: ".".to_string(),
@@ -2331,6 +2518,7 @@ mod tests {
 
         // Pattern for "logiciel rançonneur"
         let pattern = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "logiciel".to_string(),
@@ -2346,6 +2534,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Amod,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "rançonneur".to_string(),
@@ -2537,6 +2726,7 @@ mod tests {
         // Tree for "qu'est-ce qu'il ne faut pas entendre"
         // Root is "faut" (falloir - to be necessary)
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "faut".to_string(),
@@ -2553,6 +2743,7 @@ mod tests {
                 (
                     DependencyRelation::Obj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "qu'".to_string(),
@@ -2571,6 +2762,7 @@ mod tests {
                 (
                     DependencyRelation::Aux,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "est".to_string(),
@@ -2587,6 +2779,7 @@ mod tests {
                             (
                                 DependencyRelation::Punct,
                                 TreeNode {
+                                    index: 0,
                                     token: Token {
                                         text: Text {
                                             text: "-".to_string(),
@@ -2605,6 +2798,7 @@ mod tests {
                             (
                                 DependencyRelation::Expl,
                                 TreeNode {
+                                    index: 0,
                                     token: Token {
                                         text: Text {
                                             text: "ce".to_string(),
@@ -2626,6 +2820,7 @@ mod tests {
                 (
                     DependencyRelation::Mark,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "qu'".to_string(),
@@ -2644,6 +2839,7 @@ mod tests {
                 (
                     DependencyRelation::ExplImpers,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "il".to_string(),
@@ -2662,6 +2858,7 @@ mod tests {
                 (
                     DependencyRelation::Advmod,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "ne".to_string(),
@@ -2680,6 +2877,7 @@ mod tests {
                 (
                     DependencyRelation::Advmod,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "pas".to_string(),
@@ -2698,6 +2896,7 @@ mod tests {
                 (
                     DependencyRelation::Xcomp,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "entendre".to_string(),
@@ -2718,6 +2917,7 @@ mod tests {
 
         // Pattern for "logiciel rançonneur" (ransomware)
         let pattern = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "logiciel".to_string(),
@@ -2733,6 +2933,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Amod,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "rançonneur".to_string(),
@@ -2766,6 +2967,7 @@ mod tests {
         // Test that when matching many patterns simultaneously, we don't get false positives
         // Tree: "I love programming" with nested structure
         let tree = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -2782,6 +2984,7 @@ mod tests {
                 (
                     DependencyRelation::Nsubj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "I".to_string(),
@@ -2800,6 +3003,7 @@ mod tests {
                 (
                     DependencyRelation::Obj,
                     TreeNode {
+                        index: 0,
                         token: Token {
                             text: Text {
                                 text: "programming".to_string(),
@@ -2820,6 +3024,7 @@ mod tests {
 
         // Pattern 1: "love" with "programming" as obj (SHOULD match)
         let pattern1 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -2835,6 +3040,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Obj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "programming".to_string(),
@@ -2854,6 +3060,7 @@ mod tests {
 
         // Pattern 2: "hate" with "programming" as obj (should NOT match - wrong verb)
         let pattern2 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "hate".to_string(),
@@ -2869,6 +3076,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Obj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "programming".to_string(),
@@ -2888,6 +3096,7 @@ mod tests {
 
         // Pattern 3: "love" with "coding" as obj (should NOT match - wrong object)
         let pattern3 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -2903,6 +3112,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Obj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "coding".to_string(),
@@ -2922,6 +3132,7 @@ mod tests {
 
         // Pattern 4: "you" as nsubj of "love" (should NOT match - wrong subject)
         let pattern4 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "love".to_string(),
@@ -2937,6 +3148,7 @@ mod tests {
             children: vec![(
                 DependencyRelation::Nsubj,
                 TreeNode {
+                    index: 0,
                     token: Token {
                         text: Text {
                             text: "you".to_string(),
@@ -2956,6 +3168,7 @@ mod tests {
 
         // Pattern 5: Just "I" (SHOULD match)
         let pattern5 = TreeNode {
+            index: 0,
             token: Token {
                 text: Text {
                     text: "I".to_string(),
@@ -3125,5 +3338,414 @@ mod tests {
         let tree = result.unwrap();
         assert_eq!(tree.token.lemma.lemma, "run");
         assert_eq!(tree.children.len(), 1);
+    }
+
+    /// Build a token quickly for slot-pattern tests.
+    fn tok(
+        text: &str,
+        lemma: &str,
+        pos: PartOfSpeech,
+        dep: DependencyRelation,
+        head: i32,
+    ) -> Token {
+        Token {
+            text: Text {
+                text: text.to_string(),
+            },
+            whitespace: " ".to_string(),
+            pos,
+            lemma: Lemma {
+                lemma: lemma.to_string(),
+            },
+            dep,
+            head,
+        }
+    }
+
+    /// "Ce qui leur est arrive" style tree: arriver(root) with an iobj PRON child.
+    fn clitic_sentence_tree() -> TreeNode {
+        // qui(nsubj) leur(iobj) est(aux) arriver(root)
+        let tokenization = Tokenization {
+            tokens: vec![
+                tok(
+                    "qui",
+                    "qui",
+                    PartOfSpeech::Pron,
+                    DependencyRelation::Nsubj,
+                    4,
+                ),
+                tok(
+                    "leur",
+                    "leur",
+                    PartOfSpeech::Pron,
+                    DependencyRelation::Iobj,
+                    4,
+                ),
+                tok("est", "etre", PartOfSpeech::Aux, DependencyRelation::Aux, 4),
+                tok(
+                    "arrive",
+                    "arriver",
+                    PartOfSpeech::Verb,
+                    DependencyRelation::Root,
+                    0,
+                ),
+            ],
+        };
+        tokenization.try_into().unwrap()
+    }
+
+    /// "arrive a Jean" style tree: arriver(root) -> obl(Jean) -> case(a).
+    fn filled_sentence_tree() -> TreeNode {
+        let tokenization = Tokenization {
+            tokens: vec![
+                tok(
+                    "arrive",
+                    "arriver",
+                    PartOfSpeech::Verb,
+                    DependencyRelation::Root,
+                    0,
+                ),
+                tok("à", "à", PartOfSpeech::Adp, DependencyRelation::Case, 3),
+                tok(
+                    "Jean",
+                    "Jean",
+                    PartOfSpeech::Propn,
+                    DependencyRelation::Obl,
+                    1,
+                ),
+            ],
+        };
+        tokenization.try_into().unwrap()
+    }
+
+    /// Clitic realization pattern: arriver with an {iobj, obj} child drawn
+    /// from a clitic pronoun lemma set.
+    fn clitic_pattern() -> PatternNode {
+        PatternNode {
+            matcher: NodeMatcher::Lemma("arriver".to_string()),
+            children: vec![(
+                BTreeSet::from([DependencyRelation::Iobj, DependencyRelation::Obj]),
+                PatternNode {
+                    matcher: NodeMatcher::LemmaSet {
+                        lemmas: ["me", "te", "lui", "nous", "vous", "leur", "se"]
+                            .into_iter()
+                            .map(String::from)
+                            .collect(),
+                        pos: BTreeSet::from([PartOfSpeech::Pron]),
+                    },
+                    children: vec![],
+                },
+            )],
+        }
+    }
+
+    /// Filled-slot realization pattern: arriver with an obl nominal wildcard
+    /// that carries the case marker "a".
+    fn filled_pattern() -> PatternNode {
+        PatternNode {
+            matcher: NodeMatcher::Lemma("arriver".to_string()),
+            children: vec![(
+                BTreeSet::from([DependencyRelation::Obl]),
+                PatternNode {
+                    matcher: NodeMatcher::AnyPos(BTreeSet::from([
+                        PartOfSpeech::Noun,
+                        PartOfSpeech::Propn,
+                        PartOfSpeech::Pron,
+                        PartOfSpeech::Num,
+                    ])),
+                    children: vec![(
+                        BTreeSet::from([DependencyRelation::Case]),
+                        PatternNode {
+                            matcher: NodeMatcher::Lemma("à".to_string()),
+                            children: vec![],
+                        },
+                    )],
+                },
+            )],
+        }
+    }
+
+    #[test]
+    fn test_slot_pattern_clitic_realization_matches() {
+        let matcher = DependencyMatcher::new(&[("arriver_a_qqn".to_string(), clitic_pattern())]);
+        let tree = clitic_sentence_tree();
+        let matches = matcher.find_all(&tree);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].matched_label, "arriver_a_qqn");
+        assert_eq!(matches[0].matched_node.token.lemma.lemma, "arriver");
+        // the pattern bound "leur" (index 1) and "arrive" (index 3)
+        assert_eq!(matches[0].matched_token_indices, vec![1, 3]);
+    }
+
+    #[test]
+    fn test_slot_pattern_clitic_rejects_non_clitic_pronoun() {
+        let matcher = DependencyMatcher::new(&[("arriver_a_qqn".to_string(), clitic_pattern())]);
+
+        // An iobj PRON whose lemma is outside the clitic set must not match —
+        // this is what pins the LemmaSet lemma filtering itself.
+        let wrong_lemma = Tokenization {
+            tokens: vec![
+                tok(
+                    "qui",
+                    "qui",
+                    PartOfSpeech::Pron,
+                    DependencyRelation::Nsubj,
+                    4,
+                ),
+                tok(
+                    "moi",
+                    "moi",
+                    PartOfSpeech::Pron,
+                    DependencyRelation::Iobj,
+                    4,
+                ),
+                tok("est", "etre", PartOfSpeech::Aux, DependencyRelation::Aux, 4),
+                tok(
+                    "arrive",
+                    "arriver",
+                    PartOfSpeech::Verb,
+                    DependencyRelation::Root,
+                    0,
+                ),
+            ],
+        };
+        let wrong_lemma: TreeNode = wrong_lemma.try_into().unwrap();
+        assert!(matcher.find_all(&wrong_lemma).is_empty());
+
+        // A clitic-set lemma on the wrong relation (nsubj rather than
+        // iobj/obj) must not match either — this pins the dependency-set
+        // filtering.
+        let wrong_relation = Tokenization {
+            tokens: vec![
+                tok(
+                    "leur",
+                    "leur",
+                    PartOfSpeech::Pron,
+                    DependencyRelation::Nsubj,
+                    3,
+                ),
+                tok("est", "etre", PartOfSpeech::Aux, DependencyRelation::Aux, 3),
+                tok(
+                    "arrive",
+                    "arriver",
+                    PartOfSpeech::Verb,
+                    DependencyRelation::Root,
+                    0,
+                ),
+            ],
+        };
+        let wrong_relation: TreeNode = wrong_relation.try_into().unwrap();
+        assert!(matcher.find_all(&wrong_relation).is_empty());
+    }
+
+    #[test]
+    fn test_slot_pattern_filled_wildcard_matches() {
+        let matcher = DependencyMatcher::new(&[("arriver_a_qqn".to_string(), filled_pattern())]);
+        let tree = filled_sentence_tree();
+        assert_eq!(matcher.find_all(&tree).len(), 1);
+    }
+
+    #[test]
+    fn test_slot_pattern_filled_requires_case_marker() {
+        // arriver -> obl(Jean) but with case "de" instead of "a"
+        let tokenization = Tokenization {
+            tokens: vec![
+                tok(
+                    "arrive",
+                    "arriver",
+                    PartOfSpeech::Verb,
+                    DependencyRelation::Root,
+                    0,
+                ),
+                tok("de", "de", PartOfSpeech::Adp, DependencyRelation::Case, 3),
+                tok(
+                    "Jean",
+                    "Jean",
+                    PartOfSpeech::Propn,
+                    DependencyRelation::Obl,
+                    1,
+                ),
+            ],
+        };
+        let tree: TreeNode = tokenization.try_into().unwrap();
+        let matcher = DependencyMatcher::new(&[("arriver_a_qqn".to_string(), filled_pattern())]);
+        assert!(matcher.find_all(&tree).is_empty());
+    }
+
+    #[test]
+    fn test_slot_pattern_wildcard_root_is_unanchored() {
+        // A pattern with an AnyPos root should still match (checked at every node)
+        let pattern = PatternNode {
+            matcher: NodeMatcher::AnyPos(BTreeSet::from([PartOfSpeech::Propn])),
+            children: vec![],
+        };
+        let matcher = DependencyMatcher::new(&[("any_propn".to_string(), pattern)]);
+        let tree = filled_sentence_tree();
+        let matches = matcher.find_all(&tree);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].matched_node.token.lemma.lemma, "Jean");
+    }
+
+    #[test]
+    fn test_two_requirements_need_two_distinct_children() {
+        // A pattern requiring two Conj children must not be satisfied by one
+        // subject child standing in for both.
+        let leaf = |lemma: &str| PatternNode {
+            matcher: NodeMatcher::Lemma(lemma.to_string()),
+            children: vec![],
+        };
+        let pattern = PatternNode {
+            matcher: NodeMatcher::Lemma("aimer".to_string()),
+            children: vec![
+                (BTreeSet::from([DependencyRelation::Conj]), leaf("pomme")),
+                (BTreeSet::from([DependencyRelation::Conj]), leaf("pomme")),
+            ],
+        };
+        let matcher = DependencyMatcher::new(&[("two_conj".to_string(), pattern)]);
+
+        // One "pomme" conj child: must NOT match.
+        let one = Tokenization {
+            tokens: vec![
+                tok(
+                    "aime",
+                    "aimer",
+                    PartOfSpeech::Verb,
+                    DependencyRelation::Root,
+                    0,
+                ),
+                tok(
+                    "pomme",
+                    "pomme",
+                    PartOfSpeech::Noun,
+                    DependencyRelation::Conj,
+                    1,
+                ),
+            ],
+        };
+        let one: TreeNode = one.try_into().unwrap();
+        assert!(matcher.find_all(&one).is_empty());
+
+        // Two "pomme" conj children: matches, binding both.
+        let two = Tokenization {
+            tokens: vec![
+                tok(
+                    "aime",
+                    "aimer",
+                    PartOfSpeech::Verb,
+                    DependencyRelation::Root,
+                    0,
+                ),
+                tok(
+                    "pomme",
+                    "pomme",
+                    PartOfSpeech::Noun,
+                    DependencyRelation::Conj,
+                    1,
+                ),
+                tok(
+                    "pomme",
+                    "pomme",
+                    PartOfSpeech::Noun,
+                    DependencyRelation::Conj,
+                    1,
+                ),
+            ],
+        };
+        let two: TreeNode = two.try_into().unwrap();
+        let matches = matcher.find_all(&two);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].matched_token_indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_backtracks_when_greedy_choice_blocks_a_later_requirement() {
+        // Requirement A accepts {Obj, Iobj}; requirement B accepts only Iobj.
+        // Taking the Iobj child for A first would strand B, so the matcher has
+        // to back out and give A the Obj child instead.
+        let pattern = PatternNode {
+            matcher: NodeMatcher::Lemma("donner".to_string()),
+            children: vec![
+                (
+                    BTreeSet::from([DependencyRelation::Obj, DependencyRelation::Iobj]),
+                    PatternNode {
+                        matcher: NodeMatcher::AnyPos(BTreeSet::from([PartOfSpeech::Pron])),
+                        children: vec![],
+                    },
+                ),
+                (
+                    BTreeSet::from([DependencyRelation::Iobj]),
+                    PatternNode {
+                        matcher: NodeMatcher::Lemma("lui".to_string()),
+                        children: vec![],
+                    },
+                ),
+            ],
+        };
+        let matcher = DependencyMatcher::new(&[("donner".to_string(), pattern)]);
+
+        let sentence = Tokenization {
+            tokens: vec![
+                tok(
+                    "donne",
+                    "donner",
+                    PartOfSpeech::Verb,
+                    DependencyRelation::Root,
+                    0,
+                ),
+                // Iobj comes first, so the wildcard requirement greedily claims
+                // it and has to give it back once the "lui" requirement finds
+                // nothing left. Ordering these the other way round would let a
+                // matcher with no backtracking pass.
+                tok(
+                    "lui",
+                    "lui",
+                    PartOfSpeech::Pron,
+                    DependencyRelation::Iobj,
+                    1,
+                ),
+                tok("le", "le", PartOfSpeech::Pron, DependencyRelation::Obj, 1),
+            ],
+        };
+        let tree: TreeNode = sentence.try_into().unwrap();
+        let matches = matcher.find_all(&tree);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].matched_token_indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_failed_branch_leaves_no_stray_indices() {
+        // The Obl requirement fails, so nothing (not even the root, nor the
+        // successfully-matched Nsubj) should be reported.
+        let pattern = PatternNode {
+            matcher: NodeMatcher::Lemma("arriver".to_string()),
+            children: vec![
+                (
+                    BTreeSet::from([DependencyRelation::Nsubj]),
+                    PatternNode {
+                        matcher: NodeMatcher::AnyPos(BTreeSet::from([PartOfSpeech::Pron])),
+                        children: vec![],
+                    },
+                ),
+                (
+                    BTreeSet::from([DependencyRelation::Obl]),
+                    PatternNode {
+                        matcher: NodeMatcher::Lemma("Paris".to_string()),
+                        children: vec![],
+                    },
+                ),
+            ],
+        };
+        let matcher = DependencyMatcher::new(&[("arriver_paris".to_string(), pattern)]);
+        let tree = clitic_sentence_tree();
+        assert!(matcher.find_all(&tree).is_empty());
+    }
+
+    #[test]
+    fn test_tree_node_pattern_still_matches_exactly() {
+        // The From<&TreeNode> conversion preserves the classic exact-lemma behavior
+        let tree = clitic_sentence_tree();
+        let pattern_tree = clitic_sentence_tree();
+        let matcher = DependencyMatcher::new(&[("exact".to_string(), pattern_tree)]);
+        assert_eq!(matcher.find_all(&tree).len(), 1);
     }
 }
