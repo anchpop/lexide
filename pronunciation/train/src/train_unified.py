@@ -18,6 +18,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import random
 import time
 from pathlib import Path
 
@@ -33,10 +34,25 @@ from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec
 from .dataset import (
     StressDataset, collate_fn, collate_fn_augment,
     make_train_collate,
-    LengthBucketedBatchSampler, get_audio_lengths,
+    LengthBucketedBatchSampler, TokenBudgetBatchSampler, get_audio_lengths,
 )
 from .factorized_ctc import FactorizedCTCModel
 from .joint_ctc import joint_ctc_loss
+
+
+def _dataloader_worker_init(_worker_id: int) -> None:
+    """Cap each DataLoader worker at one intra-op thread.
+
+    The parent runs heavy CPU torch ops (loading the 2B state dict) before the
+    workers fork, so each child inherits an OpenMP pool sized to the whole
+    machine. 16 workers x ~72 threads on a GH200 is catastrophic
+    oversubscription once the collate does real compute (degrade_waveform's
+    FFT reverb over 100+-clip token-budget batches), and post-fork libgomp
+    team state can deadlock outright — observed 2026-08-06 as all workers
+    parked in futex_wait with the main thread starved in queue.get. One
+    thread per worker sidesteps both; parallelism comes from the workers.
+    """
+    torch.set_num_threads(1)
 
 
 def load_processor(model_name: str):
@@ -288,25 +304,32 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 debug_finite: bool, max_train_batches: int | None,
                 teacher=None, teacher_vocab_remap=None,
                 distill_weight: float = 0.0,
-                distill_temperature: float = 1.0):
+                distill_temperature: float = 1.0,
+                profile_steps: bool = False,
+                log_every: int = 20,
+                loss_reference_batch: int | None = None):
     model.train()
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         if use_bf16 else contextlib.nullcontext()
     )
 
-    total_ctc = 0.0
-    total_vad = 0.0
-    total_invalid = 0.0
-    total_distill = 0.0
+    # Accumulate metrics on-device and transfer once per epoch. Calling .item()
+    # for every metric on every step serializes the GH200 CPU and GPU queues.
+    total_ctc = torch.zeros((), device=device)
+    total_vad = torch.zeros((), device=device)
+    total_invalid = torch.zeros((), device=device)
+    total_distill = torch.zeros((), device=device)
+    total_nonblank = torch.zeros((), device=device)
+    total_grad_norm = torch.zeros((), device=device)
+    max_grad_norm = torch.zeros((), device=device)
     n_vad_batches = 0
     n_invalid_batches = 0
     n_distill_batches = 0
     n_batches = 0
     total_samples = 0
     total_audio_sec = 0.0
-    grad_norms = []
-    nonblank_means = []
+    last_grad_norm = torch.zeros((), device=device)
     timings = {"data": 0.0, "forward": 0.0, "joint_ctc": 0.0, "loss_backward": 0.0}
 
     torch.cuda.reset_peak_memory_stats()
@@ -315,9 +338,13 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
 
     pbar = tqdm(loader, desc=f"Epoch {epoch}")
     for batch in pbar:
-        torch.cuda.synchronize()
+        if profile_steps:
+            torch.cuda.synchronize()
         timings["data"] += time.perf_counter() - last_end
 
+        # This sum is cheaper on CPU and avoids synchronizing the training
+        # stream later merely to count audio seconds.
+        batch_audio_samples = int(batch["audio_mask"].sum())
         audio = batch["audio"].to(device, non_blocking=True)
         audio_mask = batch["audio_mask"].to(device, non_blocking=True)
         phoneme_ids = batch["phoneme_ids"].to(device, non_blocking=True)
@@ -326,7 +353,8 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         tone_seq = batch["tone_seq"].to(device, non_blocking=True)
         pitch_accent_seq = batch["pitch_accent_seq"].to(device, non_blocking=True)
 
-        torch.cuda.synchronize()
+        if profile_steps:
+            torch.cuda.synchronize()
         t_fwd = time.perf_counter()
         batch_language_heads = active_language_heads(model, batch) if stress_active else []
         with autocast_ctx:
@@ -340,8 +368,9 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 check_ctc_log_probs(f"outputs/{name}", value, model, enabled=debug_finite)
             else:
                 check_finite(f"outputs/{name}", value, enabled=debug_finite)
-        torch.cuda.synchronize()
-        timings["forward"] += time.perf_counter() - t_fwd
+        if profile_steps:
+            torch.cuda.synchronize()
+            timings["forward"] += time.perf_counter() - t_fwd
 
         t_joint = time.perf_counter()
         n_frames = model.backbone._get_feat_extract_output_lengths(
@@ -368,8 +397,9 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             langs=batch["langs"],
         )
         check_finite("loss/ctc", ctc_loss, enabled=debug_finite)
-        torch.cuda.synchronize()
-        timings["joint_ctc"] += time.perf_counter() - t_joint
+        if profile_steps:
+            torch.cuda.synchronize()
+            timings["joint_ctc"] += time.perf_counter() - t_joint
 
         vl = torch.zeros((), device=device)
         if vad_weight > 0 and batch.get("vad_probs") is not None:
@@ -380,7 +410,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             n_frames = backbone._get_feat_extract_output_lengths(audio_mask.sum(-1)).to(torch.long)
             vl = vad_loss(outputs["nonblank_logit"], vad_probs_b, vad_lens_b, n_frames)
             check_finite("loss/vad", vl, enabled=debug_finite)
-            total_vad += vl.item()
+            total_vad += vl.detach()
             n_vad_batches += 1
 
         im_loss = torch.zeros((), device=device)
@@ -394,7 +424,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             mask_im = (torch.arange(om.shape[1], device=om.device)[None] < n_frames_im[:, None])
             im_loss = (om * mask_im).sum() / mask_im.sum().clamp(min=1)
             check_finite("loss/off_manifold", im_loss, enabled=debug_finite)
-            total_invalid += im_loss.item()
+            total_invalid += im_loss.detach()
             n_invalid_batches += 1
 
         distill_loss = torch.zeros((), device=device)
@@ -436,12 +466,20 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 temperature=distill_temperature,
             )
             check_finite("loss/distill", distill_loss, enabled=debug_finite)
-            total_distill += distill_loss.item()
+            total_distill += distill_loss.detach()
             n_distill_batches += 1
         loss = (ctc_loss
                 + vad_weight * vl
                 + invalid_mass_weight * im_loss
                 + distill_weight * distill_loss)
+        # Every loss term above is a mean over the batch, so each sample carries
+        # weight 1/B. Under token-budget batching B varies, which would quietly
+        # upweight long clips -- they ride in the small batches. Rescaling to a
+        # fixed reference restores the constant per-sample weight the fixed-size
+        # recipe had. Applied to the backward loss only; logged metrics use the
+        # unscaled value so they stay comparable across runs.
+        if loss_reference_batch is not None:
+            loss = loss * (audio.shape[0] / loss_reference_batch)
         check_finite("loss/total", loss, enabled=debug_finite)
 
         t_lb = time.perf_counter()
@@ -451,53 +489,88 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         else:
             loss.backward()
         check_parameter_grads(model, enabled=debug_finite)
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(), max_norm=grad_clip_norm,
-        )
+        # Grad norm is the divergence tripwire, so it stays logged even with
+        # clipping off -- a silent 0.0 there reads as "gradients vanished".
+        # What actually cost time was the per-step .item() sync, not the norm:
+        # keep the value on-device and reduce it once at the epoch boundary.
+        # With clipping off we also skip clip_grad_norm_, whose inf path still
+        # launches a no-op foreach_mul_ over every gradient.
+        if grad_clip_norm != float("inf"):
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=grad_clip_norm,
+            )
+        else:
+            grad_norm = torch.nn.utils.get_total_norm(
+                [p.grad for p in model.parameters() if p.grad is not None]
+            )
         check_finite("grad/norm", grad_norm, enabled=debug_finite)
+        last_grad_norm = grad_norm.detach()
+        total_grad_norm += last_grad_norm
+        max_grad_norm = torch.maximum(max_grad_norm, last_grad_norm)
         optimizer.step()
-        optimizer.zero_grad()
-        torch.cuda.synchronize()
-        timings["loss_backward"] += time.perf_counter() - t_lb
+        optimizer.zero_grad(set_to_none=True)
+        if profile_steps:
+            torch.cuda.synchronize()
+            timings["loss_backward"] += time.perf_counter() - t_lb
 
         n_batches += 1
-        total_ctc += ctc_loss.item()
-        total_samples += audio.shape[0]
-        total_audio_sec += audio_mask.sum().item() / 16000.0
-        grad_norms.append(grad_norm.item())
-        nonblank_means.append(torch.sigmoid(outputs["nonblank_logit"]).mean().item())
+        # Weight the epoch means by batch size: under token-budget batching an
+        # unweighted mean-of-batch-means would over-represent the small
+        # long-clip batches. At a fixed batch size the weight cancels, so this
+        # reproduces the previous numbers exactly.
+        bs = audio.shape[0]
+        total_ctc += ctc_loss.detach() * bs
+        total_samples += bs
+        total_audio_sec += batch_audio_samples / 16000.0
+        batch_nonblank = torch.sigmoid(outputs["nonblank_logit"]).mean().detach()
+        total_nonblank += batch_nonblank * bs
 
-        postfix = {"ctc": f"{ctc_loss.item():.3f}", "p_nb": f"{nonblank_means[-1]:.2f}"}
-        if teacher is not None and n_distill_batches > 0:
-            postfix["kd"] = f"{distill_loss.item():.3f}"
-        if stress_active:
-            postfix["joint"] = "prosody"
-        postfix["g"] = f"{grad_norm.item():.1f}"
-        pbar.set_postfix(**postfix)
+        # tqdm formatting calls .item(), which is a device synchronization.
+        # Keep useful progress feedback without stalling every training step.
+        if n_batches == 1 or n_batches % log_every == 0:
+            postfix = {"ctc": f"{ctc_loss.detach().item():.3f}",
+                       "p_nb": f"{batch_nonblank.item():.2f}"}
+            if teacher is not None and n_distill_batches > 0:
+                postfix["kd"] = f"{distill_loss.detach().item():.3f}"
+            if stress_active:
+                postfix["joint"] = "prosody"
+            postfix["g"] = f"{last_grad_norm.item():.1f}"
+            pbar.set_postfix(**postfix)
         last_end = time.perf_counter()
         if max_train_batches is not None and n_batches >= max_train_batches:
             break
 
+    # One epoch-boundary sync keeps wall-clock throughput honest while still
+    # allowing CPU input work and CUDA kernels to overlap between steps.
+    torch.cuda.synchronize()
     epoch_sec = time.perf_counter() - epoch_start
     peak_mem_gb = torch.cuda.max_memory_allocated() / 1e9
     nb = max(n_batches, 1)
 
+    ns = max(total_samples, 1)
     return {
-        "ctc_loss": total_ctc / nb,
-        "vad_loss": total_vad / max(n_vad_batches, 1) if n_vad_batches else 0.0,
-        "off_manifold": total_invalid / max(n_invalid_batches, 1) if n_invalid_batches else 0.0,
-        "distill_loss": total_distill / max(n_distill_batches, 1) if n_distill_batches else 0.0,
+        "ctc_loss": (total_ctc / ns).item(),
+        "vad_loss": (total_vad / max(n_vad_batches, 1)).item() if n_vad_batches else 0.0,
+        "off_manifold": (total_invalid / max(n_invalid_batches, 1)).item() if n_invalid_batches else 0.0,
+        "distill_loss": (total_distill / max(n_distill_batches, 1)).item() if n_distill_batches else 0.0,
         "wallclock_sec": epoch_sec,
         "samples_per_sec": total_samples / epoch_sec,
         "audio_realtime_factor": total_audio_sec / epoch_sec,
         "peak_mem_gb": peak_mem_gb,
+        # The phase timers need CUDA syncs to mean anything, so without
+        # --profile-steps they are NaN (an unmeasured metric) rather than 0.0
+        # (a measured metric that happens to be zero). Only the data timer
+        # survives asynchronously: it measures how long the loader made us wait.
         "ms_per_batch_data": timings["data"] / nb * 1000,
-        "ms_per_batch_forward": timings["forward"] / nb * 1000,
-        "ms_per_batch_joint_ctc": timings["joint_ctc"] / nb * 1000,
-        "ms_per_batch_loss_backward": timings["loss_backward"] / nb * 1000,
-        "grad_norm_mean": sum(grad_norms) / max(len(grad_norms), 1),
-        "grad_norm_max": max(grad_norms, default=0.0),
-        "nonblank_prob_mean": sum(nonblank_means) / max(len(nonblank_means), 1),
+        "ms_per_batch_forward": (timings["forward"] / nb * 1000
+                                 if profile_steps else float("nan")),
+        "ms_per_batch_joint_ctc": (timings["joint_ctc"] / nb * 1000
+                                   if profile_steps else float("nan")),
+        "ms_per_batch_loss_backward": (timings["loss_backward"] / nb * 1000
+                                       if profile_steps else float("nan")),
+        "grad_norm_mean": (total_grad_norm / nb).item(),
+        "grad_norm_max": max_grad_norm.item(),
+        "nonblank_prob_mean": (total_nonblank / ns).item(),
     }
 
 
@@ -740,12 +813,75 @@ def main():
                         default=False)
     parser.add_argument("--grad-clip-norm", type=float, default=float("inf"),
                         help="Global grad clipping norm. Default preserves legacy no-clip behavior.")
+    parser.add_argument("--fused-optimizer", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Use CUDA fused AdamW (default ON). Disable only for an "
+                             "older PyTorch/CUDA stack that does not support it.")
+    parser.add_argument("--profile-steps", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="Synchronize CUDA around each training phase for precise "
+                             "per-step timing. This slows normal training and is OFF by default.")
+    parser.add_argument("--compile-forward", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="Compile the model forward with torch.compile(dynamic=True). "
+                             "Experimental; leaves parameters and checkpoint keys unchanged.")
+    parser.add_argument("--compile-backbone", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="Compile only the acoustic backbone forward. This avoids "
+                             "Inductor-unfriendly mel/CTC reductions while preserving checkpoints.")
+    parser.add_argument("--compile-static-shapes", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="Compile the backbone with static shapes and CUDA graphs. "
+                             "Requires --pad-audio-multiple to bound shape variants.")
+    parser.add_argument("--compile-encoder-layers", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Compile each transformer encoder block as a full graph, "
+                             "avoiding whole-backbone graph breaks. ON unless another "
+                             "compile strategy is requested. Pass "
+                             "--no-compile-encoder-layers for compiler debugging.")
+    parser.add_argument("--pad-audio-multiple", type=int, default=None,
+                        help="Right-pad training batches to this many waveform samples. "
+                             "Useful for static compiled shape buckets; masks remain exact.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Optional global RNG seed, primarily for repeatable profiling.")
+    parser.add_argument("--float8-recipe",
+                        choices=("tensorwise", "rowwise", "rowwise_with_gw_hp"),
+                        default=None,
+                        help="Use a TorchAO FP8 training recipe for eligible backbone "
+                             "Linear layers. Parameters/checkpoints remain high precision.")
+    parser.add_argument("--log-every", type=int, default=20,
+                        help="Update the tqdm postfix every N batches (default: 20).")
+    parser.add_argument("--max-batch-audio-sec", type=float, default=None,
+                        help="Batch to a constant padded-audio budget (max_clip_len * "
+                             "batch_size, in seconds) instead of a fixed --batch-size. "
+                             "Fills the GPU evenly across a long-tailed length "
+                             "distribution. Changes batch size per step; pair with "
+                             "--loss-reference-batch. The fixed-16 recipe averages ~43s.")
+    parser.add_argument("--max-batch-size", type=int, default=256,
+                        help="Clip-count ceiling when --max-batch-audio-sec is set, so "
+                             "very short clips cannot form absurdly wide batches.")
+    parser.add_argument("--loss-reference-batch", type=int, default=None,
+                        help="Scale the backward loss by batch_size/N so each sample "
+                             "contributes the same gradient regardless of how many "
+                             "clips shared its step. Without this, variable batch sizes "
+                             "silently upweight long clips (they ride in small batches). "
+                             "Logged metrics are unaffected.")
     parser.add_argument("--debug-finite", action="store_true",
                         help="Fail fast if key losses/outputs/grad norm contain NaN/Inf.")
     parser.add_argument("--max-train-batches", type=int, default=None,
                         help="Diagnostic: stop each training epoch after this many batches.")
     parser.add_argument("--max-eval-batches", type=int, default=None,
                         help="Diagnostic: stop validation after this many batches.")
+    parser.add_argument("--eval-checkpoint", type=Path, default=None,
+                        help="Evaluate a checkpoint dir on the val split and exit (no "
+                             "training). Runs the full val set twice: joint CTC (the "
+                             "reported metric) and phone-only CTC (marginalizing the "
+                             "stress/tone/pitch factors out -- the metric older runs "
+                             "used). Prints both, their gap, and a per-language "
+                             "breakdown, so a joint-metric run can be compared "
+                             "like-for-like against a phone-only baseline.")
+    parser.add_argument("--skip-save", action="store_true",
+                        help="Diagnostic benchmark mode: do not write or upload checkpoints.")
     parser.add_argument("--resume-from", type=Path, default=None,
                         help="Local path to a checkpoint dir (saved by save_to_dir) to resume "
                              "training from. Must be paired with --resume-epoch. Loads model "
@@ -760,6 +896,34 @@ def main():
 
     if args.stress_weight <= 0:
         raise SystemExit("--stress-weight must be positive")
+    if args.log_every <= 0:
+        raise SystemExit("--log-every must be positive")
+    # Encoder-layer compilation is the default strategy, but an unset default
+    # must yield to an explicitly requested one -- otherwise plain
+    # --compile-backbone trips the exclusivity check against a strategy the
+    # caller never asked for. Only an explicit pair is a real conflict.
+    if args.compile_encoder_layers is None:
+        args.compile_encoder_layers = not (args.compile_forward
+                                           or args.compile_backbone)
+    if sum((args.compile_forward, args.compile_backbone,
+            args.compile_encoder_layers)) > 1:
+        raise SystemExit("Choose only one compile strategy")
+    if args.compile_static_shapes and not args.compile_backbone:
+        raise SystemExit("--compile-static-shapes requires --compile-backbone")
+    if args.compile_static_shapes and args.pad_audio_multiple is None:
+        raise SystemExit("--compile-static-shapes requires --pad-audio-multiple")
+    if args.pad_audio_multiple is not None and args.pad_audio_multiple <= 0:
+        raise SystemExit("--pad-audio-multiple must be positive")
+    if args.max_batch_audio_sec is not None and args.max_batch_audio_sec <= 0:
+        raise SystemExit("--max-batch-audio-sec must be positive")
+    if args.max_batch_size <= 0:
+        raise SystemExit("--max-batch-size must be positive")
+    if args.loss_reference_batch is not None and args.loss_reference_batch <= 0:
+        raise SystemExit("--loss-reference-batch must be positive")
+    if args.loss_reference_batch is not None and args.max_batch_audio_sec is None:
+        raise SystemExit("--loss-reference-batch only means something with "
+                         "--max-batch-audio-sec (at a fixed batch size it is a "
+                         "constant rescale of the loss)")
     if args.feature_aux_weight != 0.0:
         raise SystemExit(
             "--feature-aux-weight was removed because it created a second CTC "
@@ -779,6 +943,9 @@ def main():
         )
 
     assert torch.cuda.is_available(), "CUDA not available"
+    if args.seed is not None:
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
     device = torch.device("cuda")
     print(f"Using device: {device} ({torch.cuda.get_device_name(0)})")
 
@@ -845,6 +1012,53 @@ def main():
     total = sum(p.numel() for p in model.parameters())
     print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
     print(f"Blank id: {model.blank_id}, vocab size: {model.vocab_size}")
+    if args.float8_recipe is not None:
+        try:
+            from torchao.float8 import Float8LinearConfig, convert_to_float8_training
+        except ImportError as exc:
+            raise SystemExit(
+                "--float8-recipe requires torchao; install a version matching PyTorch"
+            ) from exc
+        float8_config = Float8LinearConfig.from_recipe_name(args.float8_recipe)
+        convert_to_float8_training(model.backbone, config=float8_config)
+        print(f"TorchAO FP8 backbone ON ({args.float8_recipe})")
+    if args.compile_encoder_layers:
+        encoder = getattr(model.backbone, "encoder", None)
+        layers = getattr(encoder, "layers", None)
+        if layers is None:
+            raise SystemExit("--compile-encoder-layers requires backbone.encoder.layers")
+        for layer in layers:
+            layer.forward = torch.compile(
+                layer.forward,
+                dynamic=True,
+                fullgraph=True,
+                mode="max-autotune-no-cudagraphs",
+            )
+        print(f"torch.compile encoder layers ON ({len(layers)} full graphs)")
+    if args.compile_backbone:
+        compile_dynamic = not args.compile_static_shapes
+        compile_mode = (
+            "reduce-overhead" if args.compile_static_shapes
+            else "max-autotune-no-cudagraphs"
+        )
+        model.backbone.forward = torch.compile(
+            model.backbone.forward,
+            dynamic=compile_dynamic,
+            fullgraph=False,
+            mode=compile_mode,
+        )
+        print(f"torch.compile backbone ON (dynamic={compile_dynamic}, mode={compile_mode})")
+    if args.compile_forward:
+        # Compile the bound method instead of wrapping the nn.Module. Wrapping
+        # changes state_dict names to `_orig_mod.*`, while replacing only the
+        # callable preserves checkpoint format and optimizer parameter identity.
+        model.forward = torch.compile(
+            model.forward,
+            dynamic=True,
+            fullgraph=False,
+            mode="reduce-overhead",
+        )
+        print("torch.compile forward ON (dynamic=True, mode=reduce-overhead)")
 
     # Distillation teacher (optional). Frozen, eval, no grad — kept as a local
     # var (NOT a submodule of `model`) so it never enters model.parameters()/
@@ -1004,16 +1218,43 @@ def main():
     train_lengths = get_audio_lengths(train_ds)
     print(f"Audio length stats: min={min(train_lengths)}, max={max(train_lengths)}, "
           f"median={sorted(train_lengths)[len(train_lengths)//2]}")
-    train_batch_sampler = LengthBucketedBatchSampler(
-        train_lengths, batch_size=args.batch_size, bucket_size_mul=100, seed=42,
-    )
+    if args.max_batch_audio_sec is not None:
+        # Constant padded-audio budget per step instead of a constant clip
+        # count, so short clips (the bulk of the corpus) ride in far bigger
+        # batches and actually fill the GPU. Budget is padded seconds:
+        # max_clip_len * batch_size. The fixed-16 recipe averages ~43s.
+        train_batch_sampler = TokenBudgetBatchSampler(
+            train_lengths,
+            token_budget=int(args.max_batch_audio_sec * 16000),
+            max_batch_size=args.max_batch_size,
+            bucket_size=args.batch_size * 100,
+            seed=42,
+        )
+        st = train_batch_sampler.stats()
+        print(f"Token-budget batching ON ({args.max_batch_audio_sec:.0f}s padded "
+              f"audio/step, cap {args.max_batch_size} clips): "
+              f"{st['n_batches']:,} batches/epoch, "
+              f"size min/mean/max {st['batch_size_min']}/"
+              f"{st['batch_size_mean']:.1f}/{st['batch_size_max']}, "
+              f"padding waste {100*st['padding_waste']:.0f}%")
+        if st["over_budget_batches"]:
+            print(f"  NOTE {st['over_budget_batches']} batch(es) exceed the budget "
+                  f"(single clips longer than it); kept rather than dropped.")
+    else:
+        train_batch_sampler = LengthBucketedBatchSampler(
+            train_lengths, batch_size=args.batch_size, bucket_size_mul=100, seed=42,
+        )
     # Audio-degradation augmentation: the probability is baked into the collate
     # (a picklable partial), so it reaches workers under fork AND spawn.
     degrade_prob = args.audio_degrade_prob if args.audio_degrade else None
     # When distilling, ship each clip's clean (pre-degrade) companion so the
     # teacher transcribes clean while the student sees the degraded `audio`.
     keep_clean = teacher is not None and args.distill_weight > 0
-    train_collate = make_train_collate(degrade_prob, keep_clean=keep_clean)
+    train_collate = make_train_collate(
+        degrade_prob,
+        keep_clean=keep_clean,
+        pad_audio_multiple=args.pad_audio_multiple,
+    )
     if args.audio_degrade:
         print(f"Audio degradation augmentation ON (per-clip prob={args.audio_degrade_prob})")
     if keep_clean:
@@ -1024,12 +1265,44 @@ def main():
         collate_fn=train_collate, num_workers=args.num_workers, pin_memory=True,
         persistent_workers=args.num_workers > 0,
         prefetch_factor=4 if args.num_workers > 0 else None,
+        worker_init_fn=_dataloader_worker_init if args.num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False,
         collate_fn=collate_fn, num_workers=args.num_workers, pin_memory=True,
         persistent_workers=args.num_workers > 0,
+        worker_init_fn=_dataloader_worker_init if args.num_workers > 0 else None,
     )
+
+    if args.eval_checkpoint is not None:
+        # Diagnostic: score one checkpoint on the val split under both metrics and
+        # exit before any training/optimizer/wandb setup. The val split is the
+        # same deterministic seed-42 holdout the training loop reports on, so the
+        # joint number here reproduces that run's ctc_val.
+        eval_model = FactorizedCTCModel.load_from_dir(args.eval_checkpoint).to(device)
+        if eval_model.vocab_size != len(processor.tokenizer):
+            raise SystemExit(
+                f"--eval-checkpoint vocab mismatch: head={eval_model.vocab_size} "
+                f"tokenizer={len(processor.tokenizer)}.")
+        print(f"\nEvaluating {args.eval_checkpoint} on {val_size} val clips "
+              f"(joint + phone-only)...")
+        joint = eval_epoch(
+            eval_model, val_loader, device, use_bf16=args.bf16,
+            blank_id=eval_model.blank_id, stress_active=True,
+            stress_weight=args.stress_weight)
+        phone = eval_epoch(
+            eval_model, val_loader, device, use_bf16=args.bf16,
+            blank_id=eval_model.blank_id, stress_active=False,
+            stress_weight=args.stress_weight)
+        print(f"\njoint CTC (reported metric): {joint['ctc_loss']:.4f}")
+        print(f"phone-only CTC (older-run metric): {phone['ctc_loss']:.4f}")
+        print(f"joint - phone-only gap: {joint['ctc_loss'] - phone['ctc_loss']:+.4f}"
+              f"  (the metric-definition confound, isolated on one checkpoint)")
+        print("\nper-language  joint / phone-only:")
+        for lang in sorted(joint["per_lang_ctc"]):
+            print(f"  {lang:9s} {joint['per_lang_ctc'][lang]:.3f} / "
+                  f"{phone['per_lang_ctc'].get(lang, float('nan')):.3f}")
+        return
 
     steps_per_epoch = len(train_loader)
     # Split params into 4 groups: {backbone, head} × {decay, no_decay}.
@@ -1059,6 +1332,7 @@ def main():
             {"params": head_decay,        "lr": args.head_lr,     "weight_decay": 0.01},
             {"params": head_no_decay,     "lr": args.head_lr,     "weight_decay": 0.0},
         ],
+        fused=args.fused_optimizer,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     # When resuming, advance the cosine schedule to its value at the start of
@@ -1108,6 +1382,9 @@ def main():
             teacher_vocab_remap=teacher_vocab_remap,
             distill_weight=args.distill_weight,
             distill_temperature=args.distill_temperature,
+            profile_steps=args.profile_steps,
+            log_every=args.log_every,
+            loss_reference_batch=args.loss_reference_batch,
         )
         val_stats = eval_epoch(
             model, val_loader, device,
@@ -1123,11 +1400,22 @@ def main():
             f"Epoch {epoch}: ctc_train={train_stats['ctc_loss']:.4f} "
             f"ctc_val={val_loss:.4f} "
             f"p_nb={train_stats['nonblank_prob_mean']:.3f} "
-            f"wall={train_stats['wallclock_sec']:.1f}s mem={train_stats['peak_mem_gb']:.1f}GB"
+            f"wall={train_stats['wallclock_sec']:.1f}s "
+            f"samples/s={train_stats['samples_per_sec']:.2f} "
+            f"audio_rt={train_stats['audio_realtime_factor']:.1f}x "
+            f"mem={train_stats['peak_mem_gb']:.1f}GB"
         )
         print("  val by lang: " + " ".join(
             f"{lang}={loss:.3f}" for lang, loss in val_stats["per_lang_ctc"].items()
         ))
+        if args.profile_steps:
+            print(
+                "  profile ms/batch: "
+                f"data={train_stats['ms_per_batch_data']:.1f} "
+                f"forward={train_stats['ms_per_batch_forward']:.1f} "
+                f"joint_ctc={train_stats['ms_per_batch_joint_ctc']:.1f} "
+                f"backward+optimizer={train_stats['ms_per_batch_loss_backward']:.1f}"
+            )
 
         lrs = scheduler.get_last_lr()
         log_dict = {
@@ -1169,9 +1457,10 @@ def main():
         is_new_best = val_loss < best_val_loss
         if is_new_best:
             best_val_loss = val_loss
-        model.save_to_dir(args.save_dir)
-        processor.save_pretrained(args.save_dir)
-        if hf_api is not None:
+        if not args.skip_save:
+            model.save_to_dir(args.save_dir)
+            processor.save_pretrained(args.save_dir)
+        if hf_api is not None and not args.skip_save:
             tag = " [NEW BEST]" if is_new_best else ""
             print(f"Uploading epoch {epoch} (val_loss={val_loss:.4f}){tag} to HF...")
             hf_api.upload_folder(

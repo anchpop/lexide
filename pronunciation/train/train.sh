@@ -29,7 +29,14 @@ export HF_TOKEN=${HF_TOKEN:-}
 # Combats CUDA allocator fragmentation. Harmless when memory isn't tight;
 # rescued an OOM during sky_articulatory_aux_regularized job 6 where 34 GB
 # was "reserved but unallocated".
+# PYTORCH_ALLOC_CONF is the 2.9+ name and PYTORCH_CUDA_ALLOC_CONF its deprecated
+# alias. Set both: an unrecognized env var is ignored silently, so keeping only
+# the new name would quietly drop expandable_segments on an older stack.
+export PYTORCH_ALLOC_CONF=expandable_segments:True
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Persist generated encoder kernels on warm clusters. This only affects the
+# one-time compilation path; model math and checkpoint contents are unchanged.
+export TORCHINDUCTOR_CACHE_DIR="$HOME/.cache/torchinductor-pronunciation"
 
 # Idempotent: no-op if already installed (sky exec on warm cluster).
 pip install --quiet panphon

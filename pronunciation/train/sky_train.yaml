@@ -19,7 +19,11 @@ file_mounts:
 
 setup: |
   cd ~/sky_workdir
-  pip install --index-url https://download.pytorch.org/whl/cu128 'torch>=2.8' 'torchaudio>=2.8'
+  # Keep the compiler stack reproducible. 2.9.1 is the GH200 version on which
+  # the encoder full-graph path is profiled; an open-ended constraint silently
+  # moved this recipe to 2.11 and changed Inductor behavior.
+  pip install --index-url https://download.pytorch.org/whl/cu128 \
+    'torch==2.9.1+cu128' 'torchaudio==2.9.1'
   pip install transformers datasets soundfile tqdm wandb panphon
 
 run: |
@@ -28,17 +32,20 @@ run: |
   fi
   echo "data langs: $(ls ~/data | tr '\n' ' ')"
 
-  # THE champion recipe. Every one of its settings is the default in
-  # train_unified.py's argparse, so this run deliberately passes nothing but
-  # the output destinations — a flag here would mean "deviate from champion".
-  # For the record, the defaults it relies on:
+  # This run passes nothing but the output destinations: everything else comes
+  # from train_unified.py's argparse defaults, which is where recipe changes
+  # land. Those defaults drift — they are NOT pinned to the champion run, and
+  # some (fused AdamW, compiled encoder layers) postdate it. `git log -p
+  # train/src/train_unified.py` is the authority on what any past run used.
+  # Roughly what the defaults are today:
   #   backbone  xls-r-2b @ lr 1e-5, processor wav2vec2-xlsr-53-espeak-cv-ft
   #   heads     mlp_heads, head_lr 1e-3, regularized_heads off
   #   input     mel side-channel on; audio_degrade on @ p=0.6
   #   data      narrowed labels, source_cap_second, min_rms 0.005,
   #             min_whisper_logprob -0.7, max_audio_sec 16, val_split 0.05
   #   loss      stress 0.3 (warmup 400), vad 0.05, invalid_mass 0.05
-  #   training  bf16, batch 16, 12 epochs, grad_clip inf, no checkpointing,
+  #   training  bf16, batch 16, 12 epochs, grad_clip inf, fused AdamW,
+  #             compiled encoder layers, async step timing, no checkpointing,
   #             16 workers, all languages
   # The side-channel is why audio_degrade matters: it amplifies noise it never
   # saw in training (+8 clean / -10 noisy without degradation), so the 60%

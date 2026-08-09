@@ -226,7 +226,10 @@ class StressDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        audio, sr = sf.read(sample["wav_path"])
+        # Decode directly to float32. soundfile defaults to float64, which used
+        # to double worker-side memory bandwidth only to immediately downcast
+        # in torch.from_numpy(...).float().
+        audio, sr = sf.read(sample["wav_path"], dtype="float32")
         assert sr == 16000, f"Expected 16kHz audio, got {sr}"
 
         if len(audio) > self.max_audio_samples:
@@ -238,7 +241,7 @@ class StressDataset(Dataset):
         vad_probs = sample["vad_probs"][:n_vad_frames]
 
         return {
-            "audio": torch.from_numpy(audio).float(),
+            "audio": torch.from_numpy(audio),
             "phoneme_ids": torch.tensor(sample["phoneme_ids"], dtype=torch.long),
             "stress_seq": torch.tensor(sample["stress_seq"], dtype=torch.long),
             "tone_seq": torch.tensor(sample["tone_seq"], dtype=torch.long),
@@ -270,7 +273,8 @@ def collate_fn_augment(batch):
     return _collate(batch, augment=True)
 
 
-def make_train_collate(degrade_prob: float | None = None, keep_clean: bool = False):
+def make_train_collate(degrade_prob: float | None = None, keep_clean: bool = False,
+                       pad_audio_multiple: int | None = None):
     """Training collate carrying the audio-degradation probability explicitly.
 
     Returns a picklable functools.partial (module-level _collate + simple args),
@@ -286,7 +290,7 @@ def make_train_collate(degrade_prob: float | None = None, keep_clean: bool = Fal
     per-frame KD aligned.
     """
     return partial(_collate, augment=True, degrade_prob=degrade_prob,
-                   keep_clean=keep_clean)
+                   keep_clean=keep_clean, pad_audio_multiple=pad_audio_multiple)
 
 
 def _match_vad_length(vad: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -391,7 +395,7 @@ def degrade_waveform(audio: torch.Tensor, sr: int = 16000, rng=random) -> torch.
 
 
 def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
-             keep_clean: bool = False):
+             keep_clean: bool = False, pad_audio_multiple: int | None = None):
     sr = 16000
     augmented = []
     for item in batch:
@@ -444,6 +448,9 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
                           "audio_clean": audio_clean})
 
     max_audio = max(item["audio"].shape[0] for item in augmented)
+    if pad_audio_multiple is not None:
+        max_audio = ((max_audio + pad_audio_multiple - 1) // pad_audio_multiple
+                     * pad_audio_multiple)
     max_phonemes = max(item["phoneme_ids"].shape[0] for item in augmented)
     max_vad = max((item["vad_probs"].shape[0] for item in augmented), default=0)
 
@@ -588,3 +595,113 @@ class LengthBucketedBatchSampler(Sampler):
 
     def __len__(self):
         return len(self.lengths) // self.batch_size
+
+
+class TokenBudgetBatchSampler(Sampler):
+    """Batch to a constant padded-token budget instead of a constant clip count.
+
+    Why: with a fixed batch size the GEMM shape is set by the *mean* clip while
+    peak memory is set by the *longest* batch. Measured on this corpus (2026-08-06,
+    epoch 8 of the 15-language run): mean clip 2.29s, but the longest batch
+    averages 24.7s/clip — 10.8x. So a batch-16 step runs matmuls of only
+    [16*136, 1920], far too small to saturate an H100-class GPU: ~100 TFLOPS
+    achieved, ~10% MFU, 423W of a ~700W envelope at full clocks.
+
+    Holding `max_len * batch_size` constant instead fills the card evenly — many
+    short clips per step, few long ones. Note this raises TYPICAL memory use to
+    roughly what the budget allows on every step (under fixed batching only the
+    rare all-long batch got near the peak), so the budget must be sized to the
+    card: every epoch is reordered to put its peak `max_len * size` batch at
+    step 0, turning an over-budget OOM into an immediate failure instead of one
+    that strikes hours in.
+
+    Batches are still drawn from length-homogeneous mega-buckets (as in
+    LengthBucketedBatchSampler) so within-batch padding stays tight and
+    within-batch correlation stays low. `token_budget` is in the same unit as
+    `lengths` (this codebase passes raw 16kHz audio samples).
+
+    Caveat, and the reason this is opt-in: batch size now varies step to step,
+    which changes optimization dynamics in two ways the fixed-size sampler
+    doesn't. See --loss-reference-batch (keeps each sample's gradient weight
+    constant) and note that step-counted schedules like --stress-warmup-steps
+    now cover more samples per step.
+    """
+
+    def __init__(self, lengths: list[int], token_budget: int, *,
+                 max_batch_size: int | None = None, bucket_size: int = 1600,
+                 seed: int = 0):
+        if token_budget <= 0:
+            raise ValueError("token_budget must be positive")
+        if bucket_size <= 0:
+            raise ValueError("bucket_size must be positive")
+        self.lengths = list(lengths)
+        self.token_budget = token_budget
+        self.max_batch_size = max_batch_size or len(self.lengths) or 1
+        self.bucket_size = bucket_size
+        self.seed = seed
+        self.epoch = 0
+        self._sorted = sorted(range(len(self.lengths)), key=lambda i: self.lengths[i])
+        self._batches = self._build()
+
+    def set_epoch(self, epoch: int) -> None:
+        """Re-seed the per-epoch shuffles. Callers should invoke before each epoch."""
+        self.epoch = epoch
+        self._batches = self._build()
+
+    def _build(self) -> list[list[int]]:
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+
+        batches: list[list[int]] = []
+        for start in range(0, len(self._sorted), self.bucket_size):
+            bucket = self._sorted[start:start + self.bucket_size]
+            perm = torch.randperm(len(bucket), generator=g).tolist()
+            cur: list[int] = []
+            cur_max = 0
+            for idx in (bucket[p] for p in perm):
+                nxt_max = max(cur_max, self.lengths[idx])
+                over_budget = nxt_max * (len(cur) + 1) > self.token_budget
+                over_count = len(cur) + 1 > self.max_batch_size
+                if cur and (over_budget or over_count):
+                    batches.append(cur)
+                    cur, cur_max = [idx], self.lengths[idx]
+                else:
+                    # A lone clip longer than the whole budget still gets its own
+                    # batch: one oversized step beats silently dropping data.
+                    cur.append(idx)
+                    cur_max = nxt_max
+            if cur:
+                batches.append(cur)
+
+        order = torch.randperm(len(batches), generator=g).tolist()
+        batches = [batches[i] for i in order]
+        # Memory canary: run the epoch's peak padded-token batch first, so a
+        # budget that doesn't fit OOMs at step 1 rather than at a random step.
+        if batches:
+            peak = max(range(len(batches)),
+                       key=lambda i: max(self.lengths[j] for j in batches[i])
+                       * len(batches[i]))
+            batches[0], batches[peak] = batches[peak], batches[0]
+        return batches
+
+    def stats(self) -> dict:
+        """Padding/shape summary for the current epoch's batches, for logging."""
+        sizes = [len(b) for b in self._batches]
+        padded = sum(max(self.lengths[i] for i in b) * len(b) for b in self._batches)
+        useful = sum(self.lengths[i] for b in self._batches for i in b)
+        over = sum(1 for b in self._batches
+                   if max(self.lengths[i] for i in b) * len(b) > self.token_budget)
+        return {
+            "n_batches": len(self._batches),
+            "batch_size_min": min(sizes, default=0),
+            "batch_size_mean": sum(sizes) / max(len(sizes), 1),
+            "batch_size_max": max(sizes, default=0),
+            "padding_waste": 1.0 - useful / max(padded, 1),
+            "over_budget_batches": over,
+        }
+
+    def __iter__(self):
+        return iter(self._batches)
+
+    def __len__(self):
+        return len(self._batches)
