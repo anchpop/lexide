@@ -42,4 +42,6 @@ envs:
   EPOCHS: "2"
   EVAL_EVERY: "3000"
   TOK_EPOCHS: "2"
+  TOK_LIMIT: "0"        # 0 = whole corpus; a limit takes a language-ordered prefix
+  SKIP_TOK: "0"
   WANDB_PROJECT: lexide-parsley

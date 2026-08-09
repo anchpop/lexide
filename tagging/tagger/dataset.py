@@ -159,9 +159,10 @@ PAD_BYTE, BOS_BYTE, EOS_BYTE = 256, 257, 258
 # (language unknown) or a per-language variant, telling the model the language without
 # shifting any byte offsets. Order is fixed (alphabetical); the safetensors export and
 # the Rust byte_bio reimplementation rely on these exact ids.
-LANG_ORDER = ["deu", "eng", "fra", "hin", "ita", "jpn", "kor", "por", "rus", "spa"]
+LANG_ORDER = ["deu", "eng", "fra", "hin", "ita", "jpn", "kor", "por", "rus", "spa", "tha",
+              "zho-hans"]
 LANG_BOS = {lang: 259 + i for i, lang in enumerate(LANG_ORDER)}
-CHAR_VOCAB_SIZE = 259 + len(LANG_ORDER)  # 269
+CHAR_VOCAB_SIZE = 259 + len(LANG_ORDER)  # 271
 
 
 def encode_bytes_and_labels(text, tokens, max_bytes=512, lang=None):

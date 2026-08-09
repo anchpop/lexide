@@ -138,7 +138,7 @@
     "end": 14,
     "pos": "SCONJ",
     "lemma": "dass",
-    "head": 8,
+    "head": 7,
     "dep": "mark"
    },
    {
@@ -147,25 +147,16 @@
     "end": 17,
     "pos": "PRON",
     "lemma": "es",
-    "head": 8,
-    "dep": "nsubj"
+    "head": 7,
+    "dep": "expl"
    },
    {
-    "text": "3",
+    "text": "3,5",
     "start": 18,
-    "end": 19,
-    "pos": "NUM",
-    "lemma": "3",
-    "head": 8,
-    "dep": "nummod"
-   },
-   {
-    "text": ",5",
-    "start": 19,
     "end": 21,
     "pos": "NUM",
-    "lemma": ",5",
-    "head": 8,
+    "lemma": "3,5",
+    "head": 7,
     "dep": "nummod"
    },
    {
@@ -183,7 +174,7 @@
     "end": 29,
     "pos": "VERB",
     "lemma": "sein",
-    "head": 8,
+    "head": 7,
     "dep": "cop"
    },
    {
@@ -322,22 +313,13 @@
   "text": "Don't touch that — it's mine!",
   "tokens": [
    {
-    "text": "Don'",
+    "text": "Don't",
     "start": 0,
-    "end": 4,
+    "end": 5,
     "pos": "AUX",
     "lemma": "do",
-    "head": 3,
+    "head": 2,
     "dep": "aux"
-   },
-   {
-    "text": "t",
-    "start": 4,
-    "end": 5,
-    "pos": "PART",
-    "lemma": "t",
-    "head": 3,
-    "dep": "advmod"
    },
    {
     "text": "touch",
@@ -354,7 +336,7 @@
     "end": 16,
     "pos": "PRON",
     "lemma": "that",
-    "head": 3,
+    "head": 2,
     "dep": "obj"
    },
    {
@@ -363,7 +345,7 @@
     "end": 18,
     "pos": "PUNCT",
     "lemma": "—",
-    "head": 3,
+    "head": 2,
     "dep": "punct"
    },
    {
@@ -372,7 +354,7 @@
     "end": 23,
     "pos": "PRON",
     "lemma": "it",
-    "head": 7,
+    "head": 6,
     "dep": "nsubj"
    },
    {
@@ -381,7 +363,7 @@
     "end": 28,
     "pos": "PRON",
     "lemma": "mine",
-    "head": 3,
+    "head": 2,
     "dep": "parataxis"
    },
    {
@@ -390,7 +372,7 @@
     "end": 29,
     "pos": "PUNCT",
     "lemma": "!",
-    "head": 3,
+    "head": 2,
     "dep": "punct"
    }
   ]
@@ -1243,7 +1225,7 @@
     "text": "правда",
     "start": 15,
     "end": 21,
-    "pos": "NOUN",
+    "pos": "ADV",
     "lemma": "правда",
     "head": 3,
     "dep": "discourse"
@@ -1612,7 +1594,7 @@
     "text": "が",
     "start": 3,
     "end": 4,
-    "pos": "ADP",
+    "pos": "ADJ",
     "lemma": "が",
     "head": 3,
     "dep": "case"
@@ -1621,7 +1603,7 @@
     "text": "好きです",
     "start": 4,
     "end": 8,
-    "pos": "ADP",
+    "pos": "ADJ",
     "lemma": "好きだ",
     "head": 3,
     "dep": "case"
@@ -1654,8 +1636,8 @@
     "text": "たち",
     "start": 2,
     "end": 4,
-    "pos": "PART",
-    "lemma": "たち",
+    "pos": "NOUN",
+    "lemma": "達",
     "head": 1,
     "dep": "compound"
    },
@@ -1700,7 +1682,7 @@
     "start": 11,
     "end": 15,
     "pos": "AUX",
-    "lemma": "いる",
+    "lemma": "居る",
     "head": 6,
     "dep": "aux"
    },
@@ -1708,6 +1690,228 @@
     "text": "。",
     "start": 15,
     "end": 16,
+    "pos": "PUNCT",
+    "lemma": "。",
+    "head": 6,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "tha",
+  "text": "ผมชอบแมวมาก",
+  "tokens": [
+   {
+    "text": "ผม",
+    "start": 0,
+    "end": 2,
+    "pos": "PRON",
+    "lemma": "ผม",
+    "head": 2,
+    "dep": "nsubj"
+   },
+   {
+    "text": "ชอบ",
+    "start": 2,
+    "end": 5,
+    "pos": "VERB",
+    "lemma": "ชอบ",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "แมว",
+    "start": 5,
+    "end": 8,
+    "pos": "NOUN",
+    "lemma": "แมว",
+    "head": 2,
+    "dep": "obj"
+   },
+   {
+    "text": "มาก",
+    "start": 8,
+    "end": 11,
+    "pos": "ADV",
+    "lemma": "มาก",
+    "head": 2,
+    "dep": "advmod"
+   }
+  ]
+ },
+ {
+  "lang": "tha",
+  "text": "เด็กๆ เล่นอยู่ในสวนเมื่อวานนี้",
+  "tokens": [
+   {
+    "text": "เด็ก",
+    "start": 0,
+    "end": 4,
+    "pos": "NOUN",
+    "lemma": "เด็ก",
+    "head": 3,
+    "dep": "nsubj"
+   },
+   {
+    "text": "ๆ",
+    "start": 4,
+    "end": 5,
+    "pos": "PART",
+    "lemma": "ๆ",
+    "head": 1,
+    "dep": "compound:redup"
+   },
+   {
+    "text": "เล่น",
+    "start": 6,
+    "end": 10,
+    "pos": "VERB",
+    "lemma": "เล่น",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "อยู่",
+    "start": 10,
+    "end": 14,
+    "pos": "AUX",
+    "lemma": "อยู่",
+    "head": 6,
+    "dep": "case"
+   },
+   {
+    "text": "ใน",
+    "start": 14,
+    "end": 16,
+    "pos": "AUX",
+    "lemma": "ใน",
+    "head": 6,
+    "dep": "case"
+   },
+   {
+    "text": "สวน",
+    "start": 16,
+    "end": 19,
+    "pos": "NOUN",
+    "lemma": "สวน",
+    "head": 3,
+    "dep": "obl"
+   },
+   {
+    "text": "เมื่อวานนี้",
+    "start": 19,
+    "end": 30,
+    "pos": "ADV",
+    "lemma": "เมื่อวานนี้",
+    "head": 3,
+    "dep": "obl:tmod"
+   }
+  ]
+ },
+ {
+  "lang": "zho-hans",
+  "text": "我喜欢猫。",
+  "tokens": [
+   {
+    "text": "我",
+    "start": 0,
+    "end": 1,
+    "pos": "PRON",
+    "lemma": "我",
+    "head": 2,
+    "dep": "nsubj"
+   },
+   {
+    "text": "喜欢",
+    "start": 1,
+    "end": 3,
+    "pos": "VERB",
+    "lemma": "喜欢",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "猫",
+    "start": 3,
+    "end": 4,
+    "pos": "NOUN",
+    "lemma": "猫",
+    "head": 2,
+    "dep": "obj"
+   },
+   {
+    "text": "。",
+    "start": 4,
+    "end": 5,
+    "pos": "PUNCT",
+    "lemma": "。",
+    "head": 2,
+    "dep": "punct"
+   }
+  ]
+ },
+ {
+  "lang": "zho-hans",
+  "text": "孩子们昨天在公园里玩。",
+  "tokens": [
+   {
+    "text": "孩子们",
+    "start": 0,
+    "end": 3,
+    "pos": "NOUN",
+    "lemma": "孩子们",
+    "head": 6,
+    "dep": "nsubj"
+   },
+   {
+    "text": "昨天",
+    "start": 3,
+    "end": 5,
+    "pos": "NOUN",
+    "lemma": "昨天",
+    "head": 6,
+    "dep": "obl:tmod"
+   },
+   {
+    "text": "在",
+    "start": 5,
+    "end": 6,
+    "pos": "ADP",
+    "lemma": "在",
+    "head": 4,
+    "dep": "case"
+   },
+   {
+    "text": "公园",
+    "start": 6,
+    "end": 8,
+    "pos": "NOUN",
+    "lemma": "公园",
+    "head": 6,
+    "dep": "obl"
+   },
+   {
+    "text": "里",
+    "start": 8,
+    "end": 9,
+    "pos": "ADP",
+    "lemma": "里",
+    "head": 4,
+    "dep": "case"
+   },
+   {
+    "text": "玩",
+    "start": 9,
+    "end": 10,
+    "pos": "VERB",
+    "lemma": "玩",
+    "head": 0,
+    "dep": "root"
+   },
+   {
+    "text": "。",
+    "start": 10,
+    "end": 11,
     "pos": "PUNCT",
     "lemma": "。",
     "head": 6,

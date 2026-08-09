@@ -17,11 +17,10 @@
 //! TODO(sudachi): gold generation is moving to Sudachi (split mode C), which matches our
 //! token policy better than UniDic does — it keeps 日本語 and 訓練士 whole where UniDic
 //! splits them, worth ~0.8 boundary F1 against gold's self-consistent subset. The prior
-//! stays on UniDic for now because a prior is judged on recall rather than precision (it
-//! may over-propose freely; the model deletes boundaries but cannot invent them), and
-//! UniDic measured 99.7% boundary-start recall against Sudachi C's 99.4%. Once gold is
-//! Sudachi-based, revisit: having the proposal and the labels come from one segmentation
-//! policy is probably worth more than 0.3 points of recall.
+//! stays on UniDic for now because a prior is judged on recall far more than on precision
+//! (see `prior::WHY_RECALL`), and UniDic measured 99.7% boundary-start recall against
+//! Sudachi C's 99.4%. Once gold is Sudachi-based, re-measure — see the TODO in
+//! `tagger/prior.py`.
 
 use std::path::Path;
 
@@ -82,7 +81,10 @@ fn category_name(t: CharType) -> &'static str {
         CharType::Kanji => "KANJI",
         CharType::Digit => "NUMERIC",
         CharType::Latin => "ALPHA",
-        CharType::Other => "SYMBOL",
+        // UniDic is a Japanese dictionary and has no Thai category; a Thai character
+        // reaching it means someone routed non-Japanese text here, and SYMBOL (unk length
+        // 1) is the conservative reading.
+        CharType::Thai | CharType::Other => "SYMBOL",
     }
 }
 
@@ -146,17 +148,10 @@ impl UniDic {
                 .find(|(n, _)| n == want)
                 .map(|(_, c)| Category { group_len: c.group_len, first: c.first, count: c.count })
         };
-        let cats = [
-            CharType::Katakana,
-            CharType::Hiragana,
-            CharType::Kanji,
-            CharType::Digit,
-            CharType::Latin,
-            CharType::Other,
-        ]
-        .iter()
-        .map(|&t| take(category_name(t)))
-        .collect();
+        // Indexed by `CharType as usize` in `category`, so it must be built from
+        // CharType::ALL rather than a hand-written list that can drift from the enum.
+        debug_assert!(CharType::ALL.iter().enumerate().all(|(i, &t)| t as usize == i));
+        let cats = CharType::ALL.iter().map(|&t| take(category_name(t))).collect();
 
         Ok(Self {
             raw,

@@ -64,6 +64,11 @@ impl Default for LocalConfig {
 /// The languages with published lemma tables (jpn isn't served; see OVERVIEW.md).
 const TABLE_LANGS: [&str; 9] = ["deu", "eng", "fra", "hin", "ita", "kor", "por", "rus", "spa"];
 
+/// The languages that ship a corpus wordbank as their boundary prior — the whitespace-free
+/// ones with no bundled dictionary. `PriorSet::load` still discovers banks by scanning the
+/// model directory; this list only says which ones to pull from the hub.
+const BANK_LANGS: [&str; 2] = ["tha", "zho-hans"];
+
 /// Fetch the model artifacts from the hub into the HF cache (no-op when already cached)
 /// and return the cache directory that mirrors a local model_dir layout.
 fn fetch_from_hub(repo_id: &str) -> Result<PathBuf> {
@@ -94,11 +99,17 @@ fn fetch_from_hub(repo_id: &str) -> Result<PathBuf> {
     if let Err(e) = repo.get("onnx/jpn-unidic.bin") {
         eprintln!("lexide: no Japanese boundary dictionary on {repo_id}: {e}");
     }
-    // No language currently ships a wordbank: measured against plain whitespace, giving
-    // Korean one cost 5.6 F1 (the model already reads eojeol-internal splits from context
-    // better than a unigram Viterbi proposes them). PriorSet still scans for wordbanks/*.tsv
-    // beside the weights, so adding one later means shipping the file and fetching it here —
-    // rather than ten requests that miss on every cold start.
+    // Corpus wordbanks. Only the languages that actually ship one are requested, rather
+    // than one miss per language on every cold start. Korean and Hindi are deliberately
+    // absent — measured against plain whitespace, giving Korean a bank cost 5.6 F1, since
+    // the model already reads eojeol-internal splits from context better than a unigram
+    // Viterbi proposes them. Thai and Chinese have no whitespace to read instead, so for
+    // them the bank is the proposal (see tagger/README.md).
+    for lang in BANK_LANGS {
+        if let Err(e) = repo.get(&format!("onnx/wordbanks/{lang}.tsv")) {
+            eprintln!("lexide: no {lang} wordbank on {repo_id}: {e}");
+        }
+    }
     // Not used by this pipeline, but pre-fetching warms the cache Segmenter::from_pretrained
     // reads from; a miss on older repo snapshots is fine.
     if let Err(e) = repo.get("onnx/sentence_segmenter.safetensors") {

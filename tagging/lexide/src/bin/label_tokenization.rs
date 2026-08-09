@@ -34,6 +34,8 @@ fn language_from_code(code: &str) -> Result<Language> {
         "por" => Language::Portuguese,
         "rus" => Language::Russian,
         "spa" => Language::Spanish,
+        "tha" => Language::Thai,
+        "zho-hans" => Language::ChineseSimplified,
         other => bail!("unknown language code {other}"),
     };
     Ok(lang)

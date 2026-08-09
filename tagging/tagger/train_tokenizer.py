@@ -186,8 +186,16 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device={device}")
 
+    # A sidecar supersedes the in-Python proposal entirely — both the dataset and evaluate()
+    # read it instead of calling prior_ids_for — so loading wordbanks here would be dead
+    # work, and warning that a language "falls back to whitespace" would describe something
+    # that is not happening. Which languages carry a bank is baked into the sidecar already,
+    # by whatever `emit-priors --wordbank-dir` was pointed at.
     wordbanks = {}
-    if args.use_prior:
+    if args.use_prior and args.prior_sidecar:
+        print(f"prior: from sidecar {args.prior_sidecar}.{{train,val}} "
+              f"(--wordbank-langs / --group-unknown do not apply)")
+    elif args.use_prior:
         for lang in filter(None, args.wordbank_langs.split(",")):
             path = os.path.join(args.wordbank_dir, f"{lang}.tsv")
             if os.path.exists(path):

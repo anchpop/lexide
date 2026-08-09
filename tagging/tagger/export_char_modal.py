@@ -46,6 +46,11 @@ FIXTURE_TEXTS = [
     ("por", "Vamos à praia amanhã!"),
     ("eng", "Mr. Dursley visited the Eiffel Tower at 3 p.m."),
     ("fra", "M. Dupont a vu la tour Eiffel hier."),
+    # The whitespace-free languages, where the boundary prior does the most work and a
+    # parity break would be least visible from the logits alone.
+    ("tha", "ผมชอบแมวมาก"),
+    ("zho-hans", "我喜欢猫。"),
+    ("zho-hans", "他昨天去了北京大学。"),
 ]
 
 
@@ -79,6 +84,23 @@ def export():
         print(f"[load] no boundary-prior artifact on the hub ({e}); "
               "Japanese fixtures will use whitespace")
         unidic_path = None
+    # The corpus wordbanks are the other half of the shipping prior, and tha/zho-hans have
+    # nothing to fall back on without them — their fixtures would record an all-NONE
+    # proposal while the Rust library derives a real one, and the self-derived-prior
+    # assertion in chartok.rs would fail. Discovered by scanning the repo rather than from a
+    # hardcoded list, so this tracks whatever a release actually publishes.
+    from huggingface_hub import HfApi
+    wordbank_paths = {}
+    try:
+        for f in HfApi().list_repo_files("anchpop/lexide-parsley",
+                                         token=os.environ["HF_TOKEN"]):
+            if f.startswith("onnx/wordbanks/") and f.endswith(".tsv"):
+                lang = f.rsplit("/", 1)[-1][:-4]
+                wordbank_paths[lang] = hf_hub_download(
+                    "anchpop/lexide-parsley", f, token=os.environ["HF_TOKEN"])
+    except Exception as e:                       # noqa: BLE001
+        print(f"[load] could not list wordbanks on the hub ({e})")
+    print(f"[load] wordbanks: {sorted(wordbank_paths) or 'none'}")
     state = torch.load(pt, map_location="cpu")
     # Every dimension is recoverable from tensor shapes, so old 259-vocab and new
     # lang-token checkpoints both load without config guesswork.
@@ -107,10 +129,18 @@ def export():
     print(f"[export] char_tokenizer.safetensors: {len(flat)} tensors, {n/1e6:.2f}M params")
 
     unidic = None
+    wordbanks = {}
     if prior_vocab and unidic_path:
         from unidic_artifact import UniDic
         unidic = UniDic.load(unidic_path)
         print(f"[load] boundary prior: bundled UniDic ({os.path.getsize(unidic_path)/1048576:.0f}MB)")
+    if prior_vocab and wordbank_paths:
+        from prior import Wordbank
+        # group_unknown comes from each file's own `#!group_unknown=` header, exactly as
+        # Rust's PriorSet::load reads it — the default here is only a fallback for a
+        # headerless bank.
+        wordbanks = {lang: Wordbank.load(p) for lang, p in wordbank_paths.items()}
+        print(f"[load] boundary prior: wordbanks {sorted(wordbanks)}")
 
     has_lang_tokens = model.emb.num_embeddings > 259
     fixtures = []
@@ -126,14 +156,15 @@ def export():
                 # also asserts that Rust's *self-derived* prior reaches the same spans, and
                 # a whitespace stand-in here would fail that on every Japanese sentence.
                 # Computed from use_lang, not lang: at inference the prior only knows the
-                # language if the caller supplied one, so a language-free call gets the
-                # whitespace proposal even for Japanese. (Training differs — there the
-                # prior always knows the language, because we hold the record. The fixture
-                # has to mirror inference, which is what the Rust side does.)
+                # language the caller supplied. A language-free call is not left with
+                # nothing, though — `infer_lang` recovers jpn/tha/zho-hans from script, and
+                # Rust's PriorSet::ids does the same, so the two agree here too. (Training
+                # differs: there the prior always knows the language, because we hold the
+                # record. The fixture has to mirror inference, which is what Rust does.)
                 prior = None
                 if prior_vocab:
                     prior = prior_ids_for(text, use_lang, max_bytes=len(byte_ids),
-                                          wordbanks={}, unidic=unidic)
+                                          wordbanks=wordbanks, unidic=unidic)
                     assert len(prior) == len(byte_ids), (len(prior), len(byte_ids))
                 logits = model(torch.tensor([byte_ids]),
                                torch.tensor([prior]) if prior else None)[0]

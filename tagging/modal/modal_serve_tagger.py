@@ -47,11 +47,14 @@ def _download_model():
         revision=os.environ.get("LEXIDE_MODEL_REVISION") or None,
         # segmenter/* is optional on older repo snapshots; snapshot_download simply skips
         # patterns that match nothing, so the serve still builds before it's published.
-        # onnx/jpn-unidic.bin is the tokenizer's boundary prior — the same artifact the
-        # Rust library reads, so the serve and the library segment Japanese identically
-        # (release.sh's step 10 parity test compares them token for token).
+        # onnx/jpn-unidic.bin and onnx/wordbanks/* are the tokenizer's boundary priors —
+        # the same artifacts the Rust library reads, so the serve and the library segment
+        # identically (release.sh's step 10 parity test compares them token for token).
+        # The wordbanks are not optional decoration: tha and zho-hans have no whitespace to
+        # fall back on, so a serve without them would answer from a blank proposal while
+        # the model was trained on a real one.
         allow_patterns=["tagger/best/*", "tokenizer/*", "segmenter/*",
-                        "onnx/jpn-unidic.bin"],
+                        "onnx/jpn-unidic.bin", "onnx/wordbanks/*"],
         local_dir=MODEL_DIR,
         token=os.environ["HF_TOKEN"],
     )

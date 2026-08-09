@@ -16,20 +16,47 @@ The proposal is *not* the answer. UniDic follows its own segmentation policy —
 still has to learn the mapping from proposal to our policy. What the prior supplies is the
 part the model cannot get from 52k sentences: knowing that 翻訳 and 苛立ち are words at all.
 """
+# A prior is judged on recall far more than on precision — see WHY_RECALL below — so it may
+# over-propose fairly freely.
+#
+# WHY_RECALL. This used to be stated as "the model deletes boundaries but cannot invent
+# them", which is false as written: the network is a per-byte O/B/I classifier and the prior
+# is just another input feature, so nothing stops it emitting B where the prior says I. Two
+# true things stand behind it, and only the second is fundamental:
+#
+#   1. It *learns* to defer. Measured on v11 (trained with the prior available from step 0):
+#      jpn 93.3 with the dictionary, 21.2 with a whitespace proposal. That is a training
+#      artifact, not a structural limit, and --prior-warmup-frac / --prior-dropout exist to
+#      keep an independent route to the answer alive.
+#   2. Deleting and inventing are asymmetric in *difficulty*. An over-proposed boundary is a
+#      locally marked, learnable correction: the proposal says B, the gold says I, and the
+#      bytes carry the evidence. An under-proposed one asks the model to know that 苛立ち is
+#      a word from bytes alone — which is exactly the lexical knowledge the prior was added
+#      to supply. So a hint that omits boundaries contributes nothing precisely where it
+#      fails, while a hint that adds spurious ones stays useful.
+#
+# Measured consequence (2026-08-06): jieba and the Thai National Corpus list *under*-propose
+# at 0.83-0.90x the gold token count, and lose to a corpus bank by 19-27 points of
+# out-of-domain boundary recall, while UniDic's 84.4% precision costs Japanese nothing.
+#
 # TODO(sudachi): gold generation is moving to Sudachi (split mode C), which matches our token
 # policy better than UniDic — it keeps 日本語 and 訓練士 whole where UniDic splits them. The
-# prior stays on UniDic for now because a prior is judged on recall, not precision: it may
-# over-propose freely, since the model deletes boundaries but cannot invent them, and UniDic
-# measured 99.7% boundary-start recall against Sudachi C's 99.4%. Once gold is Sudachi-based,
-# revisit — one segmentation policy shared by the proposal and the labels is probably worth
-# more than 0.3 points of recall.
+# prior stays on UniDic for now: it measured 99.7% boundary-start recall against Sudachi C's
+# 99.4%. Once gold is Sudachi-based, settle it by training a tokenizer on each prior rather
+# than comparing recall — a mismatched policy surfaces *as* under-proposal against our gold,
+# so that 0.3 may not compare what it appears to.
 
 # Character classes, following MeCab's char.def: a run of one script is usually one word.
 # The limits say how long an *unknown* run of that class may be grouped into one token —
 # katakana loanwords and numbers run long, kanji compounds are usually 2-3, and a run of
 # hiragana is grammar rather than one word, so it is never grouped.
-_UNK_MAX_LEN = {"katakana": 24, "latin": 24, "digit": 24, "kanji": 3, "hiragana": 1,
-                "other": 1}
+#
+# Thai gets its own class rather than falling into "other", where the limit of 1 would
+# shatter every unknown run into single characters — and Thai, having no whitespace, is
+# one long run. Its limit is set from the same measurement that set the others:
+# gold-boundary coverage swept over candidate limits on the training corpus.
+_UNK_MAX_LEN = {"katakana": 24, "latin": 24, "digit": 24, "kanji": 3, "thai": 8,
+                "hiragana": 1, "other": 1}
 
 
 def _char_type(ch):
@@ -40,6 +67,8 @@ def _char_type(ch):
         return "hiragana"
     if 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF:
         return "kanji"
+    if 0x0E00 <= o <= 0x0E7F:
+        return "thai"
     if ch.isdigit():
         return "digit"
     if ch.isascii() and ch.isalpha():
@@ -139,12 +168,23 @@ class Wordbank:
         self.group_unknown = group_unknown
         self.inf = float("inf")
 
+    #: Optional first line of a bank file, e.g. `#!group_unknown=0`. Whether unknown runs
+    #: group or shatter is a property *of the bank*, not of the caller: it was measured per
+    #: language (Chinese wants shattering, 97.05 boundary recall against 90.33 grouped;
+    #: Thai is flat either way), and a global default cannot hold two answers. Storing it in
+    #: the file means a bank and its setting cannot be separated in a release.
+    HEADER = "#!group_unknown="
+
     @classmethod
     def load(cls, path, group_unknown=True):
         counts = {}
         with open(path, encoding="utf-8") as f:
             for line in f:
-                word, _, count = line.rstrip("\n").partition("\t")
+                line = line.rstrip("\n")
+                if line.startswith(cls.HEADER):
+                    group_unknown = line[len(cls.HEADER):].strip() not in ("0", "false")
+                    continue
+                word, _, count = line.partition("\t")
                 if word and count:
                     counts[word] = int(count)
         return cls(counts, group_unknown=group_unknown)
@@ -282,11 +322,31 @@ def infer_lang(text):
     Script is enough to recover what the prior needs to know, so this restores the training
     distribution rather than papering over it. It must stay identical to `infer_lang` in
     segment/prior.rs.
+
+    Only the three whitespace-free languages are guessed, because they are the ones where
+    getting it wrong is catastrophic rather than merely unhelpful. Kana is decisive for
+    Japanese and Thai script for Thai; Han with no kana is read as Chinese, which is the
+    common case — Japanese prose without a single kana is rare, and the alternative (call
+    it Japanese) hands every Chinese sentence to a Japanese dictionary.
     """
+    seen_han = False
     for ch in text:
-        if _char_type(ch) in ("hiragana", "katakana", "kanji"):
+        t = _char_type(ch)
+        if t in ("hiragana", "katakana"):
             return "jpn"
-    return None
+        if t == "thai":
+            return "tha"
+        if t == "kanji":
+            seen_han = True
+    return "zho-hans" if seen_han else None
+
+
+# Languages that do not delimit words with whitespace. For these, a whitespace proposal is
+# not a weak answer, it is a *wrong* one: it asserts that the whole sentence is a single
+# word, and a model trained to lean on the proposal obeys (measured on jpn: 21.2 F1 against
+# 93.3). When no lexicon is available they get PRIOR_NONE, which says nothing — a case the
+# model is trained for via --prior-dropout.
+NO_WHITESPACE_LANGS = ("jpn", "tha", "zho-hans")
 
 
 def char_prior(text, lang, tagger=None, wordbanks=None, unidic=None):
@@ -296,7 +356,9 @@ def char_prior(text, lang, tagger=None, wordbanks=None, unidic=None):
     analyzer: UniDic proposes 99.4% of gold boundary starts against a corpus bank's 98.8%,
     worth 1.1 F1. Korean and Hindi do not — a bank already reaches 97.8% and 100% both-edge
     coverage against whitespace's 28.7% and 59.2%, so the remaining headroom is nil and the
-    file is under a megabyte. Everything else keeps plain whitespace, which is exact.
+    file is under a megabyte. Thai and Chinese have no whitespace at all, so like Japanese
+    they cannot fall back to it and ship a corpus wordbank. Everything else keeps plain
+    whitespace, which is exact.
     """
     lang = lang or infer_lang(text)
     banks = wordbanks or {}
@@ -313,7 +375,9 @@ def char_prior(text, lang, tagger=None, wordbanks=None, unidic=None):
         try:
             return japanese_char_labels(text, tagger)
         except ImportError:
-            return whitespace_char_labels(text)
+            return [PRIOR_NONE] * len(text)
+    if lang in NO_WHITESPACE_LANGS:
+        return [PRIOR_NONE] * len(text)
     return whitespace_char_labels(text)
 
 
@@ -329,7 +393,16 @@ def encode_prior_bytes(text, char_labels, max_bytes=512):
         n_bytes = len(ch.encode("utf-8"))
         ids.append(lab)
         if n_bytes > 1:
-            cont = PRIOR_I if lab in (PRIOR_B, PRIOR_I) else PRIOR_O
+            # NONE propagates: the degraded no-lexicon path labels every char
+            # NONE, and Rust's PriorSet::ids returns a flat NONE vector for it.
+            # Marking continuations O here would diverge from that (and from
+            # the training sidecars, which emit_priors writes via the Rust path).
+            if lab in (PRIOR_B, PRIOR_I):
+                cont = PRIOR_I
+            elif lab == PRIOR_NONE:
+                cont = PRIOR_NONE
+            else:
+                cont = PRIOR_O
             ids.extend([cont] * (n_bytes - 1))
     ids.append(PRIOR_NONE)
     return ids[:max_bytes]
@@ -365,6 +438,6 @@ def describe(text, lang):
 
 __all__ = ["PriorSidecar", "PRIOR_NONE", "PRIOR_O", "PRIOR_B", "PRIOR_I", "PRIOR_VOCAB",
            "char_prior", "encode_prior_bytes", "prior_ids_for", "proposal_spans",
-           "describe", "infer_lang", "whitespace_char_labels",
+           "describe", "infer_lang", "whitespace_char_labels", "NO_WHITESPACE_LANGS",
            "japanese_char_labels",
            "Wordbank", "segment_constrained", "proposer_char_labels"]

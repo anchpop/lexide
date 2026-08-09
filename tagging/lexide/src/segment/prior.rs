@@ -9,7 +9,9 @@
 //!
 //! The proposal is not the answer. It contains our boundaries — 99.5% of gold token starts
 //! including 98.8% of never-seen words — while over-proposing about 1.18x, so the model's
-//! job becomes deleting boundaries rather than finding them.
+//! job becomes mostly deleting boundaries rather than finding them. See [`WHY_RECALL`] for
+//! why that direction is the safe one to err in, and why it is not the tautology it looks
+//! like.
 //!
 //! This is a port of `tagger/prior.py`, and it must stay one: training data is generated
 //! with *this* implementation (via the `emit-priors` binary) so the priors a model trains
@@ -32,6 +34,30 @@ use super::unidic::UniDic;
 /// Japanese", which the language token already carries. A language with both whitespace and
 /// a dictionary would give it real content; that is the configuration the same measurement
 /// rejects.
+/// Why a proposal is judged on recall far more than on precision.
+///
+/// This was long stated as "the model deletes boundaries but cannot invent them", which is
+/// false as written: the network is a per-byte O/B/I classifier and the prior is just
+/// another input feature, so nothing stops it emitting `B` where the proposal says `I`.
+/// Two true things stand behind the slogan, and only the second is fundamental.
+///
+/// 1. **It learns to defer.** Measured on the v11 weights, trained with the prior available
+///    from step 0: Japanese scores 93.3 with its dictionary and **21.2** with a whitespace
+///    proposal. That is a property of the training regime, not of the architecture, and
+///    `--prior-warmup-frac` / `--prior-dropout` exist to keep an independent route alive.
+/// 2. **Deleting and inventing differ in difficulty.** An over-proposed boundary is a
+///    locally marked, learnable correction — the proposal says `B`, the gold says `I`, and
+///    the bytes carry the evidence. An under-proposed one asks the model to know that
+///    苛立ち is a word from the bytes alone, which is exactly the lexical knowledge the
+///    prior was added to supply. A hint that omits boundaries therefore contributes nothing
+///    precisely where it fails, while a hint that adds spurious ones stays useful.
+///
+/// Measured consequence (2026-08-06): jieba and the Thai National Corpus list *under*-propose
+/// at 0.83–0.90x the gold token count and lose to a corpus bank by 19–27 points of
+/// out-of-domain boundary recall, while UniDic's 84.4% precision costs Japanese nothing.
+pub const WHY_RECALL: &str =
+    "a proposal may over-propose freely; omitting a boundary is the costly direction";
+
 pub const PRIOR_NONE: u8 = 0;
 pub const PRIOR_O: u8 = 1;
 pub const PRIOR_B: u8 = 2;
@@ -42,17 +68,35 @@ pub const PRIOR_VOCAB: usize = 4;
 /// word. The limit is how long an *unknown* run of that class may be grouped into a single
 /// proposal — katakana loanwords and numbers run long, kanji compounds are usually 2-3, and
 /// a run of hiragana is grammar rather than one word so it is never grouped.
+///
+/// Thai is its own class rather than `Other`, whose limit of 1 would shatter an unknown run
+/// into single characters — and Thai, having no whitespace, is one long run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CharType {
     Katakana,
     Hiragana,
     Kanji,
+    Thai,
     Digit,
     Latin,
     Other,
 }
 
 impl CharType {
+    /// Every variant, in discriminant order. `segment::unidic` indexes an array by
+    /// `CharType as usize`, so that array has to be built from this — inserting a variant
+    /// mid-enum silently shifts every later discriminant, which is how adding `Thai` first
+    /// pushed `Other` off the end of a hand-written six-element table.
+    pub const ALL: [CharType; 7] = [
+        CharType::Katakana,
+        CharType::Hiragana,
+        CharType::Kanji,
+        CharType::Thai,
+        CharType::Digit,
+        CharType::Latin,
+        CharType::Other,
+    ];
+
     pub fn of(ch: char) -> Self {
         let o = ch as u32;
         if (0x30A0..=0x30FF).contains(&o) || o == 0x30FC {
@@ -61,6 +105,8 @@ impl CharType {
             CharType::Hiragana
         } else if (0x4E00..=0x9FFF).contains(&o) || (0x3400..=0x4DBF).contains(&o) {
             CharType::Kanji
+        } else if (0x0E00..=0x0E7F).contains(&o) {
+            CharType::Thai
         } else if ch.is_ascii_digit() {
             CharType::Digit
         } else if ch.is_ascii_alphabetic() {
@@ -73,6 +119,7 @@ impl CharType {
     pub fn unk_max_len(self) -> usize {
         match self {
             CharType::Katakana | CharType::Latin | CharType::Digit => 24,
+            CharType::Thai => 8,
             CharType::Kanji => 3,
             CharType::Hiragana | CharType::Other => 1,
         }
@@ -121,11 +168,25 @@ impl Wordbank {
     }
 
     /// `word<TAB>count` per line, as emitted by `tagger/build_wordbanks.py`.
+    /// Optional first line of a bank file, e.g. `#!group_unknown=0`. Whether unknown runs
+    /// group or shatter is a property *of the bank*, not of the caller: it was measured
+    /// per language (Chinese wants shattering — 97.05 boundary recall against 90.33
+    /// grouped — while Thai is flat either way), and one global default cannot hold two
+    /// answers. Keeping it in the file means a bank and its setting cannot be separated in
+    /// a release. Must stay identical to `Wordbank.HEADER` in tagger/prior.py.
+    pub const HEADER: &'static str = "#!group_unknown=";
+
+    /// `group_unknown` is the default; a `#!group_unknown=` header in the file overrides it.
     pub fn load(path: &Path, group_unknown: bool) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading wordbank {}", path.display()))?;
+        let mut group_unknown = group_unknown;
         let mut counts = HashMap::new();
         for line in text.lines() {
+            if let Some(v) = line.strip_prefix(Self::HEADER) {
+                group_unknown = !matches!(v.trim(), "0" | "false");
+                continue;
+            }
             if let Some((word, count)) = line.split_once('\t') {
                 if let Ok(n) = count.trim().parse::<u64>() {
                     if !word.is_empty() {
@@ -318,6 +379,38 @@ mod tests {
         )
     }
 
+    /// `segment::unidic` builds a per-CharType array indexed by `t as usize`, so ALL has
+    /// to list every variant in discriminant order. Inserting `Thai` before `Digit` once
+    /// shifted `Other` to 6 against a hand-written 6-element table and panicked on the
+    /// first Japanese sentence with a punctuation mark in it.
+    #[test]
+    fn char_type_all_is_every_variant_in_discriminant_order() {
+        for (i, &t) in CharType::ALL.iter().enumerate() {
+            assert_eq!(t as usize, i, "{t:?} is not at index {i}");
+        }
+        // every char class `of` can return must be in ALL
+        for ch in ['ア', 'あ', '漢', 'ก', '7', 'x', '。'] {
+            assert!(CharType::ALL.contains(&CharType::of(ch)), "{ch} missing from ALL");
+        }
+    }
+
+    #[test]
+    fn wordbank_header_overrides_the_caller_default() {
+        let dir = std::env::temp_dir().join("lexide_wb_header_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("zho-hans.tsv");
+        std::fs::write(&path, format!("{}0\n猫\t10\n", Wordbank::HEADER)).unwrap();
+        // caller says group, the file says shatter — the file wins, because grouping was
+        // measured per language and travels with the bank
+        let wb = Wordbank::load(&path, true).unwrap();
+        assert!(!wb.group_unknown);
+        // and a bank with no header keeps the caller's default
+        let plain = dir.join("plain.tsv");
+        std::fs::write(&plain, "猫\t10\n").unwrap();
+        assert!(Wordbank::load(&plain, true).unwrap().group_unknown);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn whitespace_is_a_hard_boundary() {
         let wb = bank(&[("나", 100), ("는", 100), ("밥", 50), ("을", 100)], true);
@@ -372,16 +465,31 @@ mod tests {
 ///
 /// Script recovers what the prior needs, so this restores the training distribution rather
 /// than papering over it. Must stay identical to `infer_lang` in tagger/prior.py.
+///
+/// Only the three whitespace-free languages are guessed, because they are the ones where
+/// guessing wrong is catastrophic rather than merely unhelpful. Kana is decisive for
+/// Japanese and Thai script for Thai; Han with no kana reads as Chinese, which is the
+/// common case — Japanese prose without a single kana is rare, and the alternative hands
+/// every Chinese sentence to a Japanese dictionary.
 pub fn infer_lang(text: &str) -> Option<&'static str> {
-    text.chars()
-        .any(|c| {
-            matches!(
-                CharType::of(c),
-                CharType::Hiragana | CharType::Katakana | CharType::Kanji
-            )
-        })
-        .then_some("jpn")
+    let mut seen_han = false;
+    for c in text.chars() {
+        match CharType::of(c) {
+            CharType::Hiragana | CharType::Katakana => return Some("jpn"),
+            CharType::Thai => return Some("tha"),
+            CharType::Kanji => seen_han = true,
+            _ => {}
+        }
+    }
+    seen_han.then_some("zho-hans")
 }
+
+/// Languages that do not delimit words with whitespace. A whitespace proposal for these is
+/// not a weak answer but a wrong one — it asserts the sentence is a single word, and a
+/// model trained to lean on the proposal obeys (measured on jpn: 21.2 F1 against 93.3). So
+/// with no lexicon available they get `PRIOR_NONE`, which says nothing, and which the model
+/// is trained for (`--prior-dropout`).
+pub const NO_WHITESPACE_LANGS: [&str; 3] = ["jpn", "tha", "zho-hans"];
 
 /// The proposal sources that ship with a model: the bundled UniDic for Japanese, plus a
 /// corpus wordbank for each language that has one.
@@ -452,19 +560,17 @@ impl PriorSet {
     /// Per-byte prior ids for `text`, ready to hand to the model. A caller who supplies no
     /// language gets one inferred from the script — see [`infer_lang`].
     ///
-    /// With no dictionary loaded, Japanese gets an all-`NONE` proposal rather than the
-    /// whitespace one. That distinction matters: whitespace on Japanese does not say "no
-    /// information", it asserts the entire run is a single word, and a model trained to
-    /// lean on the proposal will obey (measured: 21.2 F1 against 93.3). `NONE` says
-    /// nothing, which is a case the model is trained for — see `--prior-dropout`. This is
-    /// how a build with no room for the 87MB artifact, such as the wasm demo, degrades.
+    /// With no lexicon loaded, a whitespace-free language gets an all-`NONE` proposal
+    /// rather than the whitespace one — see [`NO_WHITESPACE_LANGS`]. This is how a build
+    /// with no room for the 87MB artifact, such as the wasm demo, degrades.
     pub fn ids(&self, text: &str, lang: Option<&str>, max_bytes: usize) -> Vec<u8> {
         let lang = lang.or_else(|| infer_lang(text));
-        if lang == Some("jpn") && !self.has_japanese() {
+        let proposer = self.for_lang(lang);
+        if proposer.is_none() && lang.is_some_and(|l| NO_WHITESPACE_LANGS.contains(&l)) {
             let n = (text.len() + 2).min(max_bytes);
             return vec![PRIOR_NONE; n];
         }
-        prior_ids(text, self.for_lang(lang), max_bytes)
+        prior_ids(text, proposer, max_bytes)
     }
 }
 
@@ -473,11 +579,16 @@ mod infer_lang_tests {
     use super::*;
 
     #[test]
-    fn script_recovers_japanese_when_no_language_is_given() {
-        // kana or kanji is decisive; nothing else claims a language
+    fn script_recovers_the_whitespace_free_languages() {
+        // kana is decisive for Japanese, wherever in the string it appears
         assert_eq!(infer_lang("私は猫が好きです。"), Some("jpn"));
         assert_eq!(infer_lang("ブロックチェーン"), Some("jpn"));
         assert_eq!(infer_lang("漢字だけ"), Some("jpn"));
+        // Han with no kana reads as Chinese — the common case, and the safe one
+        assert_eq!(infer_lang("我喜欢猫。"), Some("zho-hans"));
+        assert_eq!(infer_lang("日本語"), Some("zho-hans"));
+        assert_eq!(infer_lang("ผมชอบแมว"), Some("tha"));
+        // a spaced language claims nothing: whitespace is already the right proposal
         assert_eq!(infer_lang("Eine Fundgrube."), None);
         assert_eq!(infer_lang("고양이가 좋아요."), None);
         assert_eq!(infer_lang("мама"), None);
@@ -489,13 +600,19 @@ mod priorset_tests {
     use super::*;
 
     #[test]
-    fn japanese_without_a_dictionary_says_nothing_rather_than_something_false() {
+    fn a_whitespace_free_language_without_a_lexicon_says_nothing_rather_than_something_false() {
         let empty = PriorSet::default();
         // whitespace would mark the run as one token — an assertion, not an absence
-        let ids = empty.ids("これはペンです", Some("jpn"), 512);
-        assert!(ids.iter().all(|&p| p == PRIOR_NONE), "got {ids:?}");
-        // inferred from script too, with no language supplied
-        assert!(empty.ids("これはペンです", None, 512).iter().all(|&p| p == PRIOR_NONE));
+        for (text, lang) in [
+            ("これはペンです", "jpn"),
+            ("我喜欢猫", "zho-hans"),
+            ("ผมชอบแมว", "tha"),
+        ] {
+            let ids = empty.ids(text, Some(lang), 512);
+            assert!(ids.iter().all(|&p| p == PRIOR_NONE), "{lang}: got {ids:?}");
+            // inferred from script too, with no language supplied
+            assert!(empty.ids(text, None, 512).iter().all(|&p| p == PRIOR_NONE), "{lang} inferred");
+        }
         // spaced languages still get their exact, free proposal
         let deu = empty.ids("Ein Haus", Some("deu"), 512);
         assert!(deu.contains(&PRIOR_B) && deu.contains(&PRIOR_O), "got {deu:?}");

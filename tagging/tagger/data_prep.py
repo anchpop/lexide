@@ -25,7 +25,8 @@ import os
 import random
 from pathlib import Path
 
-LANGS = ["deu", "eng", "fra", "hin", "ita", "jpn", "kor", "por", "rus", "spa"]
+LANGS = ["deu", "eng", "fra", "hin", "ita", "jpn", "kor", "por", "rus", "spa", "tha",
+         "zho-hans"]
 
 # spaCy sometimes emits a SPACE upos for whitespace-only tokens; keep it in the space.
 UPOS = ["NOUN", "PUNCT", "VERB", "PRON", "DET", "ADP", "ADV", "ADJ", "AUX", "PROPN",

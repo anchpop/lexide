@@ -21,9 +21,11 @@ const LN_EPS: f32 = 1e-5; // torch LayerNorm default
 
 /// Language-conditioned BOS rows appended after the base vocab, in this fixed order
 /// (matches `tagger/dataset.py::LANG_ORDER`). A checkpoint with 259 embedding rows is
-/// language-blind; one with 259+10 accepts a language hint via its first token.
-pub const LANG_ORDER: [&str; 10] = [
-    "deu", "eng", "fra", "hin", "ita", "jpn", "kor", "por", "rus", "spa",
+/// language-blind; one with 259+N accepts a language hint via its first token. The order
+/// is append-only — tha and zho-hans were added at the end so a pre-existing 269-row
+/// checkpoint still resolves every language it was trained on to the same id.
+pub const LANG_ORDER: [&str; 12] = [
+    "deu", "eng", "fra", "hin", "ita", "jpn", "kor", "por", "rus", "spa", "tha", "zho-hans",
 ];
 
 fn lang_index(code: &str) -> Option<usize> {
@@ -133,8 +135,10 @@ impl BiMinGru {
 
 /// The full byte tagger: embedding, N BiMinGRU layers, LayerNorm, linear to O/B/I logits.
 pub struct ByteBioModel {
-    emb: Vec<f32>, // [VOCAB + LANG_ORDER.len(), emb_dim]
+    emb: Vec<f32>, // [VOCAB + n_langs, emb_dim]
     emb_dim: usize,
+    /// How many language rows this checkpoint actually has — a prefix of [`LANG_ORDER`].
+    n_langs: usize,
     /// Optional per-byte boundary-prior embedding (see [`super::prior`]). Absent on
     /// pre-prior checkpoints, which is why it is an Option rather than a zero row.
     prior_emb: Option<Vec<f32>>,
@@ -199,14 +203,22 @@ impl ByteBioModel {
         };
 
         let (emb_shape, emb) = tensor("emb.weight")?;
-        if emb_shape[0] != VOCAB + LANG_ORDER.len() {
+        // [`LANG_ORDER`] is append-only, so a checkpoint may carry *fewer* language rows
+        // than we know codes for — that is a model trained before a language was added,
+        // and it still resolves every language it does know to the same id. Anything past
+        // its last row falls back to the generic BOS (see `lang_row`). More rows than
+        // LANG_ORDER means the checkpoint knows a language this build does not, which
+        // would silently mis-index, so that stays an error.
+        if !(VOCAB..=VOCAB + LANG_ORDER.len()).contains(&emb_shape[0]) {
             bail!(
-                "unexpected byte vocab size {} (expected {} — base vocab plus one token \
-                 per language)",
+                "unexpected byte vocab size {} (expected {}..={} — base vocab plus up to \
+                 one token per language)",
                 emb_shape[0],
+                VOCAB,
                 VOCAB + LANG_ORDER.len()
             );
         }
+        let n_langs = emb_shape[0] - VOCAB;
         let (prior_emb, prior_dim) = match st.tensor("prior_emb.weight") {
             Ok(_) => {
                 let (shape, w) = tensor("prior_emb.weight")?;
@@ -260,6 +272,7 @@ impl ByteBioModel {
         Ok(Self {
             emb_dim,
             emb,
+            n_langs,
             prior_emb,
             prior_dim: if concat { prior_dim } else { 0 },
             layers,
@@ -281,6 +294,15 @@ impl ByteBioModel {
         self.prior_emb.is_some()
     }
 
+    /// Embedding row for a language token, or `None` for the generic BOS. A code this
+    /// build knows but the checkpoint predates has no row of its own, so it degrades to
+    /// language-blind — which is a case every model is trained for (`--lang-dropout`) —
+    /// rather than reading a row that belongs to something else.
+    fn lang_row(&self, lang: Option<&str>) -> Option<usize> {
+        let i = lang.and_then(lang_index)?;
+        (i < self.n_langs).then(|| VOCAB + i)
+    }
+
     /// As [`Self::logits`], plus a per-byte boundary proposal aligned to
     /// `[BOS] + utf8(text) + [EOS]` — exactly what [`super::prior::prior_ids`] returns.
     /// Ignored by checkpoints trained without one.
@@ -290,7 +312,7 @@ impl ByteBioModel {
         lang: Option<&str>,
         prior: Option<&[u8]>,
     ) -> Vec<[f32; 3]> {
-        let first = lang.and_then(lang_index).map(|i| VOCAB + i).unwrap_or(BOS_BYTE);
+        let first = self.lang_row(lang).unwrap_or(BOS_BYTE);
         let mut ids: Vec<usize> = Vec::with_capacity(text.len() + 2);
         ids.push(first);
         ids.extend(text.as_bytes().iter().map(|&b| b as usize));

@@ -107,25 +107,42 @@ class Pipeline:
 
         self.char_tok = None
         self.unidic = None
+        self.wordbanks = {}
         if tokenizer_path and os.path.exists(tokenizer_path):
             self.char_tok = load_char_model(tokenizer_path, self.device)
             # A prior-trained tokenizer has learned to lean on the proposal, so running it
             # prior-free would silently degrade exactly the languages the prior was added
-            # for — and in concat mode would not run at all. The artifact ships beside the
-            # weights (see release.sh); it must be the *same* one the Rust library reads.
+            # for — and in concat mode would not run at all. The artifacts ship beside the
+            # weights (see release.sh); they must be the *same* ones the Rust library reads.
             if self.char_tok.prior_emb is not None:
                 from unidic_artifact import UniDic
+                from prior import NO_WHITESPACE_LANGS, Wordbank
                 # defaults to beside the weights; the serve points this at the shared
                 # onnx/ copy so the 83MB artifact is published once, not twice
-                art = os.path.join(prior_dir or os.path.dirname(tokenizer_path),
-                                   "jpn-unidic.bin")
+                pdir = prior_dir or os.path.dirname(tokenizer_path)
+                art = os.path.join(pdir, "jpn-unidic.bin")
                 if os.path.exists(art):
                     self.unidic = UniDic.load(art)
-                else:
+                # Corpus wordbanks, found by scanning rather than a hardcoded list — which
+                # languages carry one is recorded by which files the release contains, so
+                # the model and its priors cannot disagree (mirrors Rust PriorSet::load).
+                banks_dir = os.path.join(pdir, "wordbanks")
+                if os.path.isdir(banks_dir):
+                    for name in sorted(os.listdir(banks_dir)):
+                        if name.endswith(".tsv"):
+                            self.wordbanks[name[:-4]] = Wordbank.load(
+                                os.path.join(banks_dir, name))
+                # A whitespace-free language with no lexicon is the failure this guards:
+                # whitespace there asserts the sentence is one word, and the model obeys
+                # (jpn measured 93.3 with its dictionary, 21.2 without).
+                missing = [l for l in NO_WHITESPACE_LANGS
+                           if l not in self.wordbanks and not (l == "jpn" and self.unidic)]
+                if missing:
                     raise RuntimeError(
-                        f"{tokenizer_path} was trained with a boundary prior but "
-                        f"{art} is missing — Japanese would fall back to whitespace and "
-                        f"diverge from the Rust library")
+                        f"{tokenizer_path} was trained with a boundary prior but {pdir} "
+                        f"has no lexicon for {', '.join(missing)} — those languages would "
+                        f"lose their proposal and diverge from the Rust library. Expected "
+                        f"jpn-unidic.bin and/or wordbanks/<lang>.tsv.")
 
         # Optional sentence segmenter (same byte-minGRU architecture, sentence-scale O/B/I).
         self.segmenter = None
@@ -142,8 +159,8 @@ class Pipeline:
         p = None
         if self.char_tok.prior_emb is not None:
             from prior import prior_ids_for
-            ids = prior_ids_for(text, lang, max_bytes=len(byte_ids), wordbanks={},
-                                unidic=self.unidic)
+            ids = prior_ids_for(text, lang, max_bytes=len(byte_ids),
+                                wordbanks=self.wordbanks, unidic=self.unidic)
             p = torch.tensor([ids], device=self.device)
         labels = self.char_tok(x, p)[0].argmax(-1).tolist()
         return spans_from_byte_labels(text, labels)

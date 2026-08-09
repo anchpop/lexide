@@ -1,7 +1,7 @@
 //! Token-for-token parity between the local ONNX pipeline and the parsley Modal serve.
 //!
 //! `tests/fixtures/parsley_reference.json` holds recorded responses from the live endpoint
-//! (25 sentences across all 10 languages; refresh with
+//! (29 sentences across all 12 languages; refresh with
 //! `tagger/record_parity_fixtures.py`, which `tagging/release.sh` runs after each deploy).
 //! The local pipeline — byte-minGRU
 //! segmentation, ONNX tagging, fst lemma floor — must reproduce them exactly: same token
@@ -36,6 +36,8 @@ fn language(code: &str) -> Language {
         "kor" => Language::Korean,
         "hin" => Language::Hindi,
         "jpn" => Language::Japanese,
+        "tha" => Language::Thai,
+        "zho-hans" => Language::ChineseSimplified,
         other => panic!("unknown language code in fixtures: {other}"),
     }
 }

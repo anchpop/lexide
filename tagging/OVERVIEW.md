@@ -1,8 +1,9 @@
 # lexide tagging — project overview & status
 
 Replacing the expensive autoregressive **Gemma 4 31B** tagger with a small, cheap model that
-does the same job — **tokenization + POS + lemma + dependency (head & relation)** for 10
-languages (deu eng fra hin ita jpn kor por rus spa) — to tag user-submitted sentences.
+does the same job — **tokenization + POS + lemma + dependency (head & relation)** for 12
+languages (deu eng fra hin ita jpn kor por rus spa tha zho-hans) — to tag user-submitted
+sentences.
 
 Component docs: `tagger/README.md` (models/training + the release pipeline), `tagger/LEMMA_LOOKUP.md`
 (Wiktionary lemma floor), `modal/README.md` (parsley serve + cold-start notes).
@@ -25,10 +26,21 @@ handled by offset-based subword→word pooling (for tagging) and a separate byte
 
 ## Done
 
-**Data** (`tagger/data_prep.py`). Normalized 2.89M sentences (silver from Gemma + gold
+**Data** (`tagger/data_prep.py`). Normalized 3.28M sentences (silver from Gemma + gold
 `cleaned_*`) into a unified schema with exact char offsets, POS/dep/lemma-script vocabs
-(18 UPOS, 65 dep relations, 4001 lemma edit-scripts covering 99.4% of tokens), split
+(18 UPOS, 65 dep relations, 4001 lemma edit-scripts covering 99.3% of tokens), split
 train/val/test.
+
+**Thai + Simplified Chinese added, and 4.4x more Japanese (2026-08-06).** yap's pipeline
+had run tha and zho-hans (movie subtitles labelled by the same Gemma teacher: 97k and 50k
+sentences) and re-run jpn and hin, so `data/big/` was refreshed from `yap/out/`. Japanese
+silver went **38k -> 200k sentences**, which is the "more/better jpn silver" lever the
+tokenizer and tagger sections below both end up pointing at. Per-language train counts are
+now deu 420k, fra 421k, por 423k, ita 412k, spa 386k, rus 367k, eng 298k, **jpn 213k**,
+**tha 104k**, kor 102k, **zho-hans 63k**, hin 41k. Adding two languages moves
+`LANG_ORDER`/`CHAR_VOCAB_SIZE` from 269 to 271 embedding rows — appended, so the byte
+model's loader now accepts any prefix length and a checkpoint that predates a language
+falls back to the generic BOS for it rather than indexing off the end.
 
 **Models** (`tagger/model.py`). Two independently-trainable pieces:
 - **MultiTaskTagger** — XLM-RoBERTa-base encoder + offset subword→word pooling, then a POS
@@ -103,17 +115,30 @@ sentences/gaps/token spans live, with a `lang:` hint selector. Reuses `byte_bio.
 `#[path]`; parity-tested in Node against the Python fixtures. Deployed from the `gh-pages`
 branch (`build.sh` + copy `www/` there).
 
-**Results** — held-out **silver** test (measures agreement with the Gemma teacher, not gold):
-overall POS 98.3 / lemma 97.9 / UAS 93.1 / **LAS 91.7**.
+**Results (2026-08-07 retrain, 12 languages)** — held-out **silver** test (measures agreement
+with the Gemma teacher, not gold): overall POS 96.8 / lemma 96.4 / UAS 90.0 / **LAS 88.2**.
 
 | tier | langs | POS | LAS |
 |------|-------|-----|-----|
-| European | fra ita spa por deu eng rus | ~99 | 92–95 |
-| low-resource | kor, hin | 95–96 | ~84 |
-| **weak** | **jpn** | **85** | **65** |
+| European | ita por fra rus spa eng deu | 99.1–99.5 | 92.1–95.0 |
+| low-resource | hin, kor | 94.8–97.0 | 83.6–84.8 |
+| new | **tha** | **91.1** | **80.9** |
+| **weak** | **zho-hans**, **jpn** | **87.6–88.9** | **67.4–72.5** |
 
-Quality tracks per-language data volume: jpn/kor/hin (22–96k sentences) lag the European
-languages (300–400k each).
+The overall LAS is *lower* than the previous run's 91.7 and that is not a regression: two
+hard low-resource languages joined the balanced average and jpn grew from a small slice to a
+large one. No language got worse. Per language against the previous model, jpn went
+**85 -> 87.6 POS / 65 -> 67.4 LAS** on 4.4x the silver, hin **+1.5 POS / +0.8 LAS**, and the
+European seven are unchanged — which is the load-bearing null result, since rebalancing the
+mix and adding two languages could have cost them.
+
+Quality still tracks per-language data volume: zho-hans (63k) and hin (41k) sit at the
+bottom, the European languages (300–420k each) at the top. jpn is now the third-largest
+corpus (213k) and still the weakest parse, so for it volume is no longer the binding
+constraint — teacher quality is.
+
+**Not shipped** on these numbers: jpn (87.6 POS / 67.4 LAS) and zho-hans (88.9 / 72.5); tha
+is borderline.
 
 **Char tokenizer, per language (2026-07-28).** The long-quoted "99.8% token-span F1" was
 measured on `val_records[:2000]` — and the val file is written language-by-language, so that
@@ -231,6 +256,91 @@ The rare-frequency error buckets collapse 2.4x. Two findings worth keeping:
   matrix, unk.def unknown-word rules), reproducing fugashi's segmentation exactly on the test
   split. Training priors are precomputed by that same binary, so the proposal a model trains
   against cannot drift from the one it sees at inference.
+- **A bigger lexicon loses to a matching policy (2026-08-06).** Thai and Chinese have no
+  whitespace and no bundled dictionary, so they need a proposal too. The obvious move is a
+  real dictionary — jieba (349k entries) for Chinese, the Thai National Corpus frequency
+  list + PyThaiNLP word list (142k) for Thai — and both lose to a unigram bank built from
+  our own train split, worst of all on the out-of-domain text their coverage was supposed
+  to win:
+
+  | | corpus bank | external dictionary |
+  |---|---|---|
+  | tha val start recall / exact span | **98.11** / **94.62** | 98.25 / 90.60 |
+  | tha Wiktionary-MWT start recall | **95.39** | 68.88 |
+  | zho-hans val start recall / exact span | **97.05** / **90.66** | 95.32 / 87.76 |
+  | zho-hans Wiktionary-MWT start recall | **95.41** | 76.33 |
+
+  The cause is policy, not coverage. Both dictionaries lexicalize high-frequency
+  function-word collocations our teacher splits (`不是`→`不|是`, `就要`→`就|要`,
+  `ทำงาน`→`ทำ|งาน`), so they **under**-propose at 0.83–0.90x the gold token count and merge
+  across our boundaries — the costly direction to err in (see the correction below). Nor is
+  it rule-repairable: the merge sites have a flat tail (2,094 distinct right-hand pieces for
+  Chinese; **450** needed to cover half), because what differs is a lexicographer's judgment
+  about which collocations deserve a headword. All of this is proposal-level: no tokenizer
+  was trained on a dictionary prior, so there is no downstream F1, and it does not answer
+  the `TODO(sudachi)` trade-off (the policy-matched bank won on recall too, so nothing was
+  traded).
+- **"The model cannot invent boundaries" was wrong, and it had been repeated for months.**
+  The tokenizer is a per-byte O/B/I classifier and the prior is one more input feature —
+  nothing stops it predicting `B` where the proposal says `I`. What is actually true is
+  narrower, and one half of it is a *training* property rather than a fact about the model:
+  (a) it **learns** to defer — v11 scores jpn 93.3 with its dictionary and 21.2 with a
+  whitespace proposal, which is why `--prior-warmup-frac` and `--prior-dropout` exist; and
+  (b) the two corrections differ in difficulty — an over-proposed boundary is locally marked
+  and learnable (proposal says `B`, gold says `I`, bytes carry the evidence), while an
+  under-proposed one asks the model to know 苛立ち is a word from bytes alone, which is the
+  lexical knowledge the prior existed to supply. So a low-recall hint contributes nothing
+  exactly where it fails; a low-precision one stays useful. That is the real reason UniDic's
+  84.4% precision is free and jieba's missing boundaries are not. Corrected in
+  `prior::WHY_RECALL`, which `prior.py` and `segment::unidic` now both point at instead of
+  restating the slogan.
+- **Unknown-run grouping belongs to the bank, not to a global constant.** Whether an unknown
+  run collapses into one proposal or shatters per character is worth 6.7 F1-equivalent
+  points of boundary recall on Chinese (shatter 97.05, group 90.33 — Chinese tokens are 1-2
+  characters, so shattering recovers nearly every start), and Chinese shares the `Kanji`
+  character class with Japanese, which wants the opposite. So it is stored in the bank file
+  as a `#!group_unknown=` header that both `prior.py` and `segment::prior` read. Related
+  trap, hit while adding Thai: `CharType`'s *discriminants* index a per-class array in
+  `segment::unidic`, so inserting a variant mid-enum shifted `Other` off the end and
+  panicked on the first Japanese sentence containing punctuation. `CharType::ALL` now
+  defines that order and a test pins it.
+
+**Char tokenizer, byte-v14 (2026-08-07, 12 languages).** Token-span F1 on 400 sentences per
+language, all three configurations the training script now reports:
+
+| | deu | eng | fra | hin | ita | jpn | kor | por | rus | spa | **tha** | **zho** | all |
+|---|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|
+| with prior | 99.5 | 99.4 | 99.2 | 97.6 | 99.8 | 92.2 | 92.4 | 100.0 | 100.0 | 99.7 | **93.9** | **91.4** | **97.18** |
+| lang-free | 99.6 | 99.5 | 99.1 | 97.7 | 99.7 | 92.1 | 92.5 | 100.0 | 100.0 | 99.7 | 93.8 | 91.4 | 97.17 |
+| blank prior | 99.6 | 99.5 | 98.7 | 97.3 | 99.7 | 84.3 | 88.9 | 99.8 | 99.9 | 99.7 | 69.1 | 69.4 | 92.60 |
+
+- **The wordbanks are worth +13.2 (tha) and +14.2 (zho-hans).** Cleanest measurement we have
+  of a prior's value: the curriculum turns the proposal on halfway through, so the eval at
+  step 24k (unaided) and 28k (with prior) are the same weights 3,600 steps apart —
+  tha 80.9 -> 94.1, zho-hans 77.4 -> 91.5.
+- **jpn gained only +2.4 from UniDic**, against ~8 previously. The dictionary did not get
+  worse; the unaided baseline rose from ~80 to 89.3 on 4.4x the silver, leaving less room
+  above it. Direct confirmation that a prior only pays where the model has no other route —
+  and notice the with-prior figure (92.2) is inside byte-v12/v13's 93.06/90.94 noise band, so
+  **more Japanese data did not improve Japanese tokenization at all**, only the model's
+  unaided knowledge. Tagging gained (LAS 65 -> 67.4); tokenization did not.
+- **Lang-free now costs nothing** (97.17 vs 97.18) — `infer_lang` recovers jpn/tha/zho-hans
+  from script. Caveat for whoever adds language 13: with a `--prior-sidecar`, `evaluate`'s
+  lang-free path still feeds the prior the true language, so this number is only honest
+  because `infer_lang` happens to cover every whitespace-free language. Add one it cannot
+  detect and the eval silently overstates again, exactly as it did before the v11 fix.
+- **Prior dependence is real but no longer catastrophic.** Blanking the proposal costs
+  tha -24.8, zho-hans -22.0, jpn -8.0, against v11 Japanese's -71 (93.3 -> 21.2). The
+  curriculum plus `--prior-dropout` bought a genuine fallback. It is not free: Thai scored
+  80.9 unaided mid-warmup and 69.1 unaided at the end, so ~12 points of independent ability
+  were traded for the hint.
+- **Korean fell 95.2 -> 92.4**, past the ~2-point noise floor. Confounded three ways (the val
+  split was re-randomized over new data, batch 128 vs 256, changed language mix) and not
+  isolated. Worth a look before trusting kor tokenization at the old number.
+
+Trained on a 24GB A10, batch 128 — the 256 that byte-v13 used on a 48GB A6000 OOMs in the
+minGRU scan, and the batches are heavier now because Thai is 3 UTF-8 bytes per character so
+far more sequences reach the 512-byte cap.
 
 **Lemma quality investigation.** A blind `claude-fable-5` judge on 100 hard tokens found the
 silver lemmas are **~99% accurate** (only ~1 real error; most disagreements are annotation

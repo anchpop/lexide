@@ -2,7 +2,7 @@
 
 Goal: replace the expensive autoregressive Gemma 4 31B tagger with a small, cheap model
 that does the same job — **tokenization + POS + lemma + dependency (head & relation)**
-across 10 languages (deu, eng, fra, hin, ita, jpn, kor, por, rus, spa).
+across 12 languages (deu, eng, fra, hin, ita, jpn, kor, por, rus, spa, tha, zho-hans).
 
 ## Why this design
 
@@ -55,9 +55,62 @@ So each sentence is accompanied by a per-byte proposal:
 |---|---|---|
 | spaced languages | whitespace | 100% (Korean), 96.4% (Hindi) |
 | Japanese | bundled UniDic + Viterbi (`segment::unidic`) | 84.4% |
+| Thai, Chinese | corpus unigram wordbank + Viterbi (`data/priors/wordbanks/`) | see below |
 | optional | corpus unigram wordbank + Viterbi | 92.6% (Korean) |
 
-Feeding it lifted Japanese 86.6 → 94.5 and Korean 91.8 → 95.2.
+Feeding it lifted Japanese 86.6 → 94.5 and Korean 91.8 → 95.2. On the byte-v14 retrain the
+curriculum gives a cleaner measurement of the same thing — same weights, 3,600 steps apart,
+differing only in whether the proposal is present: **tha 80.9 → 94.1, zho-hans 77.4 → 91.5,
+jpn 89.3 → 91.7**. Japanese gains least now because 4.4x the silver raised its *unaided*
+baseline from ~80 to 89.3; a prior only pays where the model has no other route.
+
+**Thai and Chinese have no whitespace and no bundled dictionary**, so a proposal is not
+optional for them: whitespace on a language that doesn't use it asserts the whole sentence
+is one word, and a model trained to lean on the proposal obeys. `NO_WHITESPACE_LANGS`
+(both in `prior.py` and `segment::prior`) is the list that gets an all-`NONE` proposal
+instead of a false one when no lexicon is loaded.
+
+Their banks are built from **our own train split**, not an external dictionary — measured,
+not assumed. jieba (349k entries) and the Thai National Corpus frequency list (142k) were
+both tried and both lose, worst of all on out-of-domain text where their extra coverage
+was supposed to pay off:
+
+| | | corpus bank | external dictionary |
+|---|---|---|---|
+| tha | val start recall / exact | **98.11** / **94.62** | 98.25 / 90.60 |
+| | Wiktionary MWT start recall | **95.39** | 68.88 |
+| zho-hans | val start recall / exact | **97.05** / **90.66** | 95.32 / 87.76 |
+| | Wiktionary MWT start recall | **95.41** | 76.33 |
+
+The cause is segmentation *policy*, not coverage. Both dictionaries lexicalize
+high-frequency function-word collocations that our teacher splits — `不是`→`不|是`,
+`ทำงาน`→`ทำ|งาน` — so they systematically **under**-propose (0.83–0.90x the gold token
+count) and merge across our boundaries — the costly direction, for the reason in
+`prior.WHY_RECALL`. There is no rule that repairs this: 450 distinct right-hand pieces are
+needed to cover half the Chinese merge sites. Note this does *not* answer the
+`TODO(sudachi)` question below — there the policy-matched bank also had higher recall, so
+no trade-off was tested.
+
+**Why recall and not precision** (`prior.WHY_RECALL` / `segment::prior::WHY_RECALL`). This
+was long written as "the model deletes boundaries but cannot invent them". That is false:
+the tokenizer is a per-byte O/B/I classifier and the prior is one more input feature, so
+nothing stops it predicting `B` where the proposal says `I`. Two narrower things are true,
+and only the second is fundamental — (1) it *learns* to defer (v11: jpn 93.3 with the
+dictionary, 21.2 with whitespace), which is a training-regime property that
+`--prior-warmup-frac` and `--prior-dropout` push back on; and (2) an over-proposed boundary
+is a locally marked, learnable correction, while an under-proposed one asks the model to
+know the word from bytes alone — the very knowledge the prior exists to supply. So a hint
+that omits boundaries contributes nothing exactly where it fails, which is why UniDic's
+84.4% precision is free and jieba's missing boundaries are not.
+
+**Unknown-run grouping is per bank, not global.** Whether an unknown run collapses into one
+proposal (MeCab's `char.def` idea) or shatters into one boundary per character was measured
+per language, and Chinese wants the opposite of the default — shattering scores 97.05
+boundary recall against 90.33 grouped, because Chinese tokens are 1–2 characters so
+shattering an unknown Han run recovers nearly every start. Since Chinese and Japanese share
+the `Kanji` character class, a global constant cannot hold both answers, so the setting is
+written into the bank file as a `#!group_unknown=` header (`Wordbank.HEADER`) and travels
+with the artifact.
 
 Two things this design gets right, both learned the hard way:
 
@@ -100,14 +153,14 @@ Two things this design gets right, both learned the hard way:
 ## Data
 
 `data_prep.py` produced `data/processed/{train,val,test}.jsonl` + `vocab.json` from
-2.89M sentences (silver `data/big/*` + gold `train/data/cleaned_*`). Key facts:
+3.28M sentences (silver `data/big/*` + gold `train/data/cleaned_*`). Key facts:
 
 - 18 UPOS tags, 65 dependency relations (UD subtypes kept).
 - Lemmas are handled as **edit scripts** (`"p|s|ins"`: keep p-char prefix + s-char
   suffix of the form, splice `ins` in the middle). A global 4000-script vocab covers
   **99.4%** of tokens; the rest fall back to copy-the-form.
-- Heavy language skew (deu/fra/por ~400k each; hin 31k, jpn 48k, kor 96k). Chinese has
-  no data. Eval sets are capped per language for balance.
+- Heavy language skew (deu/fra/por ~420k each; hin 41k, zho-hans 63k, kor 102k, tha 104k,
+  jpn 213k). Eval sets are capped per language for balance.
 - Char offsets are exact by construction (token text + whitespace reconstructs the
   sentence), so pooling alignment is never fuzzy.
 
