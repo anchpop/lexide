@@ -112,14 +112,19 @@ def transcribe(
     nonblank_logit = out["nonblank_logit"] # (1, T)
 
     phoneme_ids = log_probs.argmax(-1).squeeze(0)
-    stress_preds = stress_logits.argmax(-1).squeeze(0)
+    stress_log_probs = torch.log_softmax(stress_logits.float(), dim=-1).squeeze(0)
     nonblank_probs = torch.sigmoid(nonblank_logit).squeeze(0)
     tokenizer = processor.tokenizer
     blank_id = model.blank_id
 
     # Greedy CTC collapse: drop blanks, drop repeats, drop special tokens.
-    # Attach stress at the frame where each phoneme is first emitted.
+    # Attach stress by summing stress log-probs over each token's emitted run
+    # (argmax equals averaging) — the same per-frame product the joint CTC
+    # scores an alignment by. The VAD loss widens emissions across the phone's
+    # span, so the run's first frame is a phone-onset boundary frame and the
+    # least reliable single frame to read stress from.
     result = []
+    stress_acc = None
     prev_id = -1
     for t in range(len(phoneme_ids)):
         tid = phoneme_ids[t].item()
@@ -127,17 +132,23 @@ def transcribe(
             prev_id = -1
             continue
         if tid == prev_id:
+            if stress_acc is not None:
+                stress_acc += stress_log_probs[t]
             continue
         token = tokenizer.convert_ids_to_tokens(tid)
         prev_id = tid
         if _is_special_token(token):
+            stress_acc = None
             continue
+        stress_acc = stress_log_probs[t].clone()
         result.append({
             "token": token,
-            "stress": int(stress_preds[t].item()),
+            "stress": stress_acc,  # accumulated over the run; finalized below
             "frame": t,
             "nonblank_prob": round(nonblank_probs[t].item(), 4),
         })
+    for r in result:
+        r["stress"] = int(r["stress"].argmax().item())
     return result
 
 
