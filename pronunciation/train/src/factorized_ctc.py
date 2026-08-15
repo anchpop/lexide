@@ -45,6 +45,21 @@ NUM_FEATURE_VALUES = 3  # panphon ternary {-1, 0, +1} → encoded as {0, 1, 2}
 NUM_LAYER_MIXTURES = 5  # learned soft selections over encoder hidden states (regularized-heads mode)
 CTC_MASK_VALUE = -1e4  # finite "impossible" log-prob; avoids NaNs in CTC backward
 
+# wav2vec2's conv feature extractor: 400-sample receptive field, 320-sample
+# stride (50 fps). Frame t covers samples [320t, 320t+400), center 320t+200.
+# The acoustic side-channel aligns its analysis windows to these frames.
+W2V2_RECEPTIVE_FIELD = 400
+W2V2_STRIDE = 320
+
+# Low-band linear-spectrogram channel (see AcousticSidechannel): n_fft=2048
+# gives 7.8125 Hz bins; bins [8, 78) span 62.5–601.6 Hz, bracketing adult F0.
+# A 2-semitone pitch-accent move at 200 Hz is ~24 Hz ≈ 3 bins — directly
+# resolvable, where the old 400-point mel bank (40 Hz bins) smeared it.
+LOWBAND_N_FFT = 2048
+LOWBAND_BIN_LO = 8
+LOWBAND_BIN_HI = 78
+LOWBAND_BINS = LOWBAND_BIN_HI - LOWBAND_BIN_LO
+
 # These heads are factors of the joint CTC symbol, not independent CTC tasks.
 # `target` names the aligned tensor supplied by the dataset.  The extra class
 # for tone/accent means "this phone is not a bearer"; examples in other
@@ -56,10 +71,126 @@ DEFAULT_LANGUAGE_HEAD_SPECS = {
     "zho_hans_tone": {
         "lang": "zho-hans", "target": "tone", "num_labels": 6, "weight": 0.3,
     },
+    # 0 = not a mora-bearing phone, 1 = low mora, 2 = high mora. A per-mora
+    # pitch level rather than a downstep marker: dense, and each label is
+    # decidable from the frames it sits on.
     "jpn_pitch_accent": {
         "lang": "jpn", "target": "pitch_accent", "num_labels": 3, "weight": 0.3,
     },
 }
+
+
+class AcousticSidechannel(nn.Module):
+    """Raw-signal side-channel concatenated onto encoder hidden states.
+
+    Up to two banks, both deterministic transforms of the waveform — no pitch
+    tracker or other algorithmic estimate, so the heads can never inherit an
+    estimator's failure modes on atypical (e.g. learner) voices:
+
+      1. Log-mel bank (`n_mels` filters, `mel_n_fft`-point window) → Linear
+         to `mel_proj_dim`. The general low-level channel: everything the
+         encoder's final layer abstracts away.
+      2. Optional low-band log-linear spectrogram (`lowband_dim > 0`):
+         2048-point window (7.8 Hz bins) restricted to 62.5–601.6 Hz →
+         Linear to `lowband_dim`. Added for the pitch-accent/tone factor
+         heads: it hands them the fundamental and its movement at
+         sub-semitone resolution.
+
+    Frame alignment: hop=320 matches wav2vec2's 50 fps, but with
+    `center=False` a window longer than 400 samples would also *shift* every
+    window center `(n_fft-400)/2` samples late relative to wav2vec2's conv
+    receptive fields. `forward` symmetrically pre-pads the waveform by
+    exactly that amount, so frame counts AND centers match the encoder
+    frames. This matters: the factor heads are read at peaky CTC spike
+    frames, and a systematic 1–2 frame lag would land pitch evidence on the
+    wrong mora at boundaries. The residual ±1-frame count mismatch from edge
+    effects is reconciled against `T_target` by truncate-or-pad, as before.
+    """
+
+    def __init__(
+        self,
+        n_mels: int = 80,
+        mel_proj_dim: int = 64,
+        mel_n_fft: int = 400,
+        lowband_dim: int = 0,
+    ):
+        super().__init__()
+        import torchaudio  # lazy: only train environments need this
+        self.mel_spec = torchaudio.transforms.MelSpectrogram(
+            sample_rate=16000,
+            n_fft=mel_n_fft,
+            win_length=mel_n_fft,
+            hop_length=W2V2_STRIDE,
+            n_mels=n_mels,
+            center=False,
+        )
+        # A mel bank too fine for its FFT produces filters spanning zero bins
+        # — silently dead input channels. Fail at construction, not mid-run.
+        empty = (self.mel_spec.mel_scale.fb.sum(dim=0) == 0).nonzero().flatten()
+        if empty.numel():
+            raise ValueError(
+                f"mel filterbank has {empty.numel()} empty filters at "
+                f"n_fft={mel_n_fft}, n_mels={n_mels}; raise n_fft or lower n_mels"
+            )
+        # Normalize log spectra before projecting: utterance-level loudness
+        # and channel/recording variation introduce huge offsets that would
+        # otherwise dominate the projection's early gradient. LayerNorm over
+        # the bin axis is the standard choice (per-frame, per-batch) and
+        # avoids needing pre-computed dataset statistics.
+        self.mel_norm = nn.LayerNorm(n_mels)
+        self.mel_proj = nn.Linear(n_mels, mel_proj_dim)
+        self.lowband_dim = lowband_dim
+        if lowband_dim > 0:
+            self.low_spec = torchaudio.transforms.Spectrogram(
+                n_fft=LOWBAND_N_FFT,
+                win_length=LOWBAND_N_FFT,
+                hop_length=W2V2_STRIDE,
+                center=False,
+                power=2.0,
+            )
+            self.low_norm = nn.LayerNorm(LOWBAND_BINS)
+            self.low_proj = nn.Linear(LOWBAND_BINS, lowband_dim)
+        else:
+            self.low_spec = None
+            self.low_norm = None
+            self.low_proj = None
+        self.out_dim = mel_proj_dim + lowband_dim
+
+    def _bank(self, spec, norm, proj, input_values, T_target, dtype,
+              bin_lo=None, bin_hi=None):
+        # Symmetric pre-pad aligns this bank's window centers with wav2vec2's
+        # conv receptive-field centers (see class docstring). Zero for the
+        # legacy 400-point bank, so old checkpoints reproduce exactly.
+        pad = (spec.n_fft - W2V2_RECEPTIVE_FIELD) // 2
+        x = input_values.float()
+        if pad:
+            x = F.pad(x, (pad, pad))
+        # Spectrograms are BF16-incompatible inside autocast; compute in fp32.
+        with torch.autocast(device_type=input_values.device.type, enabled=False):
+            feats = spec(x)                                   # (B, bins, T)
+        if bin_lo is not None:
+            feats = feats[:, bin_lo:bin_hi, :]
+        feats = feats.transpose(1, 2)                         # (B, T, bins)
+        if feats.shape[1] > T_target:
+            feats = feats[:, :T_target, :]
+        elif feats.shape[1] < T_target:
+            feats = F.pad(feats, (0, 0, 0, T_target - feats.shape[1]))
+        feats = torch.log(feats + 1e-6).to(dtype)
+        return proj(norm(feats))
+
+    def forward(self, input_values, T_target, dtype):
+        out = self._bank(
+            self.mel_spec, self.mel_norm, self.mel_proj,
+            input_values, T_target, dtype,
+        )
+        if self.low_spec is not None:
+            low = self._bank(
+                self.low_spec, self.low_norm, self.low_proj,
+                input_values, T_target, dtype,
+                bin_lo=LOWBAND_BIN_LO, bin_hi=LOWBAND_BIN_HI,
+            )
+            out = torch.cat([out, low], dim=-1)
+        return out
 
 
 class FactorizedCTCModel(nn.Module):
@@ -76,6 +207,8 @@ class FactorizedCTCModel(nn.Module):
         head_base_dim: int = 768,
         acoustic_dim: int = 64,
         n_mels: int = 80,
+        mel_n_fft: int = 400,
+        lowband_dim: int = 0,
         feature_emission_weight: float = 0.0,
         mel_sidechannel: bool = True,
         mlp_heads: bool = True,
@@ -119,8 +252,12 @@ class FactorizedCTCModel(nn.Module):
         self.num_stress_labels = num_stress_labels
         self.regularized_heads = regularized_heads
         self.head_base_dim = head_base_dim
+        # `acoustic_dim` is the MEL projection width; the side-channel's total
+        # width is `acoustic_dim + lowband_dim` (`self.sidechannel.out_dim`).
         self.acoustic_dim = acoustic_dim
         self.n_mels = n_mels
+        self.mel_n_fft = mel_n_fft
+        self.lowband_dim = lowband_dim
         self.feature_emission_weight = feature_emission_weight
         self.mel_sidechannel = mel_sidechannel
         self.mlp_heads = mlp_heads
@@ -176,29 +313,15 @@ class FactorizedCTCModel(nn.Module):
             for k in range(NUM_LAYER_MIXTURES):
                 init_logits[k, peak_layers[k]] = 5.0  # softmax(5.0) ≈ 75% on peak
             self.layer_weights = nn.Parameter(init_logits)
-            # MelSpectrogram with hop=320 gives the same 50fps frame rate as
-            # wav2vec2's conv feature extractor (16000 / 320 = 50). Any
-            # remaining ±1-frame mismatch from edge effects is reconciled in
-            # forward via truncate-or-pad.
-            import torchaudio  # lazy: only train environments need this
-            self.mel_spec = torchaudio.transforms.MelSpectrogram(
-                sample_rate=16000,
-                n_fft=400,
-                win_length=400,
-                hop_length=320,
-                n_mels=n_mels,
-                center=False,
+            # See AcousticSidechannel for the transform geometry and its
+            # frame-center alignment with the wav2vec2 conv frontend.
+            self.sidechannel = AcousticSidechannel(
+                n_mels=n_mels, mel_proj_dim=acoustic_dim,
+                mel_n_fft=mel_n_fft, lowband_dim=lowband_dim,
             )
-            # Normalize log-mel before projecting: utterance-level loudness
-            # and channel/recording variation introduce huge offsets that
-            # would otherwise dominate the projection's early gradient.
-            # LayerNorm over the n_mels axis is the standard choice (per-frame,
-            # per-batch) and avoids needing pre-computed dataset statistics.
-            self.mel_norm = nn.LayerNorm(n_mels)
-            self.mel_proj = nn.Linear(n_mels, acoustic_dim)
-            # Input dim: K mixtures concat'd along feature axis + mel projection.
+            # Input dim: K mixtures concat'd along feature axis + side-channel.
             self.shared_base = nn.Sequential(
-                nn.Linear(NUM_LAYER_MIXTURES * hidden_size + acoustic_dim, head_base_dim),
+                nn.Linear(NUM_LAYER_MIXTURES * hidden_size + self.sidechannel.out_dim, head_base_dim),
                 nn.GELU(),
                 nn.Dropout(0.1),
             )
@@ -211,19 +334,14 @@ class FactorizedCTCModel(nn.Module):
             # away — the signal the learned mixtures kept ~5-45% mass on (L0).
             self.layer_weights = None
             self.shared_base = None
-            import torchaudio  # lazy: only train environments need this
-            self.mel_spec = torchaudio.transforms.MelSpectrogram(
-                sample_rate=16000, n_fft=400, win_length=400,
-                hop_length=320, n_mels=n_mels, center=False,
+            self.sidechannel = AcousticSidechannel(
+                n_mels=n_mels, mel_proj_dim=acoustic_dim,
+                mel_n_fft=mel_n_fft, lowband_dim=lowband_dim,
             )
-            self.mel_norm = nn.LayerNorm(n_mels)
-            self.mel_proj = nn.Linear(n_mels, acoustic_dim)
-            head_input_dim = hidden_size + acoustic_dim
+            head_input_dim = hidden_size + self.sidechannel.out_dim
         else:
             self.layer_weights = None
-            self.mel_spec = None
-            self.mel_norm = None
-            self.mel_proj = None
+            self.sidechannel = None
             self.shared_base = None
             head_input_dim = hidden_size
 
@@ -455,44 +573,20 @@ class FactorizedCTCModel(nn.Module):
                 mixtures.append(mix_k)
             hidden = self.dropout(torch.cat(mixtures, dim=-1))    # (B, T, K*H)
 
-            # Log-mel side-channel computed from the same input waveform.
-            # MelSpectrogram is BF16-incompatible inside autocast, so cast to
-            # float32 around it then back to hidden's dtype.
-            with torch.autocast(device_type=input_values.device.type, enabled=False):
-                mel = self.mel_spec(input_values.float())             # (B, n_mels, T_mel)
-            mel = mel.transpose(1, 2)                                 # (B, T_mel, n_mels)
-            # Align mel's time axis to wav2vec2's. They share hop=320 so
-            # they match to within ±1 frame from edge handling — truncate
-            # or pad the difference.
-            T_target = hidden.shape[1]
-            if mel.shape[1] > T_target:
-                mel = mel[:, :T_target, :]
-            elif mel.shape[1] < T_target:
-                mel = F.pad(mel, (0, 0, 0, T_target - mel.shape[1]))
-            mel = torch.log(mel + 1e-6).to(hidden.dtype)
-            mel = self.mel_norm(mel)                                  # per-frame LayerNorm
-            mel_proj = self.mel_proj(mel)                             # (B, T, acoustic_dim)
+            # Acoustic side-channel computed from the same input waveform,
+            # frame-aligned to the encoder (see AcousticSidechannel).
+            acoustic = self.sidechannel(input_values, hidden.shape[1], hidden.dtype)
 
-            combined = torch.cat([hidden, mel_proj], dim=-1)
+            combined = torch.cat([hidden, acoustic], dim=-1)
             return self.shared_base(combined)
 
         if self.mel_sidechannel:
-            # Final-layer hidden + raw log-mel side-channel (no layer mixture,
-            # no shared-base bottleneck — heads consume [hidden ; mel_proj]).
+            # Final-layer hidden + raw acoustic side-channel (no layer mixture,
+            # no shared-base bottleneck — heads consume [hidden ; acoustic]).
             out = self.backbone(input_values=input_values, attention_mask=attention_mask)
             hidden = self.dropout(out.last_hidden_state)
-            with torch.autocast(device_type=input_values.device.type, enabled=False):
-                mel = self.mel_spec(input_values.float())             # (B, n_mels, T_mel)
-            mel = mel.transpose(1, 2)                                 # (B, T_mel, n_mels)
-            T_target = hidden.shape[1]
-            if mel.shape[1] > T_target:
-                mel = mel[:, :T_target, :]
-            elif mel.shape[1] < T_target:
-                mel = F.pad(mel, (0, 0, 0, T_target - mel.shape[1]))
-            mel = torch.log(mel + 1e-6).to(hidden.dtype)
-            mel = self.mel_norm(mel)                                  # per-frame LayerNorm
-            mel_proj = self.mel_proj(mel)                            # (B, T, acoustic_dim)
-            return torch.cat([hidden, mel_proj], dim=-1)
+            acoustic = self.sidechannel(input_values, hidden.shape[1], hidden.dtype)
+            return torch.cat([hidden, acoustic], dim=-1)
 
         out = self.backbone(input_values=input_values, attention_mask=attention_mask)
         return self.dropout(out.last_hidden_state)
@@ -643,17 +737,17 @@ class FactorizedCTCModel(nn.Module):
         }
         if self.regularized_heads:
             payload["head_base_dim"] = self.head_base_dim
-            payload["acoustic_dim"] = self.acoustic_dim
-            payload["n_mels"] = self.n_mels
             payload["layer_weights"] = self.layer_weights.detach().cpu()
-            payload["mel_norm"] = self.mel_norm.state_dict()
-            payload["mel_proj"] = self.mel_proj.state_dict()
             payload["shared_base"] = self.shared_base.state_dict()
-        if self.mel_sidechannel:
+        if self.regularized_heads or self.mel_sidechannel:
             payload["acoustic_dim"] = self.acoustic_dim
             payload["n_mels"] = self.n_mels
-            payload["mel_norm"] = self.mel_norm.state_dict()
-            payload["mel_proj"] = self.mel_proj.state_dict()
+            payload["mel_n_fft"] = self.mel_n_fft
+            payload["lowband_dim"] = self.lowband_dim
+            # One state dict for the whole side-channel. Legacy checkpoints
+            # instead carry separate "mel_norm"/"mel_proj" keys (and implicitly
+            # mel_n_fft=400, lowband_dim=0) — load_from_dir accepts both.
+            payload["sidechannel"] = self.sidechannel.state_dict()
         if mode == "factorized":
             payload["feature_head"] = self.feature_head.state_dict()
             payload["feature_table"] = self.feature_table.cpu()
@@ -696,11 +790,13 @@ class FactorizedCTCModel(nn.Module):
         reg_kwargs = {}
         if regularized:
             reg_kwargs["head_base_dim"] = heads["head_base_dim"]
+        if regularized or mel_sidechannel:
             reg_kwargs["acoustic_dim"] = heads["acoustic_dim"]
             reg_kwargs["n_mels"] = heads["n_mels"]
-        if mel_sidechannel:
-            reg_kwargs["acoustic_dim"] = heads["acoustic_dim"]
-            reg_kwargs["n_mels"] = heads["n_mels"]
+            # Legacy checkpoints (pre low-band channel) carry neither key:
+            # they were all built at n_fft=400 with no low band.
+            reg_kwargs["mel_n_fft"] = heads.get("mel_n_fft", 400)
+            reg_kwargs["lowband_dim"] = heads.get("lowband_dim", 0)
         model = cls(
             model_name=str(load_dir),
             vocab_size=heads["vocab_size"],
@@ -718,12 +814,14 @@ class FactorizedCTCModel(nn.Module):
         )
         if regularized:
             model.layer_weights.data.copy_(heads["layer_weights"])
-            model.mel_norm.load_state_dict(heads["mel_norm"])
-            model.mel_proj.load_state_dict(heads["mel_proj"])
             model.shared_base.load_state_dict(heads["shared_base"])
-        if mel_sidechannel:
-            model.mel_norm.load_state_dict(heads["mel_norm"])
-            model.mel_proj.load_state_dict(heads["mel_proj"])
+        if regularized or mel_sidechannel:
+            if "sidechannel" in heads:
+                model.sidechannel.load_state_dict(heads["sidechannel"])
+            else:
+                # Legacy layout: separate norm/proj state dicts, no low band.
+                model.sidechannel.mel_norm.load_state_dict(heads["mel_norm"])
+                model.sidechannel.mel_proj.load_state_dict(heads["mel_proj"])
         model.nonblank_head.load_state_dict(heads["nonblank_head"])
         model.stress_head.load_state_dict(heads["stress_head"])
         for name, state in heads.get("language_heads", {}).items():
@@ -755,13 +853,11 @@ class FactorizedCTCModel(nn.Module):
         # particular should adapt fast.
         if self.regularized_heads:
             yield self.layer_weights
-            yield from self.mel_norm.parameters()
-            yield from self.mel_proj.parameters()
             yield from self.shared_base.parameters()
-        if self.mel_sidechannel:
-            # The side-channel mel projection trains from scratch at head LR too.
-            yield from self.mel_norm.parameters()
-            yield from self.mel_proj.parameters()
+        if self.regularized_heads or self.mel_sidechannel:
+            # The side-channel projections train from scratch at head LR too.
+            # (The spectrogram transforms hold only buffers, no parameters.)
+            yield from self.sidechannel.parameters()
 
     def backbone_parameters(self):
         yield from self.backbone.parameters()

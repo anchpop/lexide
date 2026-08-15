@@ -175,10 +175,25 @@ class StressDataset(Dataset):
                 if accent is None:
                     pitch_accent_seq.append(0)  # not a mora-bearing phone
                 elif isinstance(accent, dict):
-                    mora = int(accent["mora"])
-                    nucleus = int(accent["nucleus"])
-                    # 1 = mora without nucleus; 2 = accent nucleus/downstep.
-                    pitch_accent_seq.append(2 if nucleus > 0 and mora == nucleus else 1)
+                    # The target is the mora's realized pitch level, not the
+                    # position of the accent nucleus. Every mora then carries a
+                    # contrastive label that is decidable from the frames it
+                    # occupies, instead of one phrase in N carrying a single
+                    # positive whose acoustic evidence (the fall) lands on the
+                    # *following* mora. See tokyo_pitch_level in
+                    # scripts/build_external_phoneme_sidecars.py.
+                    if "level" not in accent:
+                        raise ValueError(
+                            f"{phonemes_path}:{rec['file']}: pitch_accent entries "
+                            f"predate the H/L retarget (no 'level'); rebuild the "
+                            f"sidecar with scripts/build_external_phoneme_sidecars.py"
+                        )
+                    level = int(accent["level"])
+                    if level not in (0, 1):
+                        raise ValueError(
+                            f"{phonemes_path}:{rec['file']}: invalid pitch level {level}"
+                        )
+                    pitch_accent_seq.append(1 + level)  # 1 = low, 2 = high
                 else:
                     accent = int(accent)
                     if accent not in (0, 1, 2):
@@ -274,7 +289,8 @@ def collate_fn_augment(batch):
 
 
 def make_train_collate(degrade_prob: float | None = None, keep_clean: bool = False,
-                       pad_audio_multiple: int | None = None):
+                       pad_audio_multiple: int | None = None,
+                       noise_dir: Path | None = None):
     """Training collate carrying the audio-degradation probability explicitly.
 
     Returns a picklable functools.partial (module-level _collate + simple args),
@@ -290,7 +306,8 @@ def make_train_collate(degrade_prob: float | None = None, keep_clean: bool = Fal
     per-frame KD aligned.
     """
     return partial(_collate, augment=True, degrade_prob=degrade_prob,
-                   keep_clean=keep_clean, pad_audio_multiple=pad_audio_multiple)
+                   keep_clean=keep_clean, pad_audio_multiple=pad_audio_multiple,
+                   noise_dir=noise_dir)
 
 
 def _match_vad_length(vad: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -355,7 +372,103 @@ def _colored_noise(n: int, rng) -> torch.Tensor:
     return x / x.std().clamp_min(1e-9)
 
 
-def degrade_waveform(audio: torch.Tensor, sr: int = 16000, rng=random) -> torch.Tensor:
+class NoisePool:
+    """Random crops from a directory of real noise recordings (16 kHz mono).
+
+    Layout mirrors MUSAN's categories: ``<root>/{music,noise,speech}/**/*.wav``
+    (populated by ``data/download_noise.py``). Built lazily per process —
+    DataLoader workers each construct their own on first use, so only the root
+    path has to travel through make_train_collate's picklable partial.
+    """
+
+    def __init__(self, root: Path):
+        self.files = {
+            kind: sorted((root / kind).rglob("*.wav")) if (root / kind).is_dir() else []
+            for kind in ("music", "noise", "speech")
+        }
+
+    def has(self, kind: str) -> bool:
+        return bool(self.files[kind])
+
+    def crop(self, kind: str, n: int, rng=random) -> torch.Tensor:
+        """An n-sample crop at a random offset of a random file (tiled if short)."""
+        path = rng.choice(self.files[kind])
+        frames = sf.info(str(path)).frames
+        if frames > n:
+            start = rng.randrange(frames - n)
+            data, _ = sf.read(str(path), start=start, stop=start + n, dtype="float32")
+        else:
+            data, _ = sf.read(str(path), dtype="float32")
+        x = torch.from_numpy(data)
+        if x.ndim > 1:
+            x = x.mean(dim=1)
+        if x.shape[0] < n:
+            x = x.repeat(-(-n // x.shape[0]))[:n]
+        return x
+
+
+_NOISE_POOL_CACHE: dict[str, NoisePool | None] = {}
+
+
+def _get_noise_pool(noise_dir: Path | None) -> NoisePool | None:
+    """Per-process pool cache; None when the dir is absent or holds no wavs
+    (degradation then falls back to synthetic noise only)."""
+    if noise_dir is None:
+        return None
+    key = str(noise_dir)
+    if key not in _NOISE_POOL_CACHE:
+        pool = NoisePool(Path(noise_dir))
+        _NOISE_POOL_CACHE[key] = pool if any(map(pool.has, pool.files)) else None
+    return _NOISE_POOL_CACHE[key]
+
+
+def _sample_additive_noise(n: int, rng, pool: NoisePool | None):
+    """Pick the additive-noise source; returns (unit-RMS noise, snr_db) or None.
+
+    Real music/babble are the sources colored noise cannot imitate: they carry
+    their own periodicity in the speech-F0 range, so the loudest pitch in a
+    frame is no longer always the speaker's. The accent/tone labels stay true —
+    the model must learn to bind pitch to the speech source, not to the frame's
+    dominant periodicity. SNR floors are gentler than hiss's because structured
+    maskers are more disruptive per dB, and babble's is gentlest of all: it is
+    the only noise type containing competing phonemes.
+    """
+    roll = rng.random()
+    noise, snr_db = None, 0.0
+    if pool is not None and roll < 0.25 and pool.has("music"):
+        noise, snr_db = pool.crop("music", n, rng), rng.uniform(5, 20)
+    elif pool is not None and roll < 0.40 and pool.has("speech"):
+        # Babble: several speakers summed — spectrally speech, linguistically mush.
+        crops = [pool.crop("speech", n, rng) for _ in range(rng.randint(4, 6))]
+        noise = sum(c / c.pow(2).mean().sqrt().clamp_min(1e-9) for c in crops)
+        snr_db = rng.uniform(8, 20)
+    elif pool is not None and roll < 0.55 and pool.has("noise"):
+        # Real ambience/effects (traffic, wind, machinery, crowds).
+        noise, snr_db = pool.crop("noise", n, rng), rng.uniform(3, 25)
+    if noise is None:
+        noise, snr_db = _colored_noise(n, rng), rng.uniform(3, 30)
+    rms = noise.pow(2).mean().sqrt()
+    if rms < 1e-5:
+        return None  # a silent crop cannot be scaled to a target SNR
+    return noise / rms, snr_db
+
+
+def _mains_hum(n: int, sr: int, rng) -> torch.Tensor:
+    """50/60 Hz mains hum + first harmonics, unit RMS. The harmonics at
+    100–240 Hz sit inside the model's 62.5–600 Hz low-band channel, right on
+    top of male F0 — the exact interference the pitch factors must see through."""
+    base = rng.choice([50.0, 60.0])
+    t = torch.arange(n, dtype=torch.float32) / sr
+    hum = torch.zeros(n)
+    for k in range(1, 5):
+        hum += (rng.uniform(0.2, 1.0) / k) * torch.sin(
+            2 * torch.pi * base * k * t + rng.uniform(0, 2 * torch.pi)
+        )
+    return hum / hum.pow(2).mean().sqrt().clamp_min(1e-9)
+
+
+def degrade_waveform(audio: torch.Tensor, sr: int = 16000, rng=random,
+                     noise_pool: NoisePool | None = None) -> torch.Tensor:
     """Apply a random subset of identity-preserving, length-preserving corruptions."""
     import torchaudio.functional as AF
     n = audio.shape[0]
@@ -380,12 +493,24 @@ def degrade_waveform(audio: torch.Tensor, sr: int = 16000, rng=random) -> torch.
     if rng.random() < 0.3:
         x = AF.equalizer_biquad(x, sr, rng.uniform(500, 4000),
                                 gain=rng.uniform(-9, 9), Q=rng.uniform(0.5, 2.0))
-    # additive colored noise at a random SNR
+    # band-stop notches: dead resonances of a cheap mic or an untreated room.
+    # Narrow (Q 1-4), so no label's spectral evidence is wholly removed.
+    if rng.random() < 0.15:
+        for _ in range(rng.randint(1, 2)):
+            x = AF.bandreject_biquad(x, sr, rng.uniform(300, 4000),
+                                     Q=rng.uniform(1.0, 4.0))
+    # additive noise at a random SNR: colored hiss, or — when the MUSAN pool
+    # is staged — real music / babble / ambience (see _sample_additive_noise).
     if rng.random() < 0.8:
-        snr_db = rng.uniform(3, 30)
-        noise = _colored_noise(n, rng)
+        sampled = _sample_additive_noise(n, rng, noise_pool)
+        if sampled is not None:
+            noise, snr_db = sampled
+            sig = x.pow(2).mean().clamp_min(1e-12).sqrt()
+            x = x + noise * (sig / (10.0 ** (snr_db / 20.0)))
+    # mains hum: electrical, so added after the mic-response ops
+    if rng.random() < 0.15:
         sig = x.pow(2).mean().clamp_min(1e-12).sqrt()
-        x = x + noise * (sig / (10.0 ** (snr_db / 20.0)))
+        x = x + _mains_hum(n, sr, rng) * (sig / (10.0 ** (rng.uniform(15, 35) / 20.0)))
     # clipping/saturation from a too-hot mic
     if rng.random() < 0.2:
         thr = x.abs().max().clamp_min(1e-6) * rng.uniform(0.3, 0.8)
@@ -395,7 +520,8 @@ def degrade_waveform(audio: torch.Tensor, sr: int = 16000, rng=random) -> torch.
 
 
 def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
-             keep_clean: bool = False, pad_audio_multiple: int | None = None):
+             keep_clean: bool = False, pad_audio_multiple: int | None = None,
+             noise_dir: Path | None = None):
     sr = 16000
     augmented = []
     for item in batch:
@@ -437,7 +563,8 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
             if degrade_prob is not None and random.random() < degrade_prob:
                 # Degrade the whole padded clip → reverb tail + noise floor cover
                 # the silence too (realistic). Length-preserving, so VAD stays aligned.
-                audio = degrade_waveform(audio, sr)
+                audio = degrade_waveform(audio, sr,
+                                         noise_pool=_get_noise_pool(noise_dir))
             else:
                 # Clean-ish path (also the ~1-prob fraction that stays clean so
                 # studio-quality performance like Jean-Cavard isn't lost).

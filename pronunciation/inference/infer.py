@@ -88,6 +88,15 @@ def transcribe(
     # mel_norm largely absorbs it, but feeding raw removes the dependence.)
     # The plain wav2vec2 path keeps processor() — its GroupNorm encoder is
     # scale-robust, so the published champion is unaffected.
+    #
+    # The side-channel transforms (mel bank + optional low-band spectrogram)
+    # run INSIDE model.forward — including the symmetric pre-padding that
+    # center-aligns analysis windows wider than wav2vec2's 400-sample
+    # receptive field with the encoder's frames (see AcousticSidechannel in
+    # train/src/factorized_ctc.py). Call sites must NOT pad, window, or
+    # otherwise pre-process the waveform to "help" the side-channel: feeding
+    # the raw 16 kHz signal is both necessary and sufficient, and any caller
+    # padding would double-shift the alignment.
     _needs_raw = (
         getattr(model.backbone.config, "model_type", "") == "cohere_conformer_ctc"
         or getattr(model, "mel_sidechannel", False)

@@ -704,9 +704,9 @@ def main():
                         help="Bundle of head-regularization tweaks: (1) K=5 learned softmax "
                              "mixtures over ALL encoder hidden states (49 for XLS-R 2B), each "
                              "concatenated along the feature axis — model picks its own 5 "
-                             "depth views; (2) log-mel acoustic side-channel projected to 64 "
-                             "dims and concatenated, giving heads direct waveform-derived "
-                             "signal; (3) shared Linear(K*H+64, 768)→GELU→Dropout base feeding "
+                             "depth views; (2) acoustic side-channel (see --mel-n-fft/"
+                             "--lowband-dim) projected and concatenated, giving heads direct "
+                             "waveform-derived signal; (3) shared Linear→GELU→Dropout base feeding "
                              "all four heads, so phoneme and feature heads share a learned "
                              "projection (they predict overlapping information by construction).")
     parser.add_argument("--mel-sidechannel", action=argparse.BooleanOptionalAction,
@@ -716,6 +716,27 @@ def main():
                              "the regularized-heads acoustic channel WITHOUT the K-layer "
                              "mixture (which empirically collapsed to L48+L0). Gives heads "
                              "the low-level acoustic the final layer abstracts away.")
+    parser.add_argument("--n-mels", type=int, default=128,
+                        help="Mel filters in the acoustic side-channel. Default raised "
+                             "80→128 alongside --mel-n-fft 400→1024 so the low-end filter "
+                             "spacing (~14 Hz) matches the finer FFT resolution instead of "
+                             "smearing over it. (The published champion used 80.)")
+    parser.add_argument("--acoustic-dim", type=int, default=128,
+                        help="Projection width of the side-channel's mel bank. The total "
+                             "side-channel width is acoustic_dim + lowband_dim. "
+                             "(The published champion used 64.)")
+    parser.add_argument("--mel-n-fft", type=int, default=1024,
+                        help="FFT/window size of the side-channel mel bank. Default raised "
+                             "400→1024 (25→64 ms, 40→15.6 Hz bins) so pitch movement is "
+                             "resolvable for the accent/tone factor heads — at n_fft=400 a "
+                             "2-semitone move at 200 Hz (~24 Hz) is sub-bin. Windows wider "
+                             "than wav2vec2's 400-sample receptive field are center-aligned "
+                             "to its frames via symmetric pre-padding (see AcousticSidechannel).")
+    parser.add_argument("--lowband-dim", type=int, default=64,
+                        help="Projection width of the low-band linear-spectrogram channel "
+                             "(2048-point FFT, 62.5–601.6 Hz — F0 and its movement at "
+                             "sub-semitone resolution, for the pitch-accent/tone heads). "
+                             "0 disables it (the published champion had none).")
     parser.add_argument("--mlp-heads", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Make the nonblank + phoneme heads 2-layer MLPs "
@@ -723,9 +744,12 @@ def main():
                              "'bigger head' on top of the 2B encoder.")
     parser.add_argument("--audio-degrade", action=argparse.BooleanOptionalAction,
                         default=True,
-                        help="Training-time audio degradation augmentation (noise/reverb/"
-                             "band-limit/clip/EQ, identity- and length-preserving). For "
-                             "noise-robustness of the mel side-channel — see dataset.degrade_waveform.")
+                        help="Training-time audio degradation augmentation (noise/music/"
+                             "babble/hum/reverb/band-limit/notch/clip/EQ, identity- and "
+                             "length-preserving). For noise-robustness of the acoustic "
+                             "side-channel — see dataset.degrade_waveform. Music/babble/"
+                             "ambience need the MUSAN pool at <data-dir>/_noise "
+                             "(data/download_noise.py); without it, synthetic noise only.")
     parser.add_argument("--audio-degrade-prob", type=float, default=0.6,
                         help="Per-clip probability of applying audio degradation "
                              "(the rest stay clean so studio-quality perf is preserved).")
@@ -991,6 +1015,10 @@ def main():
             feature_emission_weight=args.feature_emission_weight if args.use_aux_features else 0.0,
             mel_sidechannel=args.mel_sidechannel,
             mlp_heads=args.mlp_heads,
+            n_mels=args.n_mels,
+            acoustic_dim=args.acoustic_dim,
+            mel_n_fft=args.mel_n_fft,
+            lowband_dim=args.lowband_dim,
         ).to(device)
 
     if args.gradient_checkpointing:
@@ -1250,13 +1278,20 @@ def main():
     # When distilling, ship each clip's clean (pre-degrade) companion so the
     # teacher transcribes clean while the student sees the degraded `audio`.
     keep_clean = teacher is not None and args.distill_weight > 0
+    # Real-noise pool for degradation (MUSAN subset staged by
+    # data/download_noise.py; rides along in the dataset tar). Missing dir →
+    # synthetic-noise-only degradation, exactly the pre-pool behavior.
+    noise_dir = args.data_dir / "_noise"
     train_collate = make_train_collate(
         degrade_prob,
         keep_clean=keep_clean,
         pad_audio_multiple=args.pad_audio_multiple,
+        noise_dir=noise_dir if degrade_prob is not None else None,
     )
     if args.audio_degrade:
-        print(f"Audio degradation augmentation ON (per-clip prob={args.audio_degrade_prob})")
+        pool_state = "found" if noise_dir.is_dir() else "MISSING (synthetic noise only)"
+        print(f"Audio degradation augmentation ON (per-clip prob={args.audio_degrade_prob}, "
+              f"real-noise pool {pool_state} at {noise_dir})")
     if keep_clean:
         print("Distillation: teacher reads the clean companion clip "
               f"({'degraded' if degrade_prob else 'same'} clip to student).")
