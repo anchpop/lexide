@@ -68,6 +68,20 @@ These are hard-won and override generic ML instincts. Violating them has burned 
    and alignment as the phone. Tone/accent factors follow the same rule and are
    masked when the language or trustworthy label does not apply.
 
+8. **A prosody target must be decidable from the frames it sits on.** Japanese
+   pitch accent was first encoded as a *downstep marker* — one positive mora per
+   accent phrase — and the head learned nothing but the prior (emitted the
+   17%/83% base rate; gave 箸 and 橋 the same contour). Three things were wrong
+   and each generalizes: the positive class was rare and the classes wildly
+   unbalanced; the acoustic evidence for a downstep is the fall onto the
+   *following* mora, so the label sat one mora away from its own cue; and for a
+   phrase-final accent that cue is not in the clip at all. The fix is a per-mora
+   **H/L level** (`tokyo_pitch_level`): balanced (52/48), dense, and local. It
+   also makes odaka and heiban share a contour — correct, because in isolation
+   they *are* the same, and the encoding must not assert a distinction the audio
+   cannot carry. Contrast the tone heads, which always had this shape (every
+   syllable carries a contrastive, intrasyllabic tone) and did learn.
+
 ## Architecture
 
 - **Model** (`train/src/factorized_ctc.py`): `facebook/wav2vec2-xls-r-2b` backbone +
@@ -95,14 +109,37 @@ These are hard-won and override generic ML instincts. Violating them has burned 
 
 1. **Acquire** (`data/`): `download_fleurs.py` (read sentences, multi-speaker),
    `download_tatoeba.py` (community), `download_pimsleur.py` (course audio, VAD-split +
-   Whisper-transcribed), `generate_tts.py` (Google Chirp3-HD voices). Each lang dir
-   gets a `manifest.jsonl` (file, sentence, source, voice, …).
+   Whisper-transcribed), `generate_tts.py --backend {chirp3,gemini}` (Google
+   Chirp3-HD voices, or Gemini `gemini-3.1-flash-tts-preview` with its ~29
+   prebuilt voices). Each lang dir gets a `manifest.jsonl` (file, sentence,
+   source, voice, …). Both backends write `source: "tts"`; Gemini rows also
+   carry `tts_backend`/`tts_model`. `--sentence-offset` takes a deeper slice of
+   the same seeded shuffle so a second backend records text the first did not.
+   All 11 configured languages now have TTS (jpn/tha/zho-hans/hin were added
+   2026-08-09; before that the four expansion languages had none, which is a
+   large part of why the Japanese pitch-accent head never learned).
+   **TTS buys correct text; its prosody is usable but errs decisively.**
+   Measured against F0 on Japanese pitch accent: per labelled pitch transition
+   TTS moves the right way about as often as human speech (66.7% Chirp3 /
+   63.9% Gemini vs 68.3% Pimsleur) and produces the *largest* excursions in the
+   corpus (median |move| 3.9 st vs Pimsleur's 2.6) — so it is not flattening
+   accent, and it mostly knows the accent. But it contradicts more (15–16% vs
+   9.5%), partly a threshold effect: a big wrong-direction move clears the
+   contradiction bar where a human's smaller error lands in the abstain band.
+   At clip level that compounds to ~31% of TTS clips rejected vs 14% of
+   Pimsleur. Net: keep TTS accent supervision, but gate it through the acoustic
+   audit rather than trusting it — and beware that the surviving clips are a
+   *selected* sample, so check for pattern bias before leaning on them. Nobody
+   has measured the equivalent for Thai/Mandarin tone.
 2. **Preprocess** (`train/scripts/preprocess.py`): espeak-phonemize every sentence →
    `phonemes.jsonl`; framewise VAD via the `vad_compute` Rust binary (`vad_compare/`).
    Includes a silence guard, per-language phoneme remaps, and the vocab extensions.
 3. **Data-quality filters** → sidecar exclusion files the trainer reads:
-   - `scripts/audit_asr_groq.py --source {fleurs,tatoeba}`: Groq-Whisper transcribe +
-     phoneme-PER vs the label → `train/<source>_asr_exclusions.jsonl`.
+   - `scripts/audit_asr_groq.py --source {fleurs,tatoeba,tts}`: Groq-Whisper transcribe +
+     phoneme-PER vs the label → `train/<source>_asr_exclusions.jsonl`. Run it on
+     `tts` too: the Gemini backend is an LLM reading text, so unlike Chirp3 it
+     *can* paraphrase or decline, and this is what catches a clip whose audio
+     stopped matching its label. (Spot-checked 12/12 verbatim at introduction.)
    - `train/lang-filter/` (Rust + tysm + gpt-5.4-nano): flag clips whose transcript
      isn't entirely the target language → `train/lang_exclusions.jsonl`.
    - `train/relabel-french/`: LLM rhythmic-group stress → `fra/stress_overrides.jsonl`.
@@ -115,6 +152,10 @@ These are hard-won and override generic ML instincts. Violating them has burned 
    (`--mode acoustic`, per-token harmonic-A1–P0 within-speaker gating). Train with
    `--use-narrowed [--narrowed-name <file>]`. (See `espeak_audit/` docstrings;
    contextual-vs-acoustic nasal is an open A/B, decided by the minimal-pair eval.)
+   `pitch_accent_audit.py` is the same shape for Japanese accent: `measure`
+   (Modal align + local parselmouth F0) then `verdict` (thresholds → 
+   `train/jpn_pitch_accent_exclusions.jsonl`, which `preprocess.py` reads and
+   uses to withhold the accent factor while keeping the phones).
 5. **Train** (`train/src/train_unified.py`) on SkyPilot/Modal GPUs; push to HF.
 6. **Eval**: the isolated minimal-pair set (gold standard) + held-out clips.
 
@@ -133,7 +174,12 @@ tokens — a silent coverage hole that *looks* like the analysis working):
 - **Tatoeba** — `voice` is the **contributor username** (e.g. `CK`,
   `MisterTrouser`); a real, ground-truth speaker id. Prolific contributors have
   hundreds of clips → strong baselines. No clustering needed.
-- **TTS** — `voice` is the synthetic voice name (one speaker per language).
+- **TTS** — `voice` is the synthetic voice name. *Not* one speaker per
+  language: each language draws from all ~30 Chirp3-HD voices (~270 clips
+  each). Gemini voice names are **not** language-scoped — the same "Kore"
+  speaks every language — so those rows record `gemini:<lang>:<Voice>`,
+  keeping the speaker key language-separated. Splitting one speaker is
+  harmless; merging two corrupts within-speaker normalization.
 - **FLEURS / Pimsleur** — `voice` is **null**; instead they carry
   `speaker_cluster`, a *pseudo-speaker* label from the embedding pipeline below.
 
@@ -162,7 +208,7 @@ preprocess phase; populates `speaker_cluster` for the `voice=null` sources):
   `lang-filter`/`relabel-french`/`speaker-embed` crates, exclusion sidecars.
 - `espeak_audit/` — the acoustics-as-arbiter pipeline: `phonetics.py` (parselmouth
   measures), `modal_aligner.py` (Modal forced-align+measure), `measure_corpus.py`,
-  `narrow.py`, `nasal_acoustic.py`, REPORT*.md.
+  `narrow.py`, `nasal_acoustic.py`, `pitch_accent_audit.py`, REPORT*.md.
 - `vad_compare/` — Rust `vad_compute` (framewise VAD).
 - `inference/` — `infer.py`.
 - `scripts/` — orchestration + one-off audits/backfills.
@@ -171,17 +217,53 @@ preprocess phase; populates `speaker_cluster` for the `voice=null` sources):
 
 - **espeak**: use the maintainer's fork at `~/coding/tmp/espeak-ng` (binary
   `build/src/espeak-ng`, `--path=build`). **Never install mainline espeak.** Point at
-  it via `ESPEAK_NG_BIN` / `ESPEAK_NG_DATA_PATH` (in `.env`).
-- **Python**: use the miniconda base interpreter
-  (`/opt/homebrew/Caskroom/miniconda/base/bin/python3`) — it has parselmouth / modal /
-  torch / soundfile. Bare `python3` is a different env missing these.
+  it via `ESPEAK_NG_BIN` / `ESPEAK_NG_DATA_PATH` (in `.env`, which is gitignored
+  and therefore per-machine — each host points at its own build).
+  - The corpus labels come from branch **`french-phrase-stress-liaison`**
+    (github.com/anchpop/espeak-ng), not `master`. It carries the French
+    phrase-final stress/liaison work, the fr/de/ru modal-surface fixes and the
+    Portuguese final-nasal endings. Building `master` instead silently changes
+    de and pt labels. Build with CMake: `cmake -B build -DCMAKE_BUILD_TYPE=Release
+    && cmake --build build` (on NixOS, inside `nix-shell -p cmake gnumake gcc pkg-config`).
+  - **Verify any new espeak build before regenerating labels.** Re-phonemize a
+    few hundred rows of the existing `phonemes.jsonl` and require byte-identical
+    output. Do it through the whole path — `phonemize()` *then* the vocab/remap
+    step, using each row's own `espeak_voice` — or you will "find" differences
+    that are really `LANG_PHONEME_REMAP` (ita `ɪ ʊ`→`i u`, fra length marks)
+    and the FLEURS per-clip dialect voices.
+  - *Known drift, 2026-08-10*: at branch `7e9e992` six languages reproduce the
+    corpus exactly, but **Russian does not** — upstream now emits `y` for `ɨ`
+    and `ɭ` for `ɫ`/`ɫʲ`. Both look wrong for Russian (`y` is front *rounded*,
+    ы is central unrounded; hard /l/ is velarized `ɫ`, not retroflex `ɭ`), and
+    `ɭ` isn't in the vocab. Regenerating rus would also break the ASR
+    exclusions, which are keyed by target hash — changed labels stop matching
+    and filtered clips silently re-enter training. rus was left un-regenerated.
+- **Python**:
+  - *macOS*: the miniconda base interpreter
+    (`/opt/homebrew/Caskroom/miniconda/base/bin/python3`) — it has parselmouth /
+    modal / torch / soundfile. Bare `python3` is a different env missing these.
+  - *the NixOS box*: `scripts/py-linux.sh` (venv at `~/.venv-lexide-data`, kept
+    outside the repo so SkyPilot rsync mounts never pick it up). The wrapper
+    exists because manylinux wheels link against libstdc++/libz, which NixOS
+    does not put on the default loader path; it resolves those through `nix
+    build` and sets `LD_LIBRARY_PATH`. Without it every C-extension import dies
+    with `libstdc++.so.6: cannot open shared object file`. Its header documents
+    the one-time venv setup.
 - **Ignoring generated data**: large generated files (`phonemes.jsonl`,
   `phonemes_narrowed.jsonl`, caches) are git-ignored via **`.git/info/exclude`, NOT
   `.gitignore`** — SkyPilot `file_mounts` silently respect `.gitignore`, so a tracked
   ignore would stop the training data from uploading. Match the existing pattern.
 - **Modal**: jobs (aligner, speaker-embed, allosaurus) scale to zero when idle
   (`deployed, Tasks 0` = normal/free, not down). Warm containers serve old code for
-  ~300s after redeploy — `modal app stop <app>` before relying on new code. Pin model
+  ~300s after redeploy — `modal app stop <app>` before relying on new code. Any app
+  pulling `lexide-pronunciation-unified-vad-clean` (it is **private**) must pass
+  `secrets=[modal.Secret.from_name("huggingface-secret")]` on *both* the image
+  build and the `@app.cls` — the secret supplies `HF_TOKEN`, which
+  `huggingface_hub` picks up on its own. The aligner silently lacked this from
+  the day the repo went private: `from_pretrained` 401s inside `@modal.enter`,
+  the container never becomes ready, and callers just **hang** with no error
+  (fixed 2026-08-09). If a Modal call hangs, read `modal app logs <app>` before
+  suspecting the client. Pin model
   commits in Modal code so cache namespaces can't silently drift.
 - **Secrets** (`.env`): `GROQ_API_KEY`, `OPENAI_API_KEY`, `HF_TOKEN`, espeak paths.
   `HF_TOKEN` lives in the *parent* `../.env`. (A stale quoted `GROQ_API_KEY` may shadow

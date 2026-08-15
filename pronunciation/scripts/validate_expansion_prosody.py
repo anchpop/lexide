@@ -46,15 +46,27 @@ def check_mandarin() -> None:
 
 
 def check_japanese() -> None:
-    # Tokyo Japanese /haɕi/: initial-accent, final-accent, and heiban.
-    expected = {"箸": 1, "橋": 2, "端": 0}
-    for word, nucleus in expected.items():
+    # Tokyo Japanese /haɕi/: initial-accent, final-accent, and heiban. This is
+    # the minimal pair the accent factor exists to separate, so pin both the
+    # nucleus the frontend reports and the per-mora contour we train on.
+    #
+    # 橋 (odaka) and 端 (heiban) share a contour on purpose: spoken in
+    # isolation they *are* the same, and they diverge only on the particle
+    # that follows. Asserting that keeps anyone from "fixing" the encoding
+    # into claiming a distinction this audio cannot carry.
+    expected = {
+        "箸": (1, [1, 0]),   # HL — accented on mora 1
+        "橋": (2, [0, 1]),   # LH — accented on mora 2, falls onto the particle
+        "端": (0, [0, 1]),   # LH — heiban, no fall at all
+    }
+    for word, (nucleus, levels) in expected.items():
         output = _pyopenjtalk(word)
         labels = japanese_labels(fake_record(word), {"output": output})
-        observed = {
-            item["nucleus"] for item in labels["pitch_accent"] if item is not None
-        }
+        borne = [item for item in labels["pitch_accent"] if item is not None]
+        observed = {item["nucleus"] for item in borne}
         assert observed == {nucleus}, (word, observed)
+        assert [item["level"] for item in borne] == levels, (word, borne)
+        assert [item["mora"] for item in borne] == [1, 2], (word, borne)
 
 
 def check_hindi() -> None:

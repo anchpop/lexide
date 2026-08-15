@@ -506,6 +506,25 @@ def ensure_backend_sidecar(lang: str, data_dir: Path) -> Path:
     return build_external_phoneme_sidecars.build_sidecar(lang, data_root=data_dir)
 
 
+def load_accent_exclusions(path: Path) -> dict[str, str]:
+    """Clips whose measured F0 contradicts their citation pitch accent.
+
+    Written by espeak_audit/pitch_accent_audit.py. The phones are unaffected —
+    only the accent factor is withheld, so the clip still trains everything
+    else. Absent file means no acoustic pass has been run yet.
+    """
+    if not path.exists():
+        return {}
+    excluded = {}
+    with path.open() as f:
+        for line in f:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            excluded[rec["file"]] = rec.get("reason", "f0_contradicts_citation_accent")
+    return excluded
+
+
 def parse_phoneme_backend_args(values: list[str] | None) -> dict[str, Path]:
     """Parse repeatable LANG=JSONL command-line values."""
     result: dict[str, Path] = {}
@@ -818,6 +837,16 @@ def main():
             print(f"{lang}: using external phoneme backend {backend_path} "
                   f"({len(backend_records)} rows)")
 
+        # Acoustics get the last word on the accent factor: the sidecar's
+        # accent is what the dictionary says, and this file lists the clips
+        # where measured F0 says otherwise.
+        accent_exclusions = load_accent_exclusions(
+            Path(__file__).resolve().parents[1] / f"{lang}_pitch_accent_exclusions.jsonl"
+        )
+        if accent_exclusions:
+            print(f"{lang}: withholding pitch accent on {len(accent_exclusions)} "
+                  f"clips the acoustic audit rejected")
+
         # Load rhythmic-group sidecar for override languages. Missing sidecar
         # just means no overrides apply — espeak stress is used as-is.
         stress_overrides: dict[str, list[str]] = {}
@@ -920,6 +949,10 @@ def main():
                 ):
                     if k in backend_rec:
                         entry[k] = backend_rec[k]
+                acoustic_reason = accent_exclusions.get(rec["file"])
+                if acoustic_reason is not None:
+                    entry.pop("pitch_accent", None)
+                    entry["pitch_accent_exclude_reason"] = acoustic_reason
             # Propagate Whisper signal fields from the manifest. Only
             # present for Pimsleur (extracted with download_pimsleur.py).
             # FLEURS / Tatoeba rows lack these and pass them through as None.

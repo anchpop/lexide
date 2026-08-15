@@ -24,6 +24,14 @@ MODEL_ID = "anchpop/lexide-pronunciation-unified-vad-clean"
 # cache key knowing). Bumping vad-clean = bump this SHA = a fresh cache namespace.
 MODEL_REVISION = "2926e06f8092935f597e0018beb5d579b95b889a"
 
+# MODEL_ID is a PRIVATE repo (vad-clean is retained privately as the
+# distillation teacher), so both the image build and the running container need
+# an HF token. The `huggingface-secret` Modal secret supplies HF_TOKEN, which
+# huggingface_hub picks up on its own. Without it the container 401s inside
+# `Wav2Vec2Processor.from_pretrained` at @modal.enter time and every align call
+# hangs until it times out.
+hf_secret = modal.Secret.from_name("huggingface-secret")
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -39,7 +47,8 @@ image = (
         "from huggingface_hub import hf_hub_download; "
         f"Wav2Vec2Processor.from_pretrained('{MODEL_ID}', revision='{MODEL_REVISION}'); "
         f"Wav2Vec2Model.from_pretrained('{MODEL_ID}', revision='{MODEL_REVISION}'); "
-        f"hf_hub_download('{MODEL_ID}', 'factorized_heads.pt', revision='{MODEL_REVISION}')\""
+        f"hf_hub_download('{MODEL_ID}', 'factorized_heads.pt', revision='{MODEL_REVISION}')\"",
+        secrets=[hf_secret],
     )
     # The measurement code (phonetics.py) ships into the container so it runs
     # identically here and locally.
@@ -50,6 +59,7 @@ image = (
 @app.cls(
     gpu="T4",
     image=image,
+    secrets=[hf_secret],
     scaledown_window=300,
     timeout=900,
     enable_memory_snapshot=True,

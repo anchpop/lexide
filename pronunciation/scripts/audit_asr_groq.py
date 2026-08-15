@@ -310,8 +310,13 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", required=True, choices=["fleurs", "tatoeba", "kathbath"],
-                        help="Which manifest source to audit (selects default --out too).")
+    parser.add_argument("--source", required=True,
+                        choices=["fleurs", "tatoeba", "kathbath", "tts"],
+                        help="Which manifest source to audit (selects default --out too). "
+                             "`tts` matters for the Gemini backend in particular: it is "
+                             "an LLM reading text, so it can in principle paraphrase or "
+                             "decline rather than read, and the audit is what catches a "
+                             "clip whose audio stopped matching its label.")
     parser.add_argument("--audio-root", type=Path, default=Path("data/audio"))
     parser.add_argument("--out", type=Path, default=None,
                         help="Defaults to train/<source>_asr_exclusions.jsonl")

@@ -54,9 +54,79 @@ JAPANESE_PHONE_MAP = {
 }
 
 
+# Mora-bearing Japanese phones. Every mora carries a pitch target, so the
+# accent factor labels all of them — the five vowels (including the devoiced
+# I/U, whose mapped forms still start with the plain vowel letter) and the
+# moraic nasal ん, which OpenJTalk gives its own mora index. The sokuon is the
+# one mora with no segment of its own: gemination is encoded as "ː" on the
+# following consonant, so there is no token to hang a label on.
+JAPANESE_MORA_VOWELS = "aiɯeo"
+JAPANESE_MORAIC_NASAL = "ɴ"
+
+# IPADIC parts of speech that cannot begin an utterance. A clip whose first
+# content word is one of these was cut out of the middle of a longer phrase —
+# Pimsleur's backward-buildup drills ("…ません" / "…かりません" / "わかりません")
+# are full of them. The phones are still what was said; the *accent* is not,
+# because OpenJTalk computes an accent phrase for the fragment as if it were a
+# standalone word.
+JAPANESE_DEPENDENT_POS = {"助詞", "助動詞"}
+
+# Accent supervision also needs the transcript to name the right words. Pitch
+# accent is lexical, and Japanese homophones are exactly where it contrasts
+# (箸 HL vs 橋 LH), so a Whisper transcript that guessed the kanji from its
+# language-model prior yields an accent label for a word that may not have
+# been said. This bar is stricter than the corpus-wide --min-whisper-logprob
+# (-0.7) because that one only has to protect the phone labels.
+JAPANESE_ACCENT_MIN_WHISPER_LOGPROB = -0.35
+
+
 def read_jsonl(path: Path) -> list[dict]:
     with path.open() as source:
         return [json.loads(line) for line in source if line.strip()]
+
+
+def tokyo_pitch_level(mora: int, nucleus: int, phrase_moras: int) -> int:
+    """Realized pitch of one mora of a Tokyo-Japanese accent phrase: 0=L, 1=H.
+
+    Tokyo accent is fully determined by the nucleus position plus the
+    initial-lowering rule (the first mora is low unless the accent is on it,
+    because the phrase must *rise* onto mora 2):
+
+        heiban   (nucleus 0)  L H H H …          — no fall
+        atamadaka(nucleus 1)  H L L L …
+        nakadaka (nucleus a)  L H…H L L …        — falls after mora a
+        odaka    (nucleus = N) L H H…H           — falls onto the next phrase
+
+    Note odaka and heiban produce an identical in-clip contour, and that is
+    correct rather than a loss: they differ only in what happens on the
+    following particle. Encoding the nucleus position instead would force a
+    distinction the audio of this phrase does not carry, which is exactly the
+    kind of cross-clip fact the labels are not allowed to assert.
+    """
+    if phrase_moras <= 1:
+        return 1 if nucleus == 1 else 0
+    if nucleus == 1:
+        return 1 if mora == 1 else 0
+    if nucleus == 0:
+        return 0 if mora == 1 else 1
+    return 1 if 2 <= mora <= nucleus else 0
+
+
+def japanese_accent_withhold_reason(rec: dict, features: list[dict]) -> str | None:
+    """Why this row's citation accent is not usable as a training target.
+
+    Returns None when the accent labels can be trusted. The phones are
+    unaffected either way — this only withholds the accent factor.
+    """
+    first = next((f for f in features if f["pos"] != "記号" and int(f["mora_size"]) > 0), None)
+    if first is None:
+        return "japanese_accent_no_content_word"
+    if first["pos"] in JAPANESE_DEPENDENT_POS or first["pos_group1"] == "接尾":
+        return "japanese_accent_head_truncated"
+    logprob = rec.get("whisper_avg_logprob")
+    if logprob is not None and logprob < JAPANESE_ACCENT_MIN_WHISPER_LOGPROB:
+        return "japanese_accent_low_asr_confidence"
+    return None
 
 
 def thai_labels(rec: dict, audit: dict) -> dict:
@@ -278,6 +348,9 @@ def japanese_labels(rec: dict, audit: dict) -> dict:
         if not 1 <= phrase <= len(accent_phrases):
             raise ValueError(f"OpenJTalk accent-phrase mismatch in {rec['file']}")
         phrase_info = accent_phrases[phrase - 1]
+        bears_mora = (
+            mapped[:1] in JAPANESE_MORA_VOWELS or mapped == JAPANESE_MORAIC_NASAL
+        )
         pitch_accent.append({
             "phrase": phrase,
             "mora": mora,
@@ -285,8 +358,13 @@ def japanese_labels(rec: dict, audit: dict) -> dict:
             # Preserve the NJD value: unlike HTS's F field, 0 remains
             # heiban and is distinguishable from a final-mora accent.
             "nucleus": phrase_info["nucleus"],
+            # The trained target. `nucleus` is kept alongside it so the
+            # acoustic validator can reason about where the fall should be.
+            "level": tokyo_pitch_level(
+                mora, phrase_info["nucleus"], phrase_info["moras"],
+            ),
             "source": "openjtalk-citation",
-        } if mapped[:1] in "aiɯeo" else None)
+        } if bears_mora else None)
     if geminate:
         # An utterance-final sokuon with nothing after it to geminate. This is
         # real colloquial Japanese, not corrupt input — Pimsleur dialogue has
@@ -328,6 +406,13 @@ def japanese_labels(rec: dict, audit: dict) -> dict:
         # either interpretation would be invented.  Preserve partial phone
         # supervision and explicitly withhold only this factor.
         result["pitch_accent_exclude_reason"] = "njd_hts_phrase_boundary_mismatch"
+        return result
+
+    # The parse is self-consistent; the remaining question is whether the text
+    # it parsed is the whole utterance and the right words.
+    withhold = japanese_accent_withhold_reason(rec, features)
+    if withhold is not None:
+        result["pitch_accent_exclude_reason"] = withhold
     else:
         result["pitch_accent"] = pitch_accent
     return result

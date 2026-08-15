@@ -120,11 +120,24 @@ def test_unrelated_and_unavailable_language_heads_receive_no_gradient():
 def test_dataset_encodes_aligned_prosody_and_availability(tmp_path, monkeypatch):
     rows = [
         {
+            # 箸 (HL): the accent is on mora 1, so that mora is high.
             "file": "jpn.wav", "lang": "jpn", "sentence": "箸",
             "phonemes": ["h", "a"], "stress": [0, 0],
             "pitch_accent": [
                 None,
-                {"phrase": 1, "mora": 1, "phrase_moras": 2, "nucleus": 1},
+                {"phrase": 1, "mora": 1, "phrase_moras": 2,
+                 "nucleus": 1, "level": 1},
+            ],
+        },
+        {
+            # 橋 (LH): same segments, accent on mora 2, so mora 1 is low.
+            # This is the pair the accent head has to separate.
+            "file": "jpn-lh.wav", "lang": "jpn", "sentence": "橋",
+            "phonemes": ["h", "a"], "stress": [0, 0],
+            "pitch_accent": [
+                None,
+                {"phrase": 1, "mora": 1, "phrase_moras": 2,
+                 "nucleus": 2, "level": 0},
             ],
         },
         {
@@ -152,10 +165,12 @@ def test_dataset_encodes_aligned_prosody_and_availability(tmp_path, monkeypatch)
             return self._ids.get(token, self.unk_token_id)
 
     dataset = StressDataset(labels, Tokenizer())
-    batch = collate_fn([dataset[0], dataset[1]])
-    assert batch["pitch_accent_seq"].tolist() == [[0, 2], [0, 0]]
-    assert batch["pitch_accent_available"].tolist() == [True, False]
-    assert batch["tone_available"].tolist() == [False, False]
+    batch = collate_fn([dataset[0], dataset[1], dataset[2]])
+    # 2 = high mora, 1 = low mora, 0 = not mora-bearing (the /h/, and every
+    # phone of the row whose accent factor is withheld).
+    assert batch["pitch_accent_seq"].tolist() == [[0, 2], [0, 1], [0, 0]]
+    assert batch["pitch_accent_available"].tolist() == [True, True, False]
+    assert batch["tone_available"].tolist() == [False, False, False]
 
 
 def test_language_heads_are_selective_and_checkpointed(tmp_path, monkeypatch):
