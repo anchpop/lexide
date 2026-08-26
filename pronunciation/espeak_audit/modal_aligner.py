@@ -60,7 +60,12 @@ image = (
     gpu="T4",
     image=image,
     secrets=[hf_secret],
-    scaledown_window=300,
+    # 60s, not 300: align/measure alternate in measure_corpus.py, and every
+    # multi-minute local-measure phase was billing 6 containers x 300s of pure
+    # idle per super-chunk (~1/3 of the run's GPU cost). The memory+GPU
+    # snapshots below make re-warm a few seconds, so a long grace window buys
+    # nothing. Raise only if snapshots are ever disabled.
+    scaledown_window=60,
     timeout=900,
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},

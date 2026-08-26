@@ -1,0 +1,8 @@
+# Capacity-hold task: grab a GH200 the moment one frees up and idle it until
+# the real training launch reuses the cluster (which re-syncs workdir + tar).
+resources:
+  cloud: lambda
+  accelerators: GH200:1
+  disk_size: 200
+run: |
+  echo "GH200 captured and holding for the real run"
