@@ -154,3 +154,49 @@ lora:
   r: 16                        # LoRA rank
   alpha: 32                    # LoRA scaling
 ```
+
+## Pronunciation
+
+A model that listens to speech and writes out the phonemes it hears, in IPA. The
+goal is transcribing what was *actually said* rather than what a dictionary says
+the words should sound like — so a learner can compare their pronunciation
+against a native target, sound by sound.
+
+[Model on Huggingface](https://huggingface.co/anchpop/lexide-pronunciation)
+
+### Overview
+
+Training data is speech paired with phoneme labels in 11 languages (English,
+French, German, Spanish, Italian, Portuguese, Russian, Hindi, Japanese, Thai,
+Mandarin), drawn from FLEURS, Tatoeba, TTS, Pimsleur audio, and film clips whose
+subtitles were verified verbatim against an independent transcript. Labels come
+from a patched espeak-ng for the European languages and from real G2P backends
+where espeak isn't good enough (Open JTalk for Japanese, g2pM for Mandarin, TLTK
+for Thai, a schwa-deletion classifier for Hindi). A set of audits filters out
+clips whose audio and label don't match (Whisper re-transcription, an LLM
+language filter, acoustic measurement), and an "acoustic narrowing" pass moves
+labels from dictionary form toward what the speaker really produced (e.g.
+nasalized vowels, American English flapping) by measuring the signal itself.
+
+### Architecture
+
+- **Base model**: wav2vec2 XLS-R 2B, with a CTC head trained from scratch
+- **Factorized head**: one factor predicts the phone, separate factors predict
+  stress, tone (Thai/Mandarin), and pitch accent (Japanese), all composed into
+  a single joint CTC alphabet
+- **One shared IPA vocabulary, no language conditioning** — the model can't
+  "autocorrect" toward the expected language, which is what lets it report an
+  accent instead of smoothing over it
+- **Training**: bf16 on a single GPU, with audio-degradation augmentation so it
+  holds up on noisy real-world recordings
+
+### Project Structure
+
+```
+pronunciation/
+├── data/            # Downloaders + per-language audio, manifests, labels
+├── train/           # Model, dataset, training loop, data-quality sidecars
+├── espeak_audit/    # Acoustic measurement + label narrowing (Modal + parselmouth)
+├── vad_compare/     # Rust voice-activity-detection tool
+└── inference/       # Run the model on your own audio
+```
