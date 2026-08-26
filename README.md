@@ -11,7 +11,7 @@ Fine-tuning Gemma 3 for multilingual part-of-speech tagging, lemmatization, and 
 
 This repository contains the training code, the training data, and a REX library that can be used to actually use the model with a convenient API.
 
-[More info on Huggingface!](https://huggingface.co/collections/anchpop/lexide-nlp-models)
+[Download the models on Huggingface!](https://huggingface.co/collections/anchpop/lexide-nlp-models)
 
 ### Overview
 
