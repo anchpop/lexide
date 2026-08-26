@@ -58,8 +58,24 @@ if ! compgen -G "$HOME/data/*/phonemes.jsonl" > /dev/null; then
 fi
 echo "Using dataset at ~/data: $(ls ~/data | tr '\n' ' ')"
 
+# Apply the data-quality exclusion sidecars that ship in the workdir. These
+# were ALWAYS meant to gate training (preprocess_and_upload.sh's whole
+# audit/filter phase writes them) but no launch path ever passed
+# --audit-path, so every run to date — champion included — silently trained
+# on the flagged clips (discovered in the 2026-08-24 data audit). The
+# trainer skips rows whose sentence hash no longer matches the audited one,
+# so stale sidecars fail open per-row, not per-file.
+audit_args=()
+for sidecar in fleurs_asr_exclusions tatoeba_asr_exclusions \
+               tts_asr_exclusions lang_exclusions mixed_script_exclusions; do
+  if [ -f "$sidecar.jsonl" ]; then
+    audit_args+=(--audit-path "$sidecar.jsonl")
+  fi
+done
+
 # --data-dir is the only setting this script pins: it's where the yaml untarred
 # the dataset, not a modelling choice. Everything else is left at its default.
 python -m src.train_unified \
   --data-dir ~/data \
+  "${audit_args[@]}" \
   "$@"
