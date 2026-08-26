@@ -39,6 +39,41 @@ def _epitran_hin(text: str) -> dict[str, Any]:
     return {"ipa": _epitran_hin.engine.transliterate(text)}
 
 
+# Words whose non-nuqta फ is a genuine native aspirated stop /pʰ/. Everything
+# else defaults to /f/: the 2026-08-24 listening audit (36 clips + 82
+# word-level forced-choice judgments, scripts/audit_hin_aspiration.py and
+# .work/hin_ph_word_verify.jsonl) found Perso-Arabic and English loans —
+# the overwhelming majority of फ tokens (काफी, फिल्म, सिर्फ, फोन…) — are
+# categorically [f] in every source, while espeak-lineage labels claimed
+# [pʰ]. Hindi writes loan /f/ as फ़ (nuqta) in careful orthography, but real
+# transcripts mostly drop the dot, so spelling alone can't decide.
+#
+# The native set below is closed-ish (Sanskrit phala/sphuṭ derivatives and
+# onomatopoeia), matched by prefix to cover inflection. Native speakers
+# variably fricativize even these ([pʰ]~[f], the ongoing merger — the audit
+# heard both across clips of the same lemma); we keep the canonical /pʰ/
+# for them and leave per-clip realization to a future acoustic narrowing
+# rule (frication vs stop burst is a robust cue, same class as flapping).
+# फव्वारा stays native: Persian origin but audited [pʰ] (nativized).
+_HINDI_NATIVE_PH_PREFIXES = (
+    "फिर", "फल", "फूल", "फैल", "फेंक", "फंस", "फँस", "फूट", "फट", "फोड़",
+    "फाड़", "फाडऩ", "फिसल", "फुसफुस", "फुँफ", "फफ", "फांसी", "फाटक",
+    "फीका", "फीकी", "फीत", "फेर", "फुफेर", "दुफेर", "फगवाड़", "फुलझड़",
+    "फूँक", "फुस", "फूस", "फुहार", "फव्वार", "फलांग", "फलद",
+)
+_HINDI_NATIVE_PH_SUBSTRINGS = (
+    # Non-initial native फ: Sanskrit compounds and reduplication.
+    "सफल", "विफल", "क्षेत्रफल", "स्फीति", "स्फोट", "हेरफेर", "हेराफेर",
+    "फटाफट", "दोफहर",
+)
+
+
+def _hindi_word_ph_is_native(word: str) -> bool:
+    return word.startswith(_HINDI_NATIVE_PH_PREFIXES) or any(
+        s in word for s in _HINDI_NATIVE_PH_SUBSTRINGS
+    )
+
+
 _HINDI_GOOGLE_TO_IPA = {
     "a": "ə", "aa": "aː", "i": "ɪ", "ii": "iː", "u": "ʊ", "uu": "uː",
     "e": "eː", "E": "ɛː", "o": "oː", "O": "ɔː",
@@ -92,6 +127,12 @@ def _schwa_hin(text: str) -> dict[str, Any]:
     deletion_masks = []
     for word in words:
         units = transliterate.transliterate(word)
+        # Loanword फ → /f/ (see _HINDI_NATIVE_PH_PREFIXES above). The
+        # transliterator emits "ph" for फ and "f" for फ़; only the
+        # non-native words get the swap, at the unit level so the schwa
+        # classifier's phonological features see the corrected consonant.
+        if "ph" in units and not _hindi_word_ph_is_native(word):
+            units = ["f" if unit == "ph" else unit for unit in units]
         rows = []
         for index, unit in enumerate(units):
             if unit != "a":
@@ -332,7 +373,8 @@ PROVIDERS: dict[str, tuple[str, Callable[[str], dict[str, Any]]]] = {
 PROVIDER_SCHEMA = {name: 1 for name in PROVIDERS}
 PROVIDER_SCHEMA["pyopenjtalk"] = 2
 PROVIDER_SCHEMA["schwa-hin"] = 2
-PROVIDER_SCHEMA["schwa-stress-hin"] = 4
+# 5: loanword फ → /f/ via _HINDI_NATIVE_PH_PREFIXES (2026-08-24 listen audit)
+PROVIDER_SCHEMA["schwa-stress-hin"] = 5
 
 
 def load_manifest(path: Path) -> list[dict]:
