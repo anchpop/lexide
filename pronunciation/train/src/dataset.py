@@ -266,6 +266,9 @@ class StressDataset(Dataset):
             "tone_available": sample["tone_available"],
             "pitch_accent_available": sample["pitch_accent_available"],
             "lang": sample["lang"],
+            # Collate reads this: film clips skip synthetic degradation
+            # (their audio is already real-world degraded).
+            "source": sample["source"],
             "vad_probs": torch.tensor(vad_probs, dtype=torch.float32),  # may be empty
         }
 
@@ -560,7 +563,14 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
             # to avoid doubling the audio payload on normal runs.
             if keep_clean:
                 audio_clean = audio
-            if degrade_prob is not None and random.random() < degrade_prob:
+            # Film clips are already "degraded" by reality — music beds,
+            # reverb, broadcast compression baked into the source audio.
+            # Stacking synthetic corruption on top trains a distribution
+            # nothing at inference looks like, so they ride the clean path
+            # (the augment head/tail-silence handling above still applies).
+            already_degraded = item.get("source") == "film"
+            if (degrade_prob is not None and not already_degraded
+                    and random.random() < degrade_prob):
                 # Degrade the whole padded clip → reverb tail + noise floor cover
                 # the silence too (realistic). Length-preserving, so VAD stays aligned.
                 audio = degrade_waveform(audio, sr,
