@@ -11,6 +11,21 @@ benchmark," it's "does it genuinely hear how a sound was produced."
 
 ## What we're really building
 
+> **The true purpose is detecting accented speech** — helping a learner speak
+> without an accent by faithfully reporting how their production deviates from
+> native realization (stated by the maintainer 2026-08-24). Judge every label
+> decision by "can the model report a learner's deviation?", not "is this
+> segment informative in native speech?". Corollary: never label a variable
+> phenomenon by uniform rule (the model learns the prior and hallucinates
+> native detail over the learner's error — the pitch-accent lesson). The safe
+> states are *omitted* or *per-clip acoustic*. Known rule-labeled-but-variable
+> phenomena, measured by listening audits 2026-08-24 (all narrowing-roadmap
+> candidates, none blocking): French facultative liaison (espeak inserts
+> uniformly; real speakers ~50/50 — obligatory liaison is ~100% and fine),
+> Hindi function-word ɦ-deletion (~16%) and cluster/coda voiced-aspirate
+> weakening, i+V linking glides (~25-40%, all languages — correctly absent
+> from labels since the espeak rebase).
+
 espeak-ng gives a **broad / citation-form phonemic** transcription — the dictionary
 ideal, not the realized sound. A model trained on espeak labels inherits that
 broadness. The mission ("phonemizer → phonetizer") is to push the labels toward the
@@ -219,25 +234,49 @@ preprocess phase; populates `speaker_cluster` for the `voice=null` sources):
   `build/src/espeak-ng`, `--path=build`). **Never install mainline espeak.** Point at
   it via `ESPEAK_NG_BIN` / `ESPEAK_NG_DATA_PATH` (in `.env`, which is gitignored
   and therefore per-machine — each host points at its own build).
-  - The corpus labels come from branch **`french-phrase-stress-liaison`**
-    (github.com/anchpop/espeak-ng), not `master`. It carries the French
-    phrase-final stress/liaison work, the fr/de/ru modal-surface fixes and the
-    Portuguese final-nasal endings. Building `master` instead silently changes
-    de and pt labels. Build with CMake: `cmake -B build -DCMAKE_BUILD_TYPE=Release
-    && cmake --build build` (on NixOS, inside `nix-shell -p cmake gnumake gcc pkg-config`).
-  - **Verify any new espeak build before regenerating labels.** Re-phonemize a
-    few hundred rows of the existing `phonemes.jsonl` and require byte-identical
-    output. Do it through the whole path — `phonemize()` *then* the vocab/remap
-    step, using each row's own `espeak_voice` — or you will "find" differences
-    that are really `LANG_PHONEME_REMAP` (ita `ɪ ʊ`→`i u`, fra length marks)
-    and the FLEURS per-clip dialect voices.
-  - *Known drift, 2026-08-10*: at branch `7e9e992` six languages reproduce the
-    corpus exactly, but **Russian does not** — upstream now emits `y` for `ɨ`
-    and `ɭ` for `ɫ`/`ɫʲ`. Both look wrong for Russian (`y` is front *rounded*,
-    ы is central unrounded; hard /l/ is velarized `ɫ`, not retroflex `ɭ`), and
-    `ɭ` isn't in the vocab. Regenerating rus would also break the ASR
-    exclusions, which are keyed by target hash — changed labels stop matching
-    and filtered clips silently re-enter training. rus was left un-regenerated.
+  - Our patches live on branch **`french-phrase-stress-liaison`**
+    (github.com/anchpop/espeak-ng): the French phrase-final stress/liaison
+    work, the fr/de/ru modal-surface fixes, the Portuguese final-nasal
+    endings, and the ru/it ipa-label canon fixes. As of 2026-08-23 the branch
+    is **rebased onto upstream master `7d426728`** (tip `354bced1`). Build
+    with CMake: `cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build
+    build` (on NixOS, inside `nix-shell -p cmake gnumake gcc pkg-config`).
+  - **Verify any new espeak build before regenerating labels.** Run
+    `scripts/py-linux.sh scripts/verify_espeak_build.py` — it re-phonemizes a
+    sample of every language's `phonemes.jsonl` through the whole path
+    (`phonemize()` then the vocab/remap step, each row's own `espeak_voice`)
+    and requires byte-identical output. Testing raw espeak output instead will
+    "find" differences that are really `LANG_PHONEME_REMAP` (ita `ɪ ʊ`→`i u`,
+    fra length marks) and the FLEURS per-clip dialect voices.
+  - **The on-disk corpus labels reproduce at tag `corpus-v1-labels`
+    (= `4dd31042`), NOT at the current branch tip.** To patch or reproduce
+    existing labels, build the tag. The rebase (2026-08-23) pulled in
+    upstream **#2457**, which fixed a long-standing bug where every
+    `prevPh`/`prevPhW` condition short-circuited to false in IPA/`-x` output
+    (the audio path was never affected) — so the corpus carries that bug's
+    artifacts and the rebased build's IPA is the one that matches what
+    espeak actually synthesizes. Known systematic diffs vs the corpus, all
+    from #2457 unless noted: linking-`ʲ` after `i` dropped (all langs);
+    ita tap→trill `r` outside intervocalic position (~66% of rows); deu
+    post-consonant `r`→`ɾ` (~17%); pt final-nasal liaison `ŋ`→`w` before
+    vowels; some spa `ɾ`→`r`; fas dictionary/stress updates (upstream, not
+    #2457); rus number-reading (~1%). **Before the next retrain, regenerate
+    every phonemes.jsonl with the rebased fork** and re-run `espeak_audit`
+    narrowing (alignment-derived sidecars go stale); the ASR/lang exclusions
+    are keyed by `sha256(sentence)`, not by phoneme labels, so they survive
+    relabeling unchanged (verified in `train_unified.py`). Do NOT feed the
+    rebased fork's references to anything scoring the *current* production
+    model — it emits corpus-canon (`ʲ`, tap-everywhere ita) and will
+    spuriously mismatch.
+  - *Historical, for context*: the 2026-08-10 "Russian drift" (`y` for `ɨ`,
+    `ɭ` for `ɫ`/`ɫʲ`) was a stale compiled build — `ph_russian`'s ipa labels
+    were fixed in source but the phoneme data was never recompiled.
+    `4dd31042` set `l^ → ɫʲ` (corpus canon) and gave ita's reduced `I`/`U`
+    explicit `ipa i`/`ipa u`. The ita `LANG_PHONEME_REMAP` **stays** even
+    though pure-Italian output no longer needs it — English `(en)…(it)`
+    code-switch spans still emit real `ɪ ʊ` that the corpus normalized. 10
+    ita rows with leftover `ɪː ʊː` (missed by the exact-token remap) were
+    surgically relabeled in place 2026-08-23.
 - **Python**:
   - *macOS*: the miniconda base interpreter
     (`/opt/homebrew/Caskroom/miniconda/base/bin/python3`) — it has parselmouth /

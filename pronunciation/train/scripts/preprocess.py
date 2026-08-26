@@ -20,8 +20,11 @@ import hashlib
 import json
 import re
 import os
+import shutil
+import sqlite3
 import subprocess
 import sys
+import time
 from functools import cache
 from pathlib import Path
 
@@ -157,8 +160,11 @@ LANG_PHONEME_REMAP: dict[str, dict[str, str]] = {
         "ɪ": "i", "ʊ": "u", "ʌ": "a", "ɒ": "ɔ", "ɐ": "a",
     },
     "ita": {
-        # Italian has no lax high vowels; espeak emits them spuriously
-        # (ɪ ×1230, ʊ ×804 in the audit corpus).
+        # Italian has no lax high vowels. Since fork commit 4dd31042 the it
+        # voice emits i/u directly (ipa labels on the reduced I/U phonemes),
+        # so for pure-Italian text this is a no-op — but it must STAY:
+        # English (en)…(it) code-switch spans still emit genuine ɪ/ʊ, and the
+        # corpus was generated with those normalized to i/u.
         "ɪ": "i", "ʊ": "u",
     },
 }
@@ -540,8 +546,8 @@ def parse_phoneme_backend_args(values: list[str] | None) -> dict[str, Path]:
     return result
 
 
-def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[tuple[int, int]]]:
-    """Run espeak-ng and parse IPA output into (phonemes, stress_labels, word_spans).
+def _parse_espeak_ipa(raw: str) -> tuple[list[str], list[int], list[tuple[int, int]]]:
+    """Parse one eSpeak IPA output line into phones, stress, and word spans.
 
     Stress markers ˈ and ˌ precede a syllable. The stress attaches to that
     syllable's vowel nucleus only (plus any length/nasalization diacritics).
@@ -553,33 +559,17 @@ def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[t
     characters the parser uses to reset stress state. Empty spans (consecutive
     boundaries) are dropped, so word_spans aligns with non-empty text words.
     """
-    # ESPEAK_NG_BIN / ESPEAK_NG_DATA_PATH let you point at a non-system build
-    # (e.g. a custom patched espeak-ng under ~/coding/tmp/espeak-ng/build).
-    # Defaults fall back to the system `espeak-ng` on PATH.
-    espeak_bin = os.environ.get("ESPEAK_NG_BIN", "espeak-ng")
-    data_path = os.environ.get("ESPEAK_NG_DATA_PATH")
-    cmd = [espeak_bin]
-    if data_path:
-        cmd.append(f"--path={data_path}")
-    cmd.extend(["-v", espeak_lang, "-q", "--ipa", "-x", text])
-    # errors="replace": patched espeak (master-232) occasionally emits non-UTF8
-    # debug warnings to stderr for certain inputs (e.g. some Russian/Spanish
-    # sentences). text=True with default 'strict' decoding would crash the whole
-    # pipeline on those bytes even though stdout (the IPA we care about) is fine.
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, check=True, errors="replace",
-    )
-    raw = result.stdout.strip()
-
     # espeak switches voice for foreign words (loanwords, names) and brackets
     # the switch with (lang) markers, e.g. "football" -> "(en)fˈʊtbɔːl(fr)".
+    # Region-qualified markers such as (en-us) occur in mixed-script input.
     # The parens are blacklisted but the 2-letter codes are valid phonemes
     # (e/n/f/r…), so without this they'd silently inject spurious segments into
     # loanword labels — and the unknown-token safety net can't catch it. Strip
     # the markers; the switched word body stays and is parsed/remapped normally
     # (the French vowel remap nativises the English vowels espeak used). ~2.3%
     # of French sentences carry these.
-    raw = re.sub(r"\([a-z]{2,4}\)", "", raw)
+    raw = re.sub(r"\([a-z]{2,4}(?:-[a-z]{2,4})?\)", "", raw,
+                 flags=re.IGNORECASE)
 
     phonemes = []
     stress = []
@@ -648,6 +638,193 @@ def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[t
     return phonemes, stress, word_spans
 
 
+_ESPEAK_STDOUT_DIAGNOSTIC = re.compile(r"Invalid phoneme code \d+")
+
+
+def _espeak_command(espeak_lang: str, *, stdin: bool = False) -> list[str]:
+    """Build the pinned/fork-aware eSpeak command used by both call paths."""
+    espeak_bin = os.environ.get("ESPEAK_NG_BIN", "espeak-ng")
+    data_path = os.environ.get("ESPEAK_NG_DATA_PATH")
+    cmd = [espeak_bin]
+    if data_path:
+        cmd.append(f"--path={data_path}")
+    cmd.extend(["-v", espeak_lang, "-q", "--ipa", "-x"])
+    if stdin:
+        cmd.append("--stdin")
+    return cmd
+
+
+def _espeak_output_lines(stdout: str) -> list[str]:
+    """Return utterance lines, excluding diagnostics eSpeak prints to stdout."""
+    return [
+        line.strip()
+        for line in stdout.splitlines()
+        if line.strip() and not _ESPEAK_STDOUT_DIAGNOSTIC.fullmatch(line.strip())
+    ]
+
+
+def _espeak_build_fingerprint() -> str:
+    """Stat-hash of the espeak binary + every file in its data dir.
+
+    Keys the phonemize cache: any rebuild of the fork (binary, phontab,
+    dictionaries) changes some mtime and invalidates every cached entry, so
+    the cache can never serve output from a different espeak build. mtime
+    granularity means an identical rebuild also invalidates — a false
+    invalidation is safe, a false hit is not.
+    """
+    h = hashlib.sha256()
+    espeak_bin = os.environ.get("ESPEAK_NG_BIN", "espeak-ng")
+    bin_path = shutil.which(espeak_bin) or espeak_bin
+    paths = [Path(bin_path)]
+    data_path = os.environ.get("ESPEAK_NG_DATA_PATH")
+    if data_path:
+        paths.extend(sorted(Path(data_path).rglob("*")))
+    for p in paths:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if p.is_file():
+            h.update(f"{p}\x00{st.st_size}\x00{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()
+
+
+_PHONEMIZE_CACHE_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "audio" / ".cache"
+    / "phonemize.sqlite3"
+)
+_phonemize_cache: "sqlite3.Connection | None | bool" = None
+_phonemize_fingerprint: str | None = None
+
+
+def _phonemize_cache_conn() -> "sqlite3.Connection | None":
+    """Open (once) the shared raw-output cache; None if disabled/unavailable.
+
+    WAL + busy_timeout so the parallel per-language preprocess children can
+    share one database. Stores espeak's RAW stdout, not the parsed phonemes —
+    parser changes therefore never stale the cache; they just re-parse hits.
+    Opt out with LEXIDE_PHONEMIZE_CACHE=0.
+    """
+    global _phonemize_cache, _phonemize_fingerprint
+    if _phonemize_cache is False:
+        return None
+    if _phonemize_cache is None:
+        if os.environ.get("LEXIDE_PHONEMIZE_CACHE", "1") == "0":
+            _phonemize_cache = False
+            return None
+        try:
+            _PHONEMIZE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(_PHONEMIZE_CACHE_PATH, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS phonemize (
+                    fingerprint TEXT NOT NULL,
+                    voice TEXT NOT NULL,
+                    text_sha TEXT NOT NULL,
+                    raw_stdout TEXT NOT NULL,
+                    PRIMARY KEY (fingerprint, voice, text_sha)
+                )
+                """
+            )
+            _phonemize_cache = conn
+            _phonemize_fingerprint = _espeak_build_fingerprint()
+        except sqlite3.Error:
+            _phonemize_cache = False
+            return None
+    return _phonemize_cache
+
+
+def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[tuple[int, int]]]:
+    """Phonemize one utterance, via the raw-output cache when possible.
+
+    A miss runs one eSpeak process (the only framing that is reliable — see
+    phonemize_many's warning) and stores its raw stdout keyed by
+    (build fingerprint, voice, sha256(text)). Hits skip the fork/exec and
+    just re-parse, which turns full-corpus relabels with mostly-unchanged
+    sentences from hours of process spawning into minutes.
+    """
+    conn = _phonemize_cache_conn()
+    text_sha = hashlib.sha256(text.encode()).hexdigest() if conn else None
+    if conn is not None:
+        row = conn.execute(
+            "SELECT raw_stdout FROM phonemize "
+            "WHERE fingerprint=? AND voice=? AND text_sha=?",
+            (_phonemize_fingerprint, espeak_lang, text_sha),
+        ).fetchone()
+        if row is not None:
+            return _parse_espeak_ipa(" ".join(_espeak_output_lines(row[0])))
+    cmd = _espeak_command(espeak_lang)
+    cmd.append(text)
+    # errors="replace": patched espeak occasionally emits non-UTF8 warnings.
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, check=True, errors="replace",
+    )
+    if conn is not None:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO phonemize VALUES (?, ?, ?, ?)",
+                (_phonemize_fingerprint, espeak_lang, text_sha, result.stdout),
+            )
+    lines = _espeak_output_lines(result.stdout)
+    return _parse_espeak_ipa(" ".join(lines))
+
+
+def phonemize_many(
+    requests: list[tuple[str, str]], *, batch_size: int = 8, desc: str = "espeak",
+) -> list[tuple[list[str], list[int], list[tuple[int, int]]]]:
+    """Phonemize many ``(text, voice)`` pairs with batched eSpeak processes.
+
+    .. warning:: DO NOT USE for corpus labeling — the framing is unsound.
+       eSpeak's ``--stdin`` output lines are CLAUSES, not input lines: a
+       sentence with a comma emits two lines, and a line without terminal
+       punctuation doesn't flush and merges into the next line's output.
+       When a split and a merge land in the same chunk they compensate, the
+       ``len(lines) == len(chunk)`` guard passes, and every row in the chunk
+       is silently assigned a neighbor's phonemes (observed on 2-6%% of
+       corpus rows, 2026-08-24; see scripts/verify_espeak_build.py). Fixing
+       this needs a per-utterance delimiter that survives clause splitting —
+       until then the corpus writer uses one :func:`phonemize` call per row.
+    """
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    results: list[tuple[list[str], list[int], list[tuple[int, int]]] | None] = [
+        None
+    ] * len(requests)
+    by_voice: dict[str, list[tuple[int, str]]] = {}
+    for index, (text, voice) in enumerate(requests):
+        by_voice.setdefault(voice, []).append((index, text))
+
+    with tqdm(total=len(requests), desc=desc) as progress:
+        for voice, voice_requests in by_voice.items():
+            for start in range(0, len(voice_requests), batch_size):
+                chunk = voice_requests[start:start + batch_size]
+                # A manifest sentence is conceptually one utterance. Flatten
+                # embedded newlines so they cannot change stdin framing.
+                texts = [re.sub(r"[\r\n]+", " ", text) for _, text in chunk]
+                result = subprocess.run(
+                    _espeak_command(voice, stdin=True),
+                    input="\n".join(texts) + "\n",
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    errors="replace",
+                )
+                lines = _espeak_output_lines(result.stdout)
+                if len(lines) != len(chunk):
+                    for index, text in chunk:
+                        results[index] = phonemize(text, voice)
+                else:
+                    for (index, _), raw in zip(chunk, lines):
+                        results[index] = _parse_espeak_ipa(raw)
+                progress.update(len(chunk))
+
+    if any(result is None for result in results):
+        raise RuntimeError("internal error: missing batched eSpeak result")
+    return [result for result in results if result is not None]
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 VAD_COMPUTE_BIN = REPO_ROOT / "vad_compare" / "target" / "release" / "vad_compute"
 VAD_COMPUTE_MANIFEST = REPO_ROOT / "vad_compare" / "Cargo.toml"
@@ -677,6 +854,95 @@ def is_silent(path: Path) -> bool:
     if data.ndim > 1:
         data = data.mean(axis=1)
     return len(data) == 0 or float(np.abs(data).max()) < SILENCE_PEAK_FLOOR
+
+
+class SilenceCache:
+    """Stat-validated cache for the full-file silence audit.
+
+    The cache lives below ``data/audio/<lang>/.cache`` (excluded from the
+    training tar). A hit is valid only while file size, nanosecond mtime, and
+    the configured peak floor all match. Existing ``phonemes.jsonl`` rows can
+    safely seed non-silent hits when that output is newer than the audio file:
+    those rows could only have been written after passing this same guard.
+    """
+
+    def __init__(self, audio_dir: Path, phonemes_path: Path):
+        cache_dir = audio_dir / ".cache"
+        cache_dir.mkdir(exist_ok=True)
+        self.audio_dir = audio_dir
+        self.conn = sqlite3.connect(cache_dir / "silence.sqlite3")
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS silence (
+                file TEXT PRIMARY KEY,
+                size INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                peak_floor REAL NOT NULL,
+                silent INTEGER NOT NULL
+            )
+            """
+        )
+        self.pending = 0
+        count = self.conn.execute("SELECT COUNT(*) FROM silence").fetchone()[0]
+        if count == 0 and phonemes_path.exists():
+            self._seed_known_nonsilent(phonemes_path)
+
+    def _seed_known_nonsilent(self, phonemes_path: Path) -> None:
+        output_mtime_ns = phonemes_path.stat().st_mtime_ns
+        rows = []
+        with open(phonemes_path) as source:
+            for line in source:
+                filename = json.loads(line)["file"]
+                path = self.audio_dir / filename
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    continue
+                if output_mtime_ns >= stat.st_mtime_ns:
+                    rows.append((
+                        filename, stat.st_size, stat.st_mtime_ns,
+                        SILENCE_PEAK_FLOOR, 0,
+                    ))
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO silence VALUES (?, ?, ?, ?, ?)", rows,
+        )
+        self.conn.commit()
+        if rows:
+            print(f"seeded silence cache with {len(rows):,} known-good clips")
+
+    def is_silent(self, path: Path) -> bool:
+        stat = path.stat()
+        filename = path.name
+        row = self.conn.execute(
+            "SELECT size, mtime_ns, peak_floor, silent FROM silence WHERE file = ?",
+            (filename,),
+        ).fetchone()
+        if row is not None and row[:3] == (
+            stat.st_size, stat.st_mtime_ns, SILENCE_PEAK_FLOOR,
+        ):
+            return bool(row[3])
+
+        silent = is_silent(path)
+        self.conn.execute(
+            "INSERT OR REPLACE INTO silence VALUES (?, ?, ?, ?, ?)",
+            (filename, stat.st_size, stat.st_mtime_ns,
+             SILENCE_PEAK_FLOOR, int(silent)),
+        )
+        self.pending += 1
+        if self.pending >= 1000:
+            self.conn.commit()
+            self.pending = 0
+        return silent
+
+    def close(self) -> None:
+        self.conn.commit()
+        self.conn.close()
+
+    def __enter__(self) -> "SilenceCache":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
 
 def ensure_vad_compute_built() -> Path:
@@ -771,6 +1037,112 @@ def build_dataset_tar(data_dir: Path, output: Path = DATASET_TAR) -> Path:
     return output
 
 
+def refresh_mixed_script_exclusions() -> None:
+    """Regenerate train/mixed_script_exclusions.jsonl from the manifests.
+
+    Deterministic, manifest-derived, no API calls — so preprocess keeps its
+    "self-contained" contract: the sidecar can never go stale relative to the
+    manifests a run just processed. train.sh passes it to the trainer via
+    --audit-path alongside the ASR-audit sidecars.
+    """
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        import build_mixed_script_exclusions
+    finally:
+        sys.path.remove(str(scripts_dir))
+    build_mixed_script_exclusions.main()
+
+
+def _eligible_languages(
+    data_dir: Path, requested: list[str] | None, backend_paths: dict[str, Path],
+) -> list[str]:
+    """Resolve processable language directories in deterministic order."""
+    languages = []
+    for lang_dir in sorted(data_dir.iterdir()):
+        if not lang_dir.is_dir() or lang_dir.name == ".cache":
+            continue
+        lang = lang_dir.name
+        if requested and lang not in requested:
+            continue
+        if lang not in LANG_TO_ESPEAK and lang not in backend_paths:
+            continue
+        if not (lang_dir / "manifest.jsonl").exists():
+            continue
+        languages.append(lang)
+    return languages
+
+
+def _run_parallel_languages(
+    args: argparse.Namespace, languages: list[str], backend_paths: dict[str, Path],
+) -> None:
+    """Run isolated per-language children, then pack once in the parent.
+
+    Language outputs and caches are disjoint. Children always receive
+    ``--no-pack``, preventing concurrent writes to the shared staging tar.
+    Per-language logs keep concurrent tqdm output readable.
+    """
+    log_dir = REPO_ROOT / ".work" / "preprocess_parallel"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    queued = list(languages)
+    running: dict[str, tuple[subprocess.Popen, object, Path]] = {}
+    failures: list[str] = []
+
+    print(f"processing {len(languages)} languages with {args.jobs} workers")
+    print(f"per-language logs: {log_dir}")
+    while queued or running:
+        while queued and len(running) < args.jobs:
+            lang = queued.pop(0)
+            log_path = log_dir / f"{lang}.log"
+            log_file = open(log_path, "w")
+            cmd = [
+                sys.executable, str(Path(__file__).resolve()),
+                "--data-dir", str(args.data_dir),
+                "--langs", lang,
+                "--jobs", "1",
+                "--no-pack",
+                "--espeak-batch-size", str(args.espeak_batch_size),
+            ]
+            if args.skip_vad:
+                cmd.append("--skip-vad")
+            if args.allow_noncommercial:
+                cmd.append("--allow-noncommercial")
+            if lang in backend_paths:
+                cmd.extend([
+                    "--phoneme-backend", f"{lang}={backend_paths[lang]}",
+                ])
+            process = subprocess.Popen(
+                cmd, stdout=log_file, stderr=subprocess.STDOUT,
+            )
+            running[lang] = (process, log_file, log_path)
+            print(f"started {lang}: pid {process.pid} -> {log_path}", flush=True)
+
+        completed = []
+        for lang, (process, log_file, log_path) in running.items():
+            returncode = process.poll()
+            if returncode is None:
+                continue
+            log_file.close()
+            completed.append(lang)
+            if returncode == 0:
+                print(f"completed {lang}", flush=True)
+            else:
+                failures.append(lang)
+                print(
+                    f"FAILED {lang} (exit {returncode}); see {log_path}",
+                    flush=True,
+                )
+        for lang in completed:
+            del running[lang]
+        if running and not completed:
+            time.sleep(1)
+
+    if failures:
+        raise RuntimeError(
+            "language preprocessing failed: " + ", ".join(failures)
+        )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path,
@@ -783,6 +1155,19 @@ def main():
                              "Use only when you're certain vad coverage is "
                              "current — by default we keep vad in lockstep "
                              "with phonemes.")
+    parser.add_argument(
+        "--jobs", type=int, default=1,
+        help="Process this many languages concurrently. Each language writes "
+             "an isolated log and the parent packs the dataset exactly once.",
+    )
+    parser.add_argument(
+        "--espeak-batch-size", type=int, default=8,
+        help="Utterances per eSpeak --stdin invocation (default: 8; larger "
+             "batches are slower in eSpeak).",
+    )
+    parser.add_argument(
+        "--no-pack", action="store_true", help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--allow-noncommercial", action="store_true",
         help="Include CC BY-NC/noncommercial source rows. By default these "
@@ -798,7 +1183,19 @@ def main():
              "fail closed.",
     )
     args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
+    if args.espeak_batch_size < 1:
+        parser.error("--espeak-batch-size must be at least 1")
     backend_paths = parse_phoneme_backend_args(args.phoneme_backend)
+
+    languages = _eligible_languages(args.data_dir, args.langs, backend_paths)
+    if args.jobs > 1 and len(languages) > 1:
+        _run_parallel_languages(args, languages, backend_paths)
+        if not args.no_pack:
+            refresh_mixed_script_exclusions()
+            build_dataset_tar(args.data_dir)
+        return
 
     langs_with_unknowns: list[str] = []
     for lang_dir in sorted(args.data_dir.iterdir()):
@@ -866,23 +1263,48 @@ def main():
         backend_excluded = 0
         license_excluded = 0
         silent_dropped = 0
+        prepared_records: list[dict] = []
+        with SilenceCache(lang_dir, phonemes_path) as silence_cache:
+            for rec in tqdm(records, desc=f"{lang} silence"):
+                license_name = str(rec.get("license") or "")
+                if not args.allow_noncommercial and (
+                        "BY-NC" in license_name.upper()
+                        or "NONCOMMERCIAL" in license_name.upper()):
+                    license_excluded += 1
+                    continue
+                # Drop empty/corrupt source recordings. The stat-validated
+                # cache avoids decoding unchanged WAVs on every label rebuild.
+                if silence_cache.is_silent(lang_dir / rec["file"]):
+                    silent_dropped += 1
+                    continue
+                prepared_records.append(rec)
+
+        phonemized_results: list[
+            tuple[list[str], list[int], list[tuple[int, int]]] | None
+        ]
+        if backend_records is None:
+            # One espeak invocation per utterance — the only framing that is
+            # actually reliable. phonemize_many's stdin batching mislabels
+            # rows: espeak's output lines are CLAUSES, not input lines (a
+            # comma sentence emits two lines; a punctuation-less line doesn't
+            # flush and merges into the next), and when splits and merges
+            # compensate, the line-count guard passes and every row in the
+            # chunk silently gets a neighbor's phonemes. Caught 2026-08-24 by
+            # scripts/verify_espeak_build.py (2-6%% of rows misassigned).
+            phonemized_results = [
+                phonemize(rec["sentence"],
+                          rec.get("espeak_voice") or LANG_TO_ESPEAK[lang])
+                for rec in tqdm(prepared_records, desc=f"{lang} phonemize")
+            ]
+        else:
+            phonemized_results = [None] * len(prepared_records)
+
         # token -> (count, first-example sentence). Buffered per-lang so we
         # can report all unknowns and skip writing the file if any are found
         # — partial output would silently train on a vocab-mismatched corpus.
         unknown_examples: dict[str, tuple[int, str]] = {}
         entries: list[dict] = []
-        for rec in tqdm(records, desc=lang):
-            license_name = str(rec.get("license") or "")
-            if not args.allow_noncommercial and (
-                    "BY-NC" in license_name.upper()
-                    or "NONCOMMERCIAL" in license_name.upper()):
-                license_excluded += 1
-                continue
-            # Drop empty/corrupt source recordings before doing any work —
-            # silent audio paired with a transcript is pure label noise.
-            if is_silent(lang_dir / rec["file"]):
-                silent_dropped += 1
-                continue
+        for rec, phonemized_result in zip(prepared_records, phonemized_results):
             # Prefer the per-record espeak voice if the manifest stored
             # one (Pimsleur does, since "por" covers both Brazilian and
             # European Portuguese, "spa" covers Castilian + Latin
@@ -910,8 +1332,9 @@ def main():
                 stress = list(backend_rec["stress"])
                 word_spans = []
             else:
-                espeak_voice = rec.get("espeak_voice") or LANG_TO_ESPEAK[lang]
-                phonemes, stress, word_spans = phonemize(rec["sentence"], espeak_voice)
+                if phonemized_result is None:
+                    raise RuntimeError("missing batched eSpeak result")
+                phonemes, stress, word_spans = phonemized_result
             if backend_rec is None and rec["file"] in stress_overrides:
                 new_stress = apply_stress_override(
                     phonemes, word_spans, rec["sentence"],
@@ -1012,11 +1435,13 @@ def main():
               f"and were NOT written: {', '.join(langs_with_unknowns)}")
         sys.exit(1)
 
-    # Last step, unconditionally: the dataset isn't usable by a training run
-    # until it's packed. Doing it here is the whole point of preprocess being
-    # self-contained — finishing this script means there is nothing left to do
-    # before `sky launch`.
-    build_dataset_tar(args.data_dir)
+    # Last steps, unconditionally: refresh the manifest-derived exclusion
+    # sidecar and pack the dataset. Doing this here is the whole point of
+    # preprocess being self-contained — finishing this script means there is
+    # nothing left to do before `sky launch`.
+    if not args.no_pack:
+        refresh_mixed_script_exclusions()
+        build_dataset_tar(args.data_dir)
 
 
 if __name__ == "__main__":
