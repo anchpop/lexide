@@ -1,7 +1,11 @@
-# Lexide - Multilingual Linguistic Analysis with Gemma
+# Lexide - Multilingual Linguistic Analysis 
 
 **[Live demo](https://anchpop.github.io/lexide/)** — the parsley sentence segmenter +
 tokenizer running in your browser · [`lexide` on crates.io](https://crates.io/crates/lexide)
+
+There are two projects here, one is models for tagging sentences with POS labels and other info, the other is for converting audio input to a sequence of phonemes.
+
+## Tagging 
 
 Fine-tuning Gemma 3 for multilingual part-of-speech tagging, lemmatization, and dependency parsing.
 
@@ -9,7 +13,7 @@ This repository contains the training code, the training data, and a REX library
 
 [More info on Huggingface!](https://huggingface.co/collections/anchpop/lexide-nlp-models)
 
-## Overview
+### Overview
 
 This project fine-tunes Google's Gemma 3 1B model to perform linguistic analysis across 7 languages:
 - English (~11K samples)
@@ -22,9 +26,9 @@ This project fine-tunes Google's Gemma 3 1B model to perform linguistic analysis
 
 The model learns to analyze sentences and output structured linguistic information including POS tags, lemmas, and syntactic dependencies.
 
-## Quick Start
+### Quick Start
 
-### Skypilot
+#### Skypilot
 
 1. [Install skypilot](https://docs.skypilot.co/en/latest/getting-started/installation.html)
 
@@ -35,7 +39,7 @@ sky start lexide
 sky launch -c lexide  --secret HF_TOKEN --secret WANDB_API_KEY sky.yaml
 ```
 
-### Installation
+#### Installation
 
 ```bash
 # Clone repository
@@ -52,7 +56,7 @@ uv sync
 git lfs pull
 ```
 
-### Training
+#### Training
 
 ```bash
 # Login to Hugging Face (for Gemma model access)
@@ -71,7 +75,7 @@ uv run python test_checkpoint.py
 uv run python inference_example.py
 ```
 
-## Model Output Format
+### Model Output Format
 
 Given an input sentence, the model outputs linguistic analysis in this format:
 
@@ -98,14 +102,14 @@ Here's the token analysis:
 
 The output format is tab-separated with columns: index, token, whitespace (none/_ for space), POS tag, lemma, dependency label, and head index.
 
-## Architecture
+### Architecture
 
 - **Base Model**: Google Gemma 3 1B-IT (instruction-tuned)
 - **Fine-tuning Method**: LoRA (Low-Rank Adaptation)
 - **Target Modules**: Q, K, V, O projections + MLP layers
 - **Training**: Mixed precision (bfloat16) with gradient accumulation
 
-## Project Structure
+### Project Structure
 
 ```
 lexide/
@@ -132,7 +136,7 @@ lexide/
 └── modal/                         # Modal deployment scripts
 ```
 
-## Configuration
+### Configuration
 
 Edit `config.yaml` to adjust training parameters:
 
