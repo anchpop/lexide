@@ -423,7 +423,26 @@ def load_stress_overrides(path: Path) -> dict[str, list[str]]:
     return overrides
 
 
-def load_phoneme_backend(path: Path) -> dict[str, dict]:
+def required_backend_provider(lang: str) -> str | None:
+    """The one G2P provider whose labels this language may be trained on.
+
+    `None` for languages labeled from eSpeak. For everything in
+    [`BACKEND_REQUIRED_LANGS`] this is authoritative: see
+    [`PHONEME_LABEL_SOURCES`] for why each language has one, and
+    `PHONEME_BACKENDS.md` for the full rationale.
+    """
+    if lang not in BACKEND_REQUIRED_LANGS:
+        return None
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        import build_external_phoneme_sidecars as sidecars
+    finally:
+        sys.path.remove(str(scripts_dir))
+    return sidecars.CONFIG[lang][0]
+
+
+def load_phoneme_backend(path: Path, lang: str | None = None) -> dict[str, dict]:
     """Load a complete external-transcription sidecar keyed by audio file.
 
     Each JSONL row must contain `file` and `sentence_sha256`, plus either
@@ -432,7 +451,16 @@ def load_phoneme_backend(path: Path) -> dict[str, dict]:
     every manifest row has a deliberate disposition. The text hash prevents
     a transcription generated for an older sentence from being silently
     reused. Optional suprasegmental fields are preserved in output.
+
+    When `lang` is a backend-required language, every row's `backend` must
+    name that language's required provider. Without this check a
+    `--phoneme-backend jpn=…` override pointing at a sidecar built by some
+    *other* G2P engine trains Japanese on labels from the wrong phoneme
+    inventory, and nothing downstream can tell: the shapes are identical and
+    the hashes still match. Fail closed instead — a mislabeled corpus is
+    discovered epochs later, if at all.
     """
+    expected_provider = required_backend_provider(lang) if lang else None
     records: dict[str, dict] = {}
     with open(path) as f:
         for line_no, line in enumerate(f, 1):
@@ -459,6 +487,12 @@ def load_phoneme_backend(path: Path) -> dict[str, dict]:
             if not excluded and len(rec["phonemes"]) != len(rec["stress"]):
                 raise ValueError(
                     f"{path}:{line_no}: phonemes/stress length mismatch"
+                )
+            if expected_provider is not None and rec.get("backend") != expected_provider:
+                raise ValueError(
+                    f"{path}:{line_no}: {lang} must be labeled by "
+                    f"{expected_provider!r}, but this row says "
+                    f"{rec.get('backend')!r}. See PHONEME_BACKENDS.md."
                 )
             records[rec["file"]] = rec
     return records
@@ -654,6 +688,49 @@ def _espeak_command(espeak_lang: str, *, stdin: bool = False) -> list[str]:
     return cmd
 
 
+def _espeak_run_text(espeak_lang: str, text: str) -> subprocess.CompletedProcess:
+    """Run eSpeak on ONE utterance, with the text fed on stdin.
+
+    Text never goes in argv. Passed as an argument, a leading hyphen is parsed
+    as options — `-So früh?` is rejected as invalid option `S` — whereupon
+    eSpeak writes the complaint to *stderr*, emits nothing on stdout, and
+    still exits 0. `check=True` does not fire, and the caller receives an
+    empty phoneme list indistinguishable from a punctuation-only sentence.
+    That silently dropped 417 corpus rows (nearly all film clips, where
+    dialogue dashes are ubiquitous) before it was found.
+
+    `--` would also fix that, but stdin removes the option-parsing surface
+    entirely rather than depending on every future call site remembering the
+    separator. Verified to produce byte-identical phonemes to the argv form
+    across 867 corpus sentences.
+
+    This is deliberately ONE utterance per process. `phonemize_many`'s
+    multi-line stdin batching is a different thing and is unsafe — see the
+    warning there.
+
+    Any stderr output fails the call. A healthy run writes nothing to stderr
+    (measured over 840 corpus sentences), so there is no benign baseline to
+    talk past; if a legitimate warning class ever appears, whitelist it
+    explicitly. Defaulting to "ignore output we don't recognize" is precisely
+    how the dash bug survived.
+    """
+    # A manifest sentence is conceptually one utterance; an embedded newline
+    # would otherwise split it into two stdin records.
+    flattened = re.sub(r"[\r\n]+", " ", text)
+    # errors="replace": patched espeak occasionally emits non-UTF8 warnings.
+    result = subprocess.run(
+        _espeak_command(espeak_lang, stdin=True),
+        input=flattened + "\n",
+        capture_output=True, text=True, check=True, errors="replace",
+    )
+    if result.stderr.strip():
+        raise RuntimeError(
+            f"eSpeak wrote to stderr for {text!r} (voice {espeak_lang}, exit 0): "
+            f"{result.stderr.strip()[:300]}"
+        )
+    return result
+
+
 def _espeak_output_lines(stdout: str) -> list[str]:
     """Return utterance lines, excluding diagnostics eSpeak prints to stdout."""
     return [
@@ -754,14 +831,29 @@ def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[t
             (_phonemize_fingerprint, espeak_lang, text_sha),
         ).fetchone()
         if row is not None:
-            return _parse_espeak_ipa(" ".join(_espeak_output_lines(row[0])))
-    cmd = _espeak_command(espeak_lang)
-    cmd.append(text)
-    # errors="replace": patched espeak occasionally emits non-UTF8 warnings.
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, check=True, errors="replace",
+            cached_lines = _espeak_output_lines(row[0])
+            # Ignore (and delete) poisoned entries written before the stdin
+            # fix, rather than requiring everyone to know to clear the cache.
+            if cached_lines or not any(ch.isalpha() for ch in text):
+                return _parse_espeak_ipa(" ".join(cached_lines))
+            with conn:
+                conn.execute(
+                    "DELETE FROM phonemize "
+                    "WHERE fingerprint=? AND voice=? AND text_sha=?",
+                    (_phonemize_fingerprint, espeak_lang, text_sha),
+                )
+    result = _espeak_run_text(espeak_lang, text)
+    # Never cache a suspicious empty result. A cache is only sound if what it
+    # stores is what the tool would produce again — and an empty stdout for
+    # text containing letters is the signature of an invocation failure, not
+    # a property of the text. Storing it makes the failure PERMANENT and
+    # invisible: fixing the invocation then changes nothing, because every
+    # affected row is served from cache. That is exactly what happened with
+    # the leading-dash bug, and it is why the fix appeared not to work.
+    usable = bool(_espeak_output_lines(result.stdout)) or not any(
+        ch.isalpha() for ch in text
     )
-    if conn is not None:
+    if conn is not None and usable:
         with conn:
             conn.execute(
                 "INSERT OR REPLACE INTO phonemize VALUES (?, ?, ?, ?)",
@@ -1229,7 +1321,19 @@ def main():
             # the audit + sidecar chain right here so a preprocess run after
             # new data lands is complete on its own.
             backend_path = ensure_backend_sidecar(lang, args.data_dir)
-        backend_records = load_phoneme_backend(backend_path) if backend_path else None
+        backend_records = (
+            load_phoneme_backend(backend_path, lang) if backend_path else None
+        )
+        if backend_records is None and lang in BACKEND_REQUIRED_LANGS:
+            # Unreachable via the branch above, which always builds a sidecar.
+            # Asserted anyway: this is the invariant that keeps eSpeak's
+            # phoneme inventory out of a language it cannot represent, and it
+            # must not become false by some later refactor of that branch.
+            raise ValueError(
+                f"{lang} requires the {required_backend_provider(lang)!r} "
+                f"phoneme backend; refusing to fall back to eSpeak. "
+                f"See PHONEME_BACKENDS.md."
+            )
         if backend_records is not None:
             print(f"{lang}: using external phoneme backend {backend_path} "
                   f"({len(backend_records)} rows)")
@@ -1303,6 +1407,9 @@ def main():
         # can report all unknowns and skip writing the file if any are found
         # — partial output would silently train on a vocab-mismatched corpus.
         unknown_examples: dict[str, tuple[int, str]] = {}
+        # Sentences that have letters but phonemized to nothing — see the
+        # check further down where these are collected.
+        empty_phoneme_examples: list[str] = []
         entries: list[dict] = []
         for rec, phonemized_result in zip(prepared_records, phonemized_results):
             # Prefer the per-record espeak voice if the manifest stored
@@ -1352,6 +1459,15 @@ def main():
                     unknown_examples[u] = (count + 1, example)
                 else:
                     unknown_examples[u] = (1, rec["sentence"])
+            # An utterance with letters in it must produce phonemes. When it
+            # doesn't, that is a labeling failure, not a property of the
+            # sentence — and it is invisible downstream, because dataset.py
+            # drops empty-target rows as `no_phonemes` and training simply
+            # proceeds with slightly less data. Count them here and report at
+            # the end of the language, so the failure is attributable to its
+            # cause instead of showing up as an unexplained row-count drift.
+            if not phonemes and any(ch.isalpha() for ch in rec["sentence"]):
+                empty_phoneme_examples.append(rec["sentence"])
             entry = {
                 "file": rec["file"],
                 "lang": lang,
@@ -1384,6 +1500,23 @@ def main():
                 if k in rec:
                     entry[k] = rec[k]
             entries.append(entry)
+
+        if empty_phoneme_examples:
+            # Loud, but not fatal: unlike an unknown token (which would train
+            # a vocab mismatch), an empty row is merely lost. Refusing to write
+            # the file would block a whole language over a handful of rows, so
+            # report precisely instead and let the operator judge.
+            print(f"\nWARNING: {lang} has {len(empty_phoneme_examples):,} "
+                  f"sentence(s) with letters that phonemized to NOTHING. "
+                  f"These rows are written but dataset.py will drop them as "
+                  f"`no_phonemes`, so they are silently absent from training.")
+            for example in empty_phoneme_examples[:5]:
+                print(f"    {example[:100]!r}")
+            if len(empty_phoneme_examples) > 5:
+                print(f"    ... and {len(empty_phoneme_examples) - 5:,} more")
+            print("  Usually an eSpeak invocation problem rather than a "
+                  "property of the text — check the voice and that the text "
+                  "reaches eSpeak after `--`.")
 
         if unknown_examples:
             total = sum(c for c, _ in unknown_examples.values())
