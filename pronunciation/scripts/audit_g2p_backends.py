@@ -329,9 +329,10 @@ def _g2p_kor(text: str) -> dict[str, Any]:
     """The production Korean chain: g2pk2 + mecab-ko, run by the g2p crate as
     an embedded uv project with pinned versions (needs `uv` on PATH), with the
     Hangul→phone mapping in Rust (`src/korean`, which documents the label
-    set: phonemic, ㅐ/ㅔ merged, no lenis voicing, ɾ/l allophony). The tagger
-    and the standard cross-word ㄹ-tensification see the whole sentence; the
-    sound-change table runs per word. Wiktionary agreement 95.6% of words
+    set: phonemic, ㅐ/ㅔ merged, no lenis voicing, ɾ/l allophony). Labels are
+    connected speech: sound changes apply across the spaces within a clause
+    (못 만났어 [몬만나써]) and punctuation splits clauses, since film audio
+    has no pause between 어절. Wiktionary agreement 95.6% of words
     (2026-09-03 audit; espeak `ko` 47%). Digits, Latin, hanja, and bare jamo
     are excluded (`korean_digits:` etc.). Korean has no stress or tone:
     `tone` is all None so the row is in sidecar shape."""
