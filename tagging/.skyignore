@@ -4,6 +4,9 @@ tagger/.venv
 tagger/output
 data/big
 data/priors
+# kept locally so a new model can be scored on the corpus the previous one was
+# trained and evaluated on; the node only ever needs the current data/processed
+data/processed-*
 data/audio
 data/onnx
 data/lemma_tables

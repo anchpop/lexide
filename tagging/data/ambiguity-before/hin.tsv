@@ -1,0 +1,25 @@
+# strings this corpus segments more than one way, worst first.
+# minority = token instances that would change if the majority form were made canonical.
+# forms lists every observed segmentation as form:count, majority first.
+surface	total	minority	majority	forms	splits
+,”	115	42	,|”	,|”:73 ,”:42	train=115
+।”	83	32	।”	।”:51 ।|”:32	train=82,val=1
+?”	33	8	?|”	?|”:25 ?”:8	train=32,val=1
+,"	22	8	,"	,":14 ,|":8	train=22
+--	11	5	--	--:6 -|-:5	train=11
+---	39	2	---	---:37 -|-|-:2	train=37,val=2
+है	9276	1	है	है:9275 |है:1	test=78,train=9111,val=87
+रही	504	1	रही	रही:503 |रही:1	test=3,train=500,val=1
+देर	103	1	देर	देर:102 |देर:1	train=101,val=2
+किसके	30	1	किसके	किसके:29 किस|के:1	train=30
+किसलिए	9	1	किसलिए	किसलिए:8 किस|लिए:1	test=1,train=8
+अलग-अलग	4	1	अलग|-|अलग	अलग|-|अलग:3 अलग-अलग:1	train=4
+ठीक-ठाक	4	1	ठीक|-|ठाक	ठीक|-|ठाक:3 ठीक-ठाक:1	train=4
+टी-शर्ट	3	1	टी|-|शर्ट	टी|-|शर्ट:2 टी-शर्ट:1	train=3
+यू-टर्न	3	1	यू|-|टर्न	यू|-|टर्न:2 यू-टर्न:1	train=3
+रूप-रंग	3	1	रूप|-|रंग	रूप|-|रंग:2 रूप-रंग:1	train=3
+उड़ायेंगे	2	1	उड़ा|येंगे	उड़ा|येंगे:1 उड़ायेंगे:1	train=2
+छोड़ो!	2	1	छोड़ो|!	छोड़ो|!:1 छोड़ो!:1	train=2
+पी-मेल	2	1	पी|-|मेल	पी|-|मेल:1 पी-मेल:1	train=2
+हाशिमोतो-जी	2	1	हाशिमोतो-जी	हाशिमोतो-जी:1 हाशिमोतो|-|जी:1	train=2
+हैना	2	1	हैना	हैना:1 है|ना:1	train=2

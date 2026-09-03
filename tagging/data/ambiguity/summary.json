@@ -1,0 +1,37 @@
+{
+ "hin": {
+  "ambiguous_surfaces": 15,
+  "minority_instances": 194,
+  "pct_of_all_tokens": 0.07,
+  "top200_covers_pct_of_minority": 100.0,
+  "path": "data/ambiguity/hin.tsv"
+ },
+ "jpn": {
+  "ambiguous_surfaces": 3960,
+  "minority_instances": 14197,
+  "pct_of_all_tokens": 0.74,
+  "top200_covers_pct_of_minority": 51.5,
+  "path": "data/ambiguity/jpn.tsv"
+ },
+ "kor": {
+  "ambiguous_surfaces": 801,
+  "minority_instances": 2697,
+  "pct_of_all_tokens": 0.4,
+  "top200_covers_pct_of_minority": 69.2,
+  "path": "data/ambiguity/kor.tsv"
+ },
+ "tha": {
+  "ambiguous_surfaces": 1485,
+  "minority_instances": 4079,
+  "pct_of_all_tokens": 0.84,
+  "top200_covers_pct_of_minority": 52.9,
+  "path": "data/ambiguity/tha.tsv"
+ },
+ "zho-hans": {
+  "ambiguous_surfaces": 2128,
+  "minority_instances": 9103,
+  "pct_of_all_tokens": 1.36,
+  "top200_covers_pct_of_minority": 52.0,
+  "path": "data/ambiguity/zho-hans.tsv"
+ }
+}
