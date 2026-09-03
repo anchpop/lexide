@@ -88,7 +88,7 @@ LANG_TO_ESPEAK = {
 # Their LANG_TO_ESPEAK entries exist for audits and tooling, but main() never
 # emits phonemes.jsonl for them from eSpeak: it refreshes the G2P audit +
 # sidecar chain itself, so running preprocess is the whole label pipeline.
-BACKEND_REQUIRED_LANGS = {"tha", "zho-hans", "hin", "jpn"}
+BACKEND_REQUIRED_LANGS = {"tha", "zho-hans", "hin", "jpn", "kor"}
 
 STRESS_NONE = 0
 STRESS_PRIMARY = 1
@@ -229,6 +229,10 @@ VOCAB_EXTENSIONS: set[str] = {
     # discarded. Stress is supplied separately by the surface-weight rules.
     "ɦ", "d͡ʒ", "t͡ʃ", "t̪ʰ", "bʱ", "d̪ʱ", "t͡ʃʰ", "ɡʱ",
     "ɽʱ", "d͡ʒʱ", "ɖʱ",
+    # Korean tense (fortis) obstruents from the g2p crate's g2pk2 chain
+    # (`src/korean`). The lenis/aspirated/tense three-way contrast is
+    # phonemic (달/탈/딸); lenis and aspirated are already vocab tokens.
+    "k͈", "t͈", "p͈", "tɕ͈", "s͈",
 }
 
 

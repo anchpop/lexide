@@ -325,6 +325,29 @@ def _g2p_tha(text: str) -> dict[str, Any]:
     }
 
 
+def _g2p_kor(text: str) -> dict[str, Any]:
+    """The production Korean chain: g2pk2 + mecab-ko, run by the g2p crate as
+    an embedded uv project with pinned versions (needs `uv` on PATH), with the
+    Hangul→phone mapping in Rust (`src/korean`, which documents the label
+    set: phonemic, ㅐ/ㅔ merged, no lenis voicing, ɾ/l allophony). The tagger
+    and the standard cross-word ㄹ-tensification see the whole sentence; the
+    sound-change table runs per word. Wiktionary agreement 95.6% of words
+    (2026-09-03 audit; espeak `ko` 47%). Digits, Latin, hanja, and bare jamo
+    are excluded (`korean_digits:` etc.). Korean has no stress or tone:
+    `tone` is all None so the row is in sidecar shape."""
+    import g2p_client
+
+    try:
+        r = g2p_client.request(text=text, lang="kor")
+    except g2p_client.Unlabelable as exc:
+        return {"exclude_reason": exc.reason, "g2p": g2p_client.identity()}
+    return {
+        "phonemes": r["phonemes"], "stress": r["stress"],
+        "tone": [None] * len(r["phonemes"]),
+        "hangul_pronunciation": r["raw"], "g2p": g2p_client.identity(),
+    }
+
+
 def _pinyin_syllables_to_ipa(syllables: list[str | None]) -> list[dict | None]:
     from pinyin_to_ipa import pinyin_to_ipa
 
@@ -447,6 +470,7 @@ PROVIDERS: dict[str, tuple[str, Callable[[str], dict[str, Any]]]] = {
     "g2p-zho": ("zho-hans", _g2p_zho),
     "g2p-jpn": ("jpn", _g2p_jpn),
     "g2p-tha": ("tha", _g2p_tha),
+    "g2p-kor": ("kor", _g2p_kor),
     "pypinyin-ipa": ("zho-hans", _pypinyin_ipa),
     "g2pw-ipa": ("zho-hans", _g2pw_ipa),
     "g2pm-ipa": ("zho-hans", _g2pm_ipa),
