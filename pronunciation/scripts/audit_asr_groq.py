@@ -22,7 +22,7 @@ repaired label is never punished by a stale audit row.
 
 Resumeable: existing successful rows (by path) are skipped — rerun to fill new
 clips after a re-download without re-paying Groq for clips already done. Set
-GROQ_API_KEY (and ESPEAK_NG_BIN/ESPEAK_NG_DATA_PATH for the espeak fork) in .env.
+GROQ_API_KEY in .env; phonemization needs the `g2p` binary on PATH (or G2P_BIN).
 
   audit_asr_groq.py --source fleurs    # -> train/fleurs_asr_exclusions.jsonl
   audit_asr_groq.py --source tatoeba   # -> train/tatoeba_asr_exclusions.jsonl

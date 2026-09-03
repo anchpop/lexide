@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Verify the current espeak-ng build reproduces the existing corpus labels.
+"""Verify the installed g2p build (our espeak-ng fork) reproduces the existing
+corpus labels.
 
-CLAUDE.md mandates this before regenerating labels with any new espeak build:
-re-phonemize a sample of the existing phonemes.jsonl through the WHOLE path —
-phonemize() then validate_phonemes() (vocab + LANG_PHONEME_REMAP), using each
-row's own espeak_voice — and require byte-identical phoneme output.
+CLAUDE.md mandates this before regenerating labels with any new g2p/espeak
+build: re-phonemize a sample of the existing phonemes.jsonl through the WHOLE
+path — phonemize() then validate_phonemes() (vocab + LANG_PHONEME_REMAP), using
+each row's own espeak_voice — and require byte-identical phoneme output.
 
 Run:  scripts/py-linux.sh scripts/verify_espeak_build.py [--per-lang N] [--langs rus,ita]
 
@@ -22,7 +23,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "train" / "scripts"))
 
-# Load espeak env exactly like the docs describe (.env is per-machine).
+# Load .env (per-machine) so a G2P_BIN override there is honoured.
 for env_file in (REPO / ".env",):
     if env_file.exists():
         import os

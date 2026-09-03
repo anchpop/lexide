@@ -1,4 +1,5 @@
-"""Phonemize all sentences in the dataset using espeak-ng, keeping stress marks.
+"""Phonemize all sentences in the dataset with our espeak-ng fork (via the
+`g2p` binary, github.com/anchpop/g2p), keeping stress marks.
 
 Writes a per-language JSONL with entries:
     {"file": "abc123.wav", "lang": "eng",
@@ -96,26 +97,11 @@ STRESS_SECONDARY = 2
 # IPA vowels (monophthongs + near-variants used by espeak-ng across our languages)
 IPA_VOWELS = set("iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaɶɑɒɚɝᵻ")
 
-# Combining marks and modifier letters that espeak emits AFTER a base phoneme
-# and that we want folded into the previous token. Misnamed historically — the
-# set also covers consonant-attaching diacritics now (dental subscript, syllabic,
-# raised, pharyngealization). The parser appends each of these to phonemes[-1],
-# so consecutive marks stack (e.g. r̝ then ̊ → r̝̊ for voiceless Czech ř).
-VOWEL_CONTINUATIONS = set(
-    "ːˑ̠̞̯̥̃̊̈"   # vowel modifiers (existing): length, half-length, retracted,
-                  # lowered, non-syllabic, voiceless-below, nasalized, voiceless,
-                  # centralized
-    "̪̩̝"          # consonant modifiers (new): dental subscript U+032A,
-                  # syllabic U+0329, raised U+031D
-    "ˤ"           # pharyngealization modifier letter U+02E4 — espeak emits it as
-                  # a spacing modifier after the consonant; we fold it in too
-                  # so emphatic Arabic consonants (tˤ, sˤ, dˤ, ðˤ) become one token
-)
-# NB: palatalization ʲ (U+02B2) is handled separately in the parser, NOT here —
-# it folds onto a preceding CONSONANT (Russian soft tʲ nʲ …) but stays a
-# standalone token after a vowel (where espeak uses it as a glide, e.g. iʲo).
-
-WORD_BOUNDARIES = set(" \t\n|_-")
+# The tokenizer that turns espeak's IPA into these labels (which diacritics
+# fold onto the previous token, ʲ onto a preceding consonant only, word
+# boundaries, language-switch markers) lives in the g2p crate — see
+# `src/parse.rs` at github.com/anchpop/g2p. Change it there; yap and this
+# pipeline both consume it.
 
 # Languages whose espeak-emitted stress is systematically wrong and gets
 # replaced from a sidecar (rhythmic-group stress for French: stress falls on
@@ -580,341 +566,11 @@ def parse_phoneme_backend_args(values: list[str] | None) -> dict[str, Path]:
     return result
 
 
-def _parse_espeak_ipa(raw: str) -> tuple[list[str], list[int], list[tuple[int, int]]]:
-    """Parse one eSpeak IPA output line into phones, stress, and word spans.
-
-    Stress markers ˈ and ˌ precede a syllable. The stress attaches to that
-    syllable's vowel nucleus only (plus any length/nasalization diacritics).
-    A new vowel after a consonant marks a new syllable → resets stress to none
-    unless a fresh marker appeared.
-
-    word_spans[i] = (start, end) indices into `phonemes` for the i-th word
-    espeak emitted. Word breaks are the characters in WORD_BOUNDARIES — same
-    characters the parser uses to reset stress state. Empty spans (consecutive
-    boundaries) are dropped, so word_spans aligns with non-empty text words.
-    """
-    # espeak switches voice for foreign words (loanwords, names) and brackets
-    # the switch with (lang) markers, e.g. "football" -> "(en)fˈʊtbɔːl(fr)".
-    # Region-qualified markers such as (en-us) occur in mixed-script input.
-    # The parens are blacklisted but the 2-letter codes are valid phonemes
-    # (e/n/f/r…), so without this they'd silently inject spurious segments into
-    # loanword labels — and the unknown-token safety net can't catch it. Strip
-    # the markers; the switched word body stays and is parsed/remapped normally
-    # (the French vowel remap nativises the English vowels espeak used). ~2.3%
-    # of French sentences carry these.
-    raw = re.sub(r"\([a-z]{2,4}(?:-[a-z]{2,4})?\)", "", raw,
-                 flags=re.IGNORECASE)
-
-    phonemes = []
-    stress = []
-    word_spans: list[tuple[int, int]] = []
-    word_start = 0             # index into `phonemes` where the current word began
-    pending_stress = None      # set when we see ˈ or ˌ, consumed by next vowel
-    current_stress = STRESS_NONE  # active stress state for the current vowel
-    in_vowel = False           # are we currently emitting the nucleus of a syllable?
-
-    for char in raw:
-        if char == "ˈ":
-            pending_stress = STRESS_PRIMARY
-            in_vowel = False
-        elif char == "ˌ":
-            pending_stress = STRESS_SECONDARY
-            in_vowel = False
-        elif char in WORD_BOUNDARIES:
-            if len(phonemes) > word_start:
-                word_spans.append((word_start, len(phonemes)))
-            word_start = len(phonemes)
-            pending_stress = None
-            current_stress = STRESS_NONE
-            in_vowel = False
-        elif char in IPA_VOWELS:
-            if pending_stress is not None:
-                current_stress = pending_stress
-                pending_stress = None
-            elif not in_vowel:
-                current_stress = STRESS_NONE
-            in_vowel = True
-            phonemes.append(char)
-            stress.append(current_stress)
-        elif char in VOWEL_CONTINUATIONS:
-            # Combining diacritic — append to previous phoneme so the combined
-            # string matches the tokenizer's precomposed vocab tokens (ɛ̃, iː).
-            if phonemes:
-                phonemes[-1] += char
-            else:
-                # Stray diacritic at start of output — no previous token to attach to
-                phonemes.append(char)
-                stress.append(STRESS_NONE)
-        elif char == "ʲ":
-            # Palatalization (U+02B2). Fold onto the preceding phoneme IFF it's a
-            # CONSONANT → Russian soft consonants (tʲ nʲ sʲ …, soft л ɫʲ, щ ʃʲ):
-            # one segment, not a standalone ʲ that the 4-source audit found
-            # aligns to ~0 frames. After a VOWEL, espeak uses ʲ to mark a glide
-            # (hiatus [j], e.g. Italian "io"=iʲo, Spanish "días"=diʲas) — keep it
-            # as its own token (its prior behavior), don't fabricate a vowel+ʲ.
-            if phonemes and phonemes[-1][:1] not in IPA_VOWELS:
-                phonemes[-1] += char
-            else:
-                in_vowel = False
-                current_stress = STRESS_NONE
-                phonemes.append(char)
-                stress.append(STRESS_NONE)
-        else:
-            # Consonant — not stress-bearing
-            in_vowel = False
-            current_stress = STRESS_NONE
-            phonemes.append(char)
-            stress.append(STRESS_NONE)
-
-    if len(phonemes) > word_start:
-        word_spans.append((word_start, len(phonemes)))
-
-    return phonemes, stress, word_spans
-
-
-_ESPEAK_STDOUT_DIAGNOSTIC = re.compile(r"Invalid phoneme code \d+")
-
-
-def _espeak_command(espeak_lang: str, *, stdin: bool = False) -> list[str]:
-    """Build the pinned/fork-aware eSpeak command used by both call paths."""
-    espeak_bin = os.environ.get("ESPEAK_NG_BIN", "espeak-ng")
-    data_path = os.environ.get("ESPEAK_NG_DATA_PATH")
-    cmd = [espeak_bin]
-    if data_path:
-        cmd.append(f"--path={data_path}")
-    cmd.extend(["-v", espeak_lang, "-q", "--ipa", "-x"])
-    if stdin:
-        cmd.append("--stdin")
-    return cmd
-
-
-def _espeak_run_text(espeak_lang: str, text: str) -> subprocess.CompletedProcess:
-    """Run eSpeak on ONE utterance, with the text fed on stdin.
-
-    Text never goes in argv. Passed as an argument, a leading hyphen is parsed
-    as options — `-So früh?` is rejected as invalid option `S` — whereupon
-    eSpeak writes the complaint to *stderr*, emits nothing on stdout, and
-    still exits 0. `check=True` does not fire, and the caller receives an
-    empty phoneme list indistinguishable from a punctuation-only sentence.
-    That silently dropped 417 corpus rows (nearly all film clips, where
-    dialogue dashes are ubiquitous) before it was found.
-
-    `--` would also fix that, but stdin removes the option-parsing surface
-    entirely rather than depending on every future call site remembering the
-    separator. Verified to produce byte-identical phonemes to the argv form
-    across 867 corpus sentences.
-
-    This is deliberately ONE utterance per process. `phonemize_many`'s
-    multi-line stdin batching is a different thing and is unsafe — see the
-    warning there.
-
-    Any stderr output fails the call. A healthy run writes nothing to stderr
-    (measured over 840 corpus sentences), so there is no benign baseline to
-    talk past; if a legitimate warning class ever appears, whitelist it
-    explicitly. Defaulting to "ignore output we don't recognize" is precisely
-    how the dash bug survived.
-    """
-    # A manifest sentence is conceptually one utterance; an embedded newline
-    # would otherwise split it into two stdin records.
-    flattened = re.sub(r"[\r\n]+", " ", text)
-    # errors="replace": patched espeak occasionally emits non-UTF8 warnings.
-    result = subprocess.run(
-        _espeak_command(espeak_lang, stdin=True),
-        input=flattened + "\n",
-        capture_output=True, text=True, check=True, errors="replace",
-    )
-    if result.stderr.strip():
-        raise RuntimeError(
-            f"eSpeak wrote to stderr for {text!r} (voice {espeak_lang}, exit 0): "
-            f"{result.stderr.strip()[:300]}"
-        )
-    return result
-
-
-def _espeak_output_lines(stdout: str) -> list[str]:
-    """Return utterance lines, excluding diagnostics eSpeak prints to stdout."""
-    return [
-        line.strip()
-        for line in stdout.splitlines()
-        if line.strip() and not _ESPEAK_STDOUT_DIAGNOSTIC.fullmatch(line.strip())
-    ]
-
-
-def _espeak_build_fingerprint() -> str:
-    """Stat-hash of the espeak binary + every file in its data dir.
-
-    Keys the phonemize cache: any rebuild of the fork (binary, phontab,
-    dictionaries) changes some mtime and invalidates every cached entry, so
-    the cache can never serve output from a different espeak build. mtime
-    granularity means an identical rebuild also invalidates — a false
-    invalidation is safe, a false hit is not.
-    """
-    h = hashlib.sha256()
-    espeak_bin = os.environ.get("ESPEAK_NG_BIN", "espeak-ng")
-    bin_path = shutil.which(espeak_bin) or espeak_bin
-    paths = [Path(bin_path)]
-    data_path = os.environ.get("ESPEAK_NG_DATA_PATH")
-    if data_path:
-        paths.extend(sorted(Path(data_path).rglob("*")))
-    for p in paths:
-        try:
-            st = p.stat()
-        except OSError:
-            continue
-        if p.is_file():
-            h.update(f"{p}\x00{st.st_size}\x00{st.st_mtime_ns}\n".encode())
-    return h.hexdigest()
-
-
-_PHONEMIZE_CACHE_PATH = (
-    Path(__file__).resolve().parents[2] / "data" / "audio" / ".cache"
-    / "phonemize.sqlite3"
-)
-_phonemize_cache: "sqlite3.Connection | None | bool" = None
-_phonemize_fingerprint: str | None = None
-
-
-def _phonemize_cache_conn() -> "sqlite3.Connection | None":
-    """Open (once) the shared raw-output cache; None if disabled/unavailable.
-
-    WAL + busy_timeout so the parallel per-language preprocess children can
-    share one database. Stores espeak's RAW stdout, not the parsed phonemes —
-    parser changes therefore never stale the cache; they just re-parse hits.
-    Opt out with LEXIDE_PHONEMIZE_CACHE=0.
-    """
-    global _phonemize_cache, _phonemize_fingerprint
-    if _phonemize_cache is False:
-        return None
-    if _phonemize_cache is None:
-        if os.environ.get("LEXIDE_PHONEMIZE_CACHE", "1") == "0":
-            _phonemize_cache = False
-            return None
-        try:
-            _PHONEMIZE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(_PHONEMIZE_CACHE_PATH, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=30000")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS phonemize (
-                    fingerprint TEXT NOT NULL,
-                    voice TEXT NOT NULL,
-                    text_sha TEXT NOT NULL,
-                    raw_stdout TEXT NOT NULL,
-                    PRIMARY KEY (fingerprint, voice, text_sha)
-                )
-                """
-            )
-            _phonemize_cache = conn
-            _phonemize_fingerprint = _espeak_build_fingerprint()
-        except sqlite3.Error:
-            _phonemize_cache = False
-            return None
-    return _phonemize_cache
-
-
-def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[tuple[int, int]]]:
-    """Phonemize one utterance, via the raw-output cache when possible.
-
-    A miss runs one eSpeak process (the only framing that is reliable — see
-    phonemize_many's warning) and stores its raw stdout keyed by
-    (build fingerprint, voice, sha256(text)). Hits skip the fork/exec and
-    just re-parse, which turns full-corpus relabels with mostly-unchanged
-    sentences from hours of process spawning into minutes.
-    """
-    conn = _phonemize_cache_conn()
-    text_sha = hashlib.sha256(text.encode()).hexdigest() if conn else None
-    if conn is not None:
-        row = conn.execute(
-            "SELECT raw_stdout FROM phonemize "
-            "WHERE fingerprint=? AND voice=? AND text_sha=?",
-            (_phonemize_fingerprint, espeak_lang, text_sha),
-        ).fetchone()
-        if row is not None:
-            cached_lines = _espeak_output_lines(row[0])
-            # Ignore (and delete) poisoned entries written before the stdin
-            # fix, rather than requiring everyone to know to clear the cache.
-            if cached_lines or not any(ch.isalpha() for ch in text):
-                return _parse_espeak_ipa(" ".join(cached_lines))
-            with conn:
-                conn.execute(
-                    "DELETE FROM phonemize "
-                    "WHERE fingerprint=? AND voice=? AND text_sha=?",
-                    (_phonemize_fingerprint, espeak_lang, text_sha),
-                )
-    result = _espeak_run_text(espeak_lang, text)
-    # Never cache a suspicious empty result. A cache is only sound if what it
-    # stores is what the tool would produce again — and an empty stdout for
-    # text containing letters is the signature of an invocation failure, not
-    # a property of the text. Storing it makes the failure PERMANENT and
-    # invisible: fixing the invocation then changes nothing, because every
-    # affected row is served from cache. That is exactly what happened with
-    # the leading-dash bug, and it is why the fix appeared not to work.
-    usable = bool(_espeak_output_lines(result.stdout)) or not any(
-        ch.isalpha() for ch in text
-    )
-    if conn is not None and usable:
-        with conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO phonemize VALUES (?, ?, ?, ?)",
-                (_phonemize_fingerprint, espeak_lang, text_sha, result.stdout),
-            )
-    lines = _espeak_output_lines(result.stdout)
-    return _parse_espeak_ipa(" ".join(lines))
-
-
-def phonemize_many(
-    requests: list[tuple[str, str]], *, batch_size: int = 8, desc: str = "espeak",
-) -> list[tuple[list[str], list[int], list[tuple[int, int]]]]:
-    """Phonemize many ``(text, voice)`` pairs with batched eSpeak processes.
-
-    .. warning:: DO NOT USE for corpus labeling — the framing is unsound.
-       eSpeak's ``--stdin`` output lines are CLAUSES, not input lines: a
-       sentence with a comma emits two lines, and a line without terminal
-       punctuation doesn't flush and merges into the next line's output.
-       When a split and a merge land in the same chunk they compensate, the
-       ``len(lines) == len(chunk)`` guard passes, and every row in the chunk
-       is silently assigned a neighbor's phonemes (observed on 2-6%% of
-       corpus rows, 2026-08-24; see scripts/verify_espeak_build.py). Fixing
-       this needs a per-utterance delimiter that survives clause splitting —
-       until then the corpus writer uses one :func:`phonemize` call per row.
-    """
-    if batch_size < 1:
-        raise ValueError("batch_size must be at least 1")
-    results: list[tuple[list[str], list[int], list[tuple[int, int]]] | None] = [
-        None
-    ] * len(requests)
-    by_voice: dict[str, list[tuple[int, str]]] = {}
-    for index, (text, voice) in enumerate(requests):
-        by_voice.setdefault(voice, []).append((index, text))
-
-    with tqdm(total=len(requests), desc=desc) as progress:
-        for voice, voice_requests in by_voice.items():
-            for start in range(0, len(voice_requests), batch_size):
-                chunk = voice_requests[start:start + batch_size]
-                # A manifest sentence is conceptually one utterance. Flatten
-                # embedded newlines so they cannot change stdin framing.
-                texts = [re.sub(r"[\r\n]+", " ", text) for _, text in chunk]
-                result = subprocess.run(
-                    _espeak_command(voice, stdin=True),
-                    input="\n".join(texts) + "\n",
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    errors="replace",
-                )
-                lines = _espeak_output_lines(result.stdout)
-                if len(lines) != len(chunk):
-                    for index, text in chunk:
-                        results[index] = phonemize(text, voice)
-                else:
-                    for (index, _), raw in zip(chunk, lines):
-                        results[index] = _parse_espeak_ipa(raw)
-                progress.update(len(chunk))
-
-    if any(result is None for result in results):
-        raise RuntimeError("internal error: missing batched eSpeak result")
-    return [result for result in results if result is not None]
+# All G2P (espeak languages and Hindi alike) goes through the `g2p` binary —
+# see scripts/g2p_client.py. `phonemize(text, voice)` keeps its historical
+# signature for the callers in scripts/ and data/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from g2p_client import phonemize  # noqa: E402,F401  (re-exported)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1387,14 +1043,10 @@ def main():
             tuple[list[str], list[int], list[tuple[int, int]]] | None
         ]
         if backend_records is None:
-            # One espeak invocation per utterance — the only framing that is
-            # actually reliable. phonemize_many's stdin batching mislabels
-            # rows: espeak's output lines are CLAUSES, not input lines (a
-            # comma sentence emits two lines; a punctuation-less line doesn't
-            # flush and merges into the next), and when splits and merges
-            # compensate, the line-count guard passes and every row in the
-            # chunk silently gets a neighbor's phonemes. Caught 2026-08-24 by
-            # scripts/verify_espeak_build.py (2-6%% of rows misassigned).
+            # One utterance per request: g2p phonemizes each row on its own,
+            # so espeak's clause-per-line output can never be misassigned
+            # across rows (the old stdin batching did exactly that on 2-6% of
+            # rows, caught 2026-08-24 by scripts/verify_espeak_build.py).
             phonemized_results = [
                 phonemize(rec["sentence"],
                           rec.get("espeak_voice") or LANG_TO_ESPEAK[lang])

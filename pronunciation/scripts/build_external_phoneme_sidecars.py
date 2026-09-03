@@ -237,6 +237,10 @@ def mandarin_labels(rec: dict, audit: dict) -> dict:
 
 
 def hindi_labels(rec: dict, audit: dict) -> dict:
+    # g2p refuses text it cannot fully label (digits, Latin script) instead of
+    # emitting labels with a hole where the audio has speech.
+    if audit["output"].get("exclude_reason"):
+        return {"exclude_reason": audit["output"]["exclude_reason"]}
     phonemes: list[str] = []
     stress: list[int] = []
     syllables: list[dict] = []
@@ -418,11 +422,54 @@ def japanese_labels(rec: dict, audit: dict) -> dict:
     return result
 
 
+def g2p_flat_labels(rec: dict, audit: dict) -> dict:
+    """Providers whose g2p output is already in sidecar shape (phonemes,
+    stress, tone), or an exclusion."""
+    out = audit["output"]
+    if out.get("exclude_reason"):
+        return {"exclude_reason": out["exclude_reason"]}
+    if len(out["phonemes"]) != len(out["stress"]) or len(out["phonemes"]) != len(out["tone"]):
+        raise ValueError(f"g2p label misalignment in {rec['file']}")
+    if not out["phonemes"]:
+        return {"exclude_reason": "g2p_no_phonemes"}
+    return {"phonemes": out["phonemes"], "stress": out["stress"], "tone": out["tone"]}
+
+
+def g2p_japanese_labels(rec: dict, audit: dict) -> dict:
+    """g2p's Japanese output (phones, pitch factor, and the parse-derived
+    withhold reasons) plus the one check that needs the manifest row: a
+    Whisper transcript below the accent bar may have guessed the kanji, and
+    pitch accent is lexical, so the accent factor is withheld."""
+    out = audit["output"]
+    if out.get("exclude_reason"):
+        return {"exclude_reason": out["exclude_reason"]}
+    result = {"phonemes": out["phonemes"], "stress": out["stress"]}
+    withhold = out.get("pitch_accent_exclude_reason")
+    if withhold is None:
+        logprob = rec.get("whisper_avg_logprob")
+        if logprob is not None and logprob < JAPANESE_ACCENT_MIN_WHISPER_LOGPROB:
+            withhold = "japanese_accent_low_asr_confidence"
+    if withhold is not None:
+        result["pitch_accent_exclude_reason"] = withhold
+    else:
+        result["pitch_accent"] = out["pitch_accent"]
+    return result
+
+
 CONFIG = {
-    "hin": ("schwa-stress-hin", hindi_labels),
-    "tha": ("vachana-thai", thai_labels),
-    "zho-hans": ("g2pm-ipa", mandarin_labels),
-    "jpn": ("pyopenjtalk", japanese_labels),
+    # The g2p crate's port of schwa-stress-hin plus the audited corrections;
+    # `schwa-stress-hin` (the Python original) stays in PROVIDERS for
+    # reproducing the 2026-08 labels.
+    "hin": ("g2p-hin", hindi_labels),
+    # The same vachana-thai, run by the g2p crate as a pinned uv project, with
+    # thai_labels' parsing in Rust (`vachana-thai` stays in PROVIDERS).
+    "tha": ("g2p-tha", g2p_flat_labels),
+    # The g2p crate's port of g2pM + pinyin_to_ipa (`g2pm-ipa` stays in
+    # PROVIDERS; labels are identical where both label a row).
+    "zho-hans": ("g2p-zho", g2p_flat_labels),
+    # OpenJTalk via jpreprocess inside the g2p crate (`pyopenjtalk` stays in
+    # PROVIDERS; 99.2% of rows identical, see _g2p_jpn).
+    "jpn": ("g2p-jpn", g2p_japanese_labels),
 }
 
 

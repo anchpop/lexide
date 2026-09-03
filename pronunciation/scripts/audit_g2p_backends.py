@@ -244,6 +244,87 @@ def _schwa_stress_hin(text: str) -> dict[str, Any]:
     }
 
 
+def _g2p_hin(text: str) -> dict[str, Any]:
+    """The production Hindi chain: `schwa-stress-hin` ported into the g2p
+    crate (github.com/anchpop/g2p, `src/hindi`) with the 2026-09-02 audit's
+    corrections (ə→[ɛ] beside ɦ, homorganic ŋ before velars, ज्ञ as [ɡj],
+    final ɪ/ʊ neutralized, no deletion into impossible clusters). Text with
+    digits or Latin script is excluded rather than labeled with a hole where
+    the audio has speech. `canon: legacy` reproduces `_schwa_stress_hin`
+    byte for byte (verified on the whole corpus), which is what the deployed
+    model was trained on."""
+    import g2p_client
+
+    try:
+        words = g2p_client.hindi_words(text, "current")
+    except g2p_client.Unlabelable as exc:
+        return {"words": [], "exclude_reason": exc.reason, "g2p": g2p_client.identity()}
+    return {"words": words, "canon": "current", "g2p": g2p_client.identity()}
+
+
+def _g2p_zho(text: str) -> dict[str, Any]:
+    """The production Mandarin chain: g2pM + pinyin_to_ipa ported into the
+    g2p crate (`src/mandarin`), byte-identical to `_g2pm_ipa` →
+    `mandarin_labels` on every corpus sentence both can label. Where g2pM
+    would pass a character through unlabeled (digits, Latin, characters
+    outside its dictionary) the crate refuses instead, so the row is
+    excluded rather than trained with a hole. Output is already in sidecar
+    shape: phonemes, stress (all 0), tone (per phoneme, None off the
+    tone-bearing phone), and the pinyin as `raw`."""
+    import g2p_client
+
+    try:
+        r = g2p_client.request(text=text, lang="zho-hans")
+    except g2p_client.Unlabelable as exc:
+        return {"exclude_reason": exc.reason, "g2p": g2p_client.identity()}
+    return {
+        "phonemes": r["phonemes"], "stress": r["stress"], "tone": r["tone"],
+        "pinyin": r["raw"], "g2p": g2p_client.identity(),
+    }
+
+
+def _g2p_jpn(text: str) -> dict[str, Any]:
+    """The production Japanese chain: OpenJTalk via the `jpreprocess` Rust
+    rewrite inside the g2p crate (`src/japanese`), with `japanese_labels`'
+    phone mapping, gemination, and Tokyo pitch factor applied there. Agrees
+    with pyopenjtalk → `japanese_labels` on 99.2% of corpus sentences; the
+    rest differ in readings of Latin abbreviations / digit+counter (ケイ vs
+    ケー, 年 vs とし) and in accent-phrase chaining. `pitch_accent` is
+    lexide's shape; the ASR-confidence withhold is applied by the label stage
+    because it needs the manifest row."""
+    import g2p_client
+
+    try:
+        r = g2p_client.request(text=text, lang="jpn")
+    except g2p_client.Unlabelable as exc:
+        return {"exclude_reason": exc.reason, "g2p": g2p_client.identity()}
+    return {
+        "phonemes": r["phonemes"], "stress": r["stress"],
+        "pitch_accent": [None if p is None else {**p, "source": "openjtalk-citation"}
+                         for p in r.get("pitch", [])],
+        "pitch_accent_exclude_reason": r.get("accent_withheld"),
+        "phones": r["raw"].split(), "g2p": g2p_client.identity(),
+    }
+
+
+def _g2p_tha(text: str) -> dict[str, Any]:
+    """The production Thai chain: the same vachana-thai, run by the g2p crate
+    as an embedded uv project with pinned versions (needs `uv` on PATH), with
+    `thai_labels`' tokenization/tone/stress applied in Rust. Identical to
+    `_vachana_thai` → `thai_labels`; mixed Thai/Latin rows are excluded as
+    before."""
+    import g2p_client
+
+    try:
+        r = g2p_client.request(text=text, lang="tha")
+    except g2p_client.Unlabelable as exc:
+        return {"exclude_reason": exc.reason, "g2p": g2p_client.identity()}
+    return {
+        "phonemes": r["phonemes"], "stress": r["stress"], "tone": r.get("tone", []),
+        "ipa_with_tone": r["raw"], "g2p": g2p_client.identity(),
+    }
+
+
 def _pinyin_syllables_to_ipa(syllables: list[str | None]) -> list[dict | None]:
     from pinyin_to_ipa import pinyin_to_ipa
 
@@ -362,6 +443,10 @@ PROVIDERS: dict[str, tuple[str, Callable[[str], dict[str, Any]]]] = {
     "epitran-hin": ("hin", _epitran_hin),
     "schwa-hin": ("hin", _schwa_hin),
     "schwa-stress-hin": ("hin", _schwa_stress_hin),
+    "g2p-hin": ("hin", _g2p_hin),
+    "g2p-zho": ("zho-hans", _g2p_zho),
+    "g2p-jpn": ("jpn", _g2p_jpn),
+    "g2p-tha": ("tha", _g2p_tha),
     "pypinyin-ipa": ("zho-hans", _pypinyin_ipa),
     "g2pw-ipa": ("zho-hans", _g2pw_ipa),
     "g2pm-ipa": ("zho-hans", _g2pm_ipa),

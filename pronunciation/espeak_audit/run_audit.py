@@ -23,12 +23,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "train" / "scripts"))
 sys.path.insert(0, str(REPO / "espeak_audit"))
 
-FORK = Path("/Users/andrepopovitch/coding/tmp/espeak-ng")
-os.environ.setdefault("ESPEAK_NG_BIN", str(FORK / "build" / "src" / "espeak-ng"))
-os.environ.setdefault("ESPEAK_NG_DATA_PATH", str(FORK / "build"))
-
 import soundfile as sf  # noqa: E402
-import preprocess  # noqa: E402  (phonemize); fork via env vars above
+import preprocess  # noqa: E402  (phonemize — the g2p binary; see CLAUDE.md)
 import phonetics  # noqa: E402
 from modal_aligner import MODEL_ID, MODEL_REVISION  # noqa: E402  (single pinned-commit source)
 

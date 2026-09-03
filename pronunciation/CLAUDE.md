@@ -230,18 +230,37 @@ preprocess phase; populates `speaker_cluster` for the `voice=null` sources):
 
 ## Conventions & gotchas
 
-- **espeak**: use the maintainer's fork at `~/coding/tmp/espeak-ng` (binary
-  `build/src/espeak-ng`, `--path=build`). **Never install mainline espeak.** Point at
-  it via `ESPEAK_NG_BIN` / `ESPEAK_NG_DATA_PATH` (in `.env`, which is gitignored
-  and therefore per-machine — each host points at its own build).
+- **G2P**: all phonemization goes through the **`g2p`** binary
+  (github.com/anchpop/g2p, shared with yap): our espeak-ng fork compiled in
+  as a static library with its data embedded, the model-label tokenizer
+  (`src/parse.rs` there — the former `_parse_espeak_ipa`), and the **Hindi
+  chain** (`src/hindi` — the former `schwa-stress-hin`, ported, plus the
+  2026-09-02 audit corrections; see PHONEME_BACKENDS.md). Install with
+  `cargo install --git https://github.com/anchpop/g2p --locked` (needs cmake +
+  a C compiler), or point `G2P_BIN` at a checkout's `target/release/g2p`.
+  `scripts/g2p_client.py` talks to one long-lived `g2p serve` process;
+  `preprocess.phonemize()` re-exports its espeak entry point, and the Hindi
+  sidecar provider is `g2p-hin` (`hindi_words(text, canon)`; `legacy` is
+  byte-identical to the Python chain, `current` has the corrections). There
+  is no espeak binary or data path to configure any more, and no
+  `ESPEAK_NG_BIN`/`ESPEAK_NG_DATA_PATH`. **Never install mainline espeak.**
+  Mandarin (`g2p-zho`, g2pM ported, identical labels), Japanese
+  (`g2p-jpn`, OpenJTalk via jpreprocess, 99.2% identical), and Thai
+  (`g2p-tha`: the crate embeds a pinned `uv` project running vachana-thai,
+  identical labels — **`uv` must be on PATH** for Thai) also come from the
+  crate; see PHONEME_BACKENDS.md. The Python originals stay in
+  `scripts/audit_g2p_backends.py` for reproduction only.
   - Our patches live on branch **`french-phrase-stress-liaison`**
     (github.com/anchpop/espeak-ng): the French phrase-final stress/liaison
     work, the fr/de/ru modal-surface fixes, the Portuguese final-nasal
     endings, and the ru/it ipa-label canon fixes. As of 2026-08-23 the branch
-    is **rebased onto upstream master `7d426728`** (tip `354bced1`). Build
-    with CMake: `cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build
-    build` (on NixOS, inside `nix-shell -p cmake gnumake gcc pkg-config`).
-  - **Verify any new espeak build before regenerating labels.** Run
+    is **rebased onto upstream master `7d426728`** (tip `354bced1`), which is
+    the commit g2p's submodule pins. To move to a new fork commit: update the
+    submodule in the g2p repo, bump its version, then point this repo's
+    installed binary (and yap's `rev`) at it — each consumer pins its own
+    g2p rev, so yap can stay on the build matching the deployed model while
+    this repo relabels with a newer one. `g2p identity` names the build.
+  - **Verify any new g2p/espeak build before regenerating labels.** Run
     `scripts/py-linux.sh scripts/verify_espeak_build.py` — it re-phonemizes a
     sample of every language's `phonemes.jsonl` through the whole path
     (`phonemize()` then the vocab/remap step, each row's own `espeak_voice`)
