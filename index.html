@@ -99,7 +99,7 @@ function render() {
   const text = $("input").value;
   if (!parsley) return;
   if (!text.trim()) {
-    out.innerHTML = `<div class="empty">no text — paste a passage to segment</div>`;
+    out.innerHTML = `<div class="empty">paste a passage to segment</div>`;
     $("rust").textContent = "";
     $("timing").textContent = "";
     return;
