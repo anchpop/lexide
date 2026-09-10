@@ -1,3 +1,5 @@
+import { unpackMatrix, decodePath } from "./pronunciation-decoder.mjs";
+
 // Existing production Lexide model, also used by Yap. No credentials in the page.
 const ENDPOINT = "https://anchpop--wav2vec2-phoneme-wav2vec2phoneme-predict.modal.run";
 const SAMPLE_RATE = 16000;
@@ -10,6 +12,10 @@ let stream = null;
 let recordingTimer = null;
 let request = null;
 let preparing = false;
+let modelOutput = null;
+let decoded = null;
+const FRAME_SECONDS = 0.02;
+
 
 function controls() {
   const recording = recorder !== null;
@@ -21,6 +27,9 @@ function controls() {
 }
 
 function clearResult() {
+  modelOutput = null;
+  decoded = null;
+  $("model-version").textContent = "";
   $("result").hidden = true;
   $("ipa").textContent = "";
   $("phones").replaceChildren();
@@ -133,9 +142,16 @@ $("record").onclick = async () => {
   }
 };
 
-function renderResult(phonemes) {
-  $("ipa").textContent = phonemes.map((phone) => phone.phoneme).join("");
-  for (const phone of phonemes) {
+function renderResult(result, output) {
+  decoded = result;
+  modelOutput = output;
+  $("ipa").append("[");
+  for (const phone of result.phones) {
+    const symbol = document.createElement("span");
+    symbol.textContent = phone.phoneme;
+    symbol.dataset.start = phone.startFrame;
+    symbol.dataset.end = phone.endFrame;
+    $("ipa").append(symbol);
     const detail = document.createElement("details");
     detail.className = "phone";
     const summary = document.createElement("summary");
@@ -144,15 +160,72 @@ function renderResult(phonemes) {
     confidence.textContent = `${Math.round(phone.confidence * 100)}%`;
     summary.append(confidence);
     detail.append(summary);
-    for (const alternative of phone.top_k || []) {
+    const times = document.createElement("p");
+    times.textContent = `Frames ${phone.startFrame}–${phone.endFrame - 1} · ${(phone.startFrame * FRAME_SECONDS).toFixed(2)}–${(phone.endFrame * FRAME_SECONDS).toFixed(2)}s`;
+    detail.append(times);
+    for (const alternative of phone.top_k) {
       const row = document.createElement("p");
       row.textContent = `${alternative.phoneme} · ${(alternative.probability * 100).toFixed(1)}%`;
       detail.append(row);
     }
     $("phones").append(detail);
   }
+  $("ipa").append("]");
+  $("frame-cursor").max = result.path.length - 1;
+  $("frame-cursor").value = 0;
+  $("model-version").textContent = `Production model · ${output.deploy_marker || "version not reported"} · ${result.path.length} frames`;
   $("result").hidden = false;
+  paintFrames();
+  inspectFrame(0);
 }
+
+function paintFrames() {
+  if (!decoded) return;
+  const canvas = $("frame-strip");
+  canvas.width = Math.max(1, Math.round(canvas.clientWidth * devicePixelRatio));
+  canvas.height = Math.round(40 * devicePixelRatio);
+  const context = canvas.getContext("2d");
+  const width = canvas.width / decoded.path.length;
+  for (const [i, frame] of decoded.path.entries()) {
+    context.fillStyle = frame.blank ? "#858585" : `hsl(${(frame.id * 137.5) % 360} 45% 65%)`;
+    context.fillRect(i * width, 0, Math.ceil(width), canvas.height);
+  }
+}
+
+function inspectFrame(index) {
+  if (!decoded) return;
+  const frame = decoded.path[index];
+  $("frame-cursor").value = index;
+  const text = `Frame ${index} · ${(index * FRAME_SECONDS).toFixed(2)}s · ${frame.phoneme} · ${(frame.probability * 100).toFixed(1)}%`;
+  $("frame-detail").textContent = text;
+  $("frame-cursor").setAttribute("aria-valuetext", text);
+  for (const symbol of $("ipa").querySelectorAll("span")) {
+    symbol.classList.toggle("current-phone", index >= +symbol.dataset.start && index < +symbol.dataset.end);
+  }
+}
+
+$("frame-cursor").oninput = () => {
+  const index = +$("frame-cursor").value;
+  inspectFrame(index);
+  $("playback").currentTime = index * FRAME_SECONDS;
+};
+$("playback").addEventListener("timeupdate", () => {
+  if (decoded) inspectFrame(Math.min(decoded.path.length - 1, Math.floor($("playback").currentTime / FRAME_SECONDS)));
+});
+window.addEventListener("resize", paintFrames);
+$("download-frames").onclick = () => {
+  if (!modelOutput) return;
+  const url = URL.createObjectURL(new Blob([JSON.stringify({
+    ...modelOutput,
+    demo_metadata: { sample_rate: SAMPLE_RATE, frame_stride_seconds: FRAME_SECONDS,
+      decoder: "greedy CTC over float16 phoneme matrix", phones: decoded.phones },
+  })], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "lexide-model-output.json";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
 
 $("transcribe").onclick = async () => {
   if (!samples || request) return;
@@ -167,21 +240,18 @@ $("transcribe").onclick = async () => {
     const response = await fetch(ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ audio: samples, sample_rate: SAMPLE_RATE, top_k: 3 }),
+      body: JSON.stringify({ audio: samples, sample_rate: SAMPLE_RATE, top_k: 3, return_frames: true, return_frame_matrix: true }),
       signal: request.signal,
     });
     if (!response.ok) throw new Error(`The model returned an error (${response.status}). Please try again shortly.`);
     const data = await response.json();
-    if (!Array.isArray(data.phonemes) || data.phonemes.some((phone) =>
-      typeof phone.phoneme !== "string" || !Number.isFinite(phone.confidence))) {
-      throw new Error("The model returned an unexpected response. Please try again.");
-    }
-    if (data.phonemes.length) {
-      renderResult(data.phonemes);
-      $("status").textContent = `${data.phonemes.length} phonemes recognized.`;
-    } else {
-      $("status").textContent = "No phonemes detected. Try a clip with clearer speech.";
-    }
+    const matrix = await unpackMatrix(data.frame_matrix);
+    const result = decodePath(matrix, data.frames);
+    if (request.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    renderResult(result, data);
+    $("status").textContent = result.phones.length
+      ? `${result.phones.length} phonemes recognized.`
+      : "No phonemes detected. Try a clip with clearer speech.";
     $("timing").textContent = `${((performance.now() - start) / 1000).toFixed(1)}s`;
   } catch (error) {
     $("status").textContent = error.name === "AbortError"

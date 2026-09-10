@@ -131,3 +131,11 @@
     header nav { flex-wrap: wrap; gap: 0.7rem; }
     footer { flex-wrap: wrap; gap: 0.5rem; }
   }
+
+  #ipa { margin-bottom: 0.4rem; }
+  #ipa .current-phone { outline: 2px solid var(--fg); outline-offset: 2px; }
+  .frame-view { margin: 1.4rem 0; }
+  #frame-strip { display: block; width: 100%; height: 40px; margin-top: 0.5rem; border: 1px solid var(--border); }
+  #frame-cursor { width: 100%; margin: 0.6rem 0; }
+  #frame-detail { font-size: 12px; min-height: 3rem; overflow-wrap: anywhere; }
+  #model-version, #status { overflow-wrap: anywhere; }

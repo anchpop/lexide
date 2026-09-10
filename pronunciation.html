@@ -21,7 +21,7 @@
     </nav>
   </header>
   <div class="stats">speech → IPA · multilingual phoneme recognition</div>
-  <p class="intro">Hear speech, sound by sound. Upload a short clip or record yourself to see the phonemes the model hears, including stress.</p>
+  <p class="intro">Hear speech, sound by sound. Upload a short clip or record yourself to see the phonemes the model hears in IPA.</p>
   <section class="audio-input" aria-label="Audio input">
     <label for="audio-file">Choose an audio clip</label>
     <input id="audio-file" type="file" accept="audio/*" aria-describedby="audio-help">
@@ -38,8 +38,18 @@
   <section id="result" aria-label="Pronunciation result" hidden>
     <div class="meta">IPA transcription</div>
     <p id="ipa"></p>
+    <p class="hint">Sounds are shown without stress, tone, or pitch-accent annotations. Word boundaries are not predicted.</p>
+    <div class="frame-view">
+      <label for="frame-cursor">Explore the model frames</label>
+      <canvas id="frame-strip" height="40" aria-label="Phoneme predictions over time. Use the slider below to inspect individual frames."></canvas>
+      <input id="frame-cursor" type="range" min="0" max="0" value="0" step="1" aria-describedby="frame-detail">
+      <p id="frame-detail" class="mono"></p>
+      <p class="hint">Each frame advances 20 ms. Gray sections are CTC blanks, which can occur inside speech. The slider seeks the audio; frame times are approximate, not forced-aligned sound boundaries.</p>
+    </div>
     <div id="phones"></div>
     <p class="hint">Expand a phoneme to see alternatives. Percentages are model confidence, not a pronunciation score. Predictions can be wrong.</p>
+    <div class="actions"><button id="download-frames" type="button">Download model output</button></div>
+    <p class="hint" id="model-version"></p>
   </section>
   <footer><span>wav2vec2 · factorized CTC</span><span id="timing"></span></footer>
 </main>
