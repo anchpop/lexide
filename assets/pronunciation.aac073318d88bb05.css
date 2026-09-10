@@ -1,0 +1,133 @@
+/* Pronunciation layout is scoped here so the segmentation demo stays independent. */
+.pronunciation-page { --accent: #17684e; --accent-soft: #e5f2ec; --surface: #f7f9f8; }
+html.dark .pronunciation-page { --accent: #8cdbb9; --accent-soft: #19372b; --surface: #181c1a; }
+.pronunciation-page main { max-width: 48rem; }
+.pronunciation-page header { padding: 0.6rem 0; align-items: center; }
+.brand { font: 13px ui-monospace, monospace; }
+.brand > span { color: var(--muted); }
+.pronunciation-page .intro { margin: 1.5rem 0 1.7rem; }
+.intro h1 { font-size: clamp(26px, 4.5vw, 36px); line-height: 1.2; letter-spacing: -0.035em; font-weight: 550; color: var(--fg); margin-bottom: 0.65rem; }
+.pronunciation-page .intro p { max-width: 34rem; font-size: 15px; line-height: 1.6; }
+.pronunciation-page button { cursor: pointer; font: inherit; }
+.pronunciation-page button:disabled { cursor: default; }
+.pronunciation-page .audio-input { background: var(--surface); padding: 1.2rem 1.3rem; border-radius: 12px; transition: border-color .15s; }
+.audio-input.dragging { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 3px; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.section-heading h2 { font-size: 14px; font-weight: 600; }
+.limit, #phone-count { font-size: 11px; font-weight: 400; color: var(--muted); }
+.limit { border: 1px solid var(--border); padding: 3px 8px; border-radius: 20px; }
+.source-actions { display: flex; gap: 0.6rem; align-items: center; margin-top: 1.1rem; }
+.source-actions button, .submit-actions button, button.quiet { display: inline-flex; align-items: center; justify-content: center; gap: 0.6rem; border: 1px solid var(--border); border-radius: 7px; padding: 0.6rem 0.85rem; color: var(--fg); background: var(--bg); font-size: 13px; min-height: 40px; }
+.source-actions button:hover:not(:disabled), button.quiet:hover { border-color: var(--muted); }
+.source-actions svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.or { font-size: 12px; color: var(--muted); }
+.drop-hint, .privacy-note { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.drop-hint { margin-top: 0.65rem; }
+.privacy-note { margin: 0.7rem 0 1.6rem; padding: 0 0.15rem; }
+.clip-info { display: flex; gap: 1rem; justify-content: space-between; font-size: 12px; margin-top: 1rem; padding-top: 0.85rem; border-top: 1px solid var(--border); }
+#clip-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#clip-duration { flex-shrink: 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pronunciation-page audio { margin-top: 0.65rem; height: 40px; }
+.submit-row { display: flex; gap: 1rem; align-items: center; justify-content: space-between; margin-top: 1rem; }
+.submit-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+.submit-actions .primary { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+.submit-actions .primary:disabled { opacity: .4; }
+#record[aria-pressed="true"] { color: #b63434; border-color: currentColor; }
+.pronunciation-page #status { font-size: 12px; line-height: 1.5; margin: 0; min-height: 0; color: var(--muted); }
+.audio-input[aria-busy="true"] #status { color: var(--accent); }
+.pronunciation-page #result { border: 0; padding-top: 0; }
+#phone-count { display: inline-block; margin-left: 0.45rem; }
+button.quiet { background: none; border-color: var(--border); padding: 0.4rem 0.65rem; min-height: 36px; font-size: 12px; }
+.ipa-surface { margin-top: 0.85rem; padding: 1.25rem; border: 1px solid var(--border); border-radius: 10px; }
+.pronunciation-page #ipa { font-size: clamp(27px, 4vw, 34px); line-height: 1.65; margin: 0; letter-spacing: 0; }
+#ipa .sound-choice { display: inline; font: inherit; line-height: inherit; color: inherit; padding: 2px 0; background: none; border: 0; border-radius: 3px; }
+#ipa .sound-choice:hover, #ipa .sound-choice[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); box-shadow: 0 2px 0 var(--accent); }
+#ipa .sound-choice.current-phone { outline: none; background: var(--accent-soft); }
+.result-caption { display: flex; gap: 0.5rem; justify-content: space-between; font-size: 11px; color: var(--muted); margin: 0.6rem 0 1rem; }
+#copy-status { color: var(--accent); }
+.pronunciation-page #phones { display: flex; align-items: stretch; gap: 1.2rem; padding: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.selected-sound { display: flex; min-width: 54px; flex-direction: column; align-items: center; justify-content: center; border-right: 1px solid var(--border); padding-right: 1rem; }
+#selected-symbol { font-size: 36px; line-height: 1.2; }
+#selected-position { color: var(--muted); font-size: 10px; margin-top: 0.5rem; white-space: nowrap; }
+.sound-information { flex: 1; min-width: 0; }
+.sound-heading { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 11px; color: var(--muted); margin-bottom: 0.5rem; }
+#selected-confidence { color: var(--fg); }
+#alternatives { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.alternative { display: inline-flex; gap: 0.5rem; align-items: baseline; border: 1px solid var(--border); border-radius: 5px; padding: 0.2rem 0.5rem; background: var(--bg); font-size: 15px; }
+.alternative small { color: var(--muted); font-size: 10px; }
+.sound-information .hint { margin-top: 0.5rem; font-size: 10px; }
+.transcription-note { color: var(--muted); font-size: 11px; margin: 1rem 0; }
+#model-details { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin-top: 1.5rem; }
+#model-details > summary { cursor: pointer; padding: 1rem 0; font-size: 12px; }
+.details-caption { float: right; color: var(--muted); font-size: 11px; }
+.details-content { padding-bottom: 1rem; }
+.pronunciation-page .frame-view { margin: 0; font-size: 12px; }
+.pronunciation-page #frame-strip { border-radius: 4px; height: 28px; }
+#frame-cursor { accent-color: var(--accent); }
+.pronunciation-page #frame-detail { min-height: 0; font-size: 11px; }
+.export-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 1rem; }
+#model-version { font-size: 10px; color: var(--muted); max-width: 16rem; text-align: right; }
+.pronunciation-page footer { margin-top: 1.25rem; font-size: 10px; }
+@media (max-width: 500px) {
+  .pronunciation-page main { padding: 0 1rem 2rem; }
+  .brand > span { display: none; }
+  .pronunciation-page .intro { margin: 1.1rem 0 1.3rem; }
+  .pronunciation-page .intro p { font-size: 13px; }
+  .pronunciation-page .audio-input { padding: 1rem; }
+  .source-actions { gap: 0.4rem; }
+  .source-actions button { flex: 1; padding: 0.6rem 0.5rem; font-size: 12px; min-height: 44px; }
+  .source-actions svg, .or { display: none; }
+  .submit-row { gap: 0.7rem; }
+  .submit-actions button { min-height: 44px; }
+  .ipa-surface { padding: 0.9rem; }
+  .pronunciation-page #phones { gap: 0.75rem; padding: 0.8rem; }
+  .selected-sound { padding-right: 0.75rem; }
+  .sound-heading { flex-wrap: wrap; }
+  .details-caption { display: none; }
+  .export-row { align-items: flex-start; flex-direction: column; gap: 0.7rem; }
+  #model-version { text-align: left; }
+}
+.source-picker { border: 1px dashed var(--tok-line); border-radius: 8px; padding: 1.15rem 0.8rem 0.9rem; margin-top: 1rem; text-align: center; }
+.drop-title { font-size: 14px; font-weight: 500; }
+.source-picker .source-actions { justify-content: center; margin-top: 0.7rem; }
+.has-audio .source-picker { border: 0; padding: 0; text-align: left; }
+.has-audio .source-actions { justify-content: flex-start; }
+.has-audio .drop-title, .has-audio .drop-hint { display: none; }
+.dragging .source-picker { background: var(--accent-soft); border-color: var(--accent); }
+.audio-input[aria-busy="true"] #status::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 7px; border: 1.5px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .audio-input[aria-busy="true"] #status::before { animation: none; } }
+#audio-explorer { margin-top: 1rem; border: 1px solid var(--border); border-radius: 10px; padding: 0.85rem; background: var(--surface); }
+.explorer-toolbar, .explorer-transport { display: flex; align-items: center; gap: 0.7rem; }
+.explorer-toolbar { justify-content: space-between; margin-bottom: 0.65rem; }
+#audio-clock { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+#now-playing { font-size: 23px; color: var(--accent); min-width: 1.3rem; text-align: center; }
+.zoom-control { font-size: 11px; color: var(--muted); white-space: nowrap; }
+#audio-zoom { font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 5px; }
+.spectrum-layout { display: flex; gap: 7px; }
+.frequency-axis { width: 33px; flex-shrink: 0; position: relative; margin-top: 60px; height: 200px; color: var(--muted); font-size: 9px; text-align: right; }
+.frequency-axis span { position: absolute; right: 0; }
+.frequency-axis span:nth-child(1) { top: -5px; }
+.frequency-axis span:nth-child(2) { top: 50%; transform: translateY(-50%); }
+.frequency-axis span:nth-child(3) { bottom: -4px; }
+#audio-scroll { overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: thin; border-radius: 5px; }
+#audio-plot { position: relative; }
+#audio-axis { height: 24px; position: relative; overflow: hidden; font-size: 9px; color: var(--muted); }
+#audio-axis span { position: absolute; top: 1px; border-left: 1px solid var(--border); padding-left: 3px; white-space: nowrap; }
+#phoneme-track { position: relative; height: 36px; background: var(--bg); border-top: 1px solid var(--border); }
+#phoneme-track button { position: absolute; height: 30px; top: 3px; overflow: hidden; padding: 0; border: 0; border-left: 1px solid var(--accent); border-radius: 2px; background: var(--accent-soft); color: var(--accent); font-size: 13px; }
+#phoneme-track button.narrow { color: transparent; }
+#phoneme-track button.selected, #phoneme-track button.playing { background: var(--accent); color: var(--bg); }
+#phoneme-track button.narrow.selected, #phoneme-track button.narrow.playing { color: transparent; }
+#spectrogram { display: block; width: 100%; height: 200px; cursor: crosshair; }
+#audio-playhead { position: absolute; top: 24px; bottom: 0; width: 2px; background: #fff; box-shadow: 0 0 0 1px #1118; pointer-events: none; }
+#selected-region { position: absolute; top: 60px; bottom: 0; background: #aff5d835; pointer-events: none; }
+.spectrum-caption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.3rem 1rem; color: var(--muted); font-size: 10px; }
+@media (max-width: 500px) { #audio-explorer { padding: 0.7rem; } .explorer-transport { gap: 0.4rem; } #audio-clock { font-size: 10px; } .zoom-control { font-size: 10px; } }
+
+.has-result #playback { display: none; }
+#spectrogram { touch-action: pan-y; }
+.spectrum-caption { margin-top: 0.6rem; }
+#audio-explorer { margin-bottom: 1rem; }
+
+.pronunciation-page #result { margin-top: 1.6rem; }

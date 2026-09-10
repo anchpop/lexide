@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lexide · pronunciation</title>
-<script src="./theme.js"></script>
-<link rel="stylesheet" href="./demo.css">
-<link rel="stylesheet" href="./pronunciation.css">
+<script src="./assets/theme.d45efdaf2d93c633.js"></script>
+<link rel="stylesheet" href="./assets/demo.4678e990c17ac8ec.css">
+<link rel="stylesheet" href="./assets/pronunciation.aac073318d88bb05.css">
 </head>
 <body class="pronunciation-page">
 <main>
@@ -43,11 +43,10 @@
       <p id="status" role="status" aria-live="polite">Choose a clip to get started.</p>
       <div class="submit-actions">
         <button id="cancel" type="button" hidden>Cancel</button>
-        <button id="transcribe" class="primary" type="button" disabled>Transcribe <span aria-hidden="true">→</span></button>
+        <button id="retry" class="primary" type="button" hidden>Retry</button>
       </div>
     </div>
   </section>
-  <p class="privacy-note">Audio is sent to the hosted model only when you transcribe. The first request may take a minute.</p>
   <section id="result" aria-label="Pronunciation result" hidden>
     <div class="section-heading">
       <h2>IPA transcription <span id="phone-count"></span></h2>
@@ -99,6 +98,6 @@
   </section>
   <footer><span>Multilingual phoneme recognition</span><span id="timing"></span></footer>
 </main>
-<script type="module" src="./pronunciation.js"></script>
+<script type="module" src="./assets/pronunciation.bea1bffd6cdd02ec.js"></script>
 </body>
 </html>
