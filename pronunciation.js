@@ -10,17 +10,23 @@ let playbackURL = null;
 let recorder = null;
 let stream = null;
 let recordingTimer = null;
+let recordingClock = null;
 let request = null;
 let preparing = false;
 let modelOutput = null;
 let decoded = null;
+let copyTimer = null;
 const FRAME_SECONDS = 0.02;
 
 
 function controls() {
   const recording = recorder !== null;
   $("audio-file").disabled = preparing || recording || !!request;
+  $("upload").disabled = preparing || recording || !!request;
   $("record").disabled = preparing || !!request;
+  $("record").setAttribute("aria-pressed", String(recording));
+  $("drop-zone").setAttribute("aria-busy", String(preparing || !!request));
+  $("transcribe").innerHTML = request ? "Transcribing…" : 'Transcribe <span aria-hidden="true">→</span>';
   $("record").textContent = recording ? "Stop recording" : "Record microphone";
   $("transcribe").disabled = !samples || preparing || recording || !!request;
   $("cancel").hidden = !request;
@@ -32,12 +38,17 @@ function clearResult() {
   $("model-version").textContent = "";
   $("result").hidden = true;
   $("ipa").textContent = "";
-  $("phones").replaceChildren();
+  $("phones").hidden = true;
+  $("model-details").open = false;
+  $("copy-status").textContent = "";
+  clearTimeout(copyTimer);
   $("timing").textContent = "";
 }
 
 function clearAudio() {
   samples = null;
+  $("clip-info").hidden = true;
+  $("drop-zone").classList.remove("has-audio");
   $("playback").pause();
   $("playback").removeAttribute("src");
   $("playback").hidden = true;
@@ -72,7 +83,12 @@ async function prepareAudio(blob, label) {
     playbackURL = URL.createObjectURL(blob);
     $("playback").src = playbackURL;
     $("playback").hidden = false;
-    $("status").textContent = `${label} · ${decoded.duration.toFixed(1)} seconds · ready to transcribe.`;
+    $("clip-name").textContent = label;
+    $("clip-name").title = label;
+    $("clip-duration").textContent = `${decoded.duration.toFixed(1)} sec`;
+    $("clip-info").hidden = false;
+    $("drop-zone").classList.add("has-audio");
+    $("status").textContent = "Ready to transcribe.";
   } catch (error) {
     $("status").textContent = error.message;
   } finally {
@@ -85,10 +101,50 @@ async function prepareAudio(blob, label) {
 $("audio-file").onchange = () => {
   const file = $("audio-file").files[0];
   if (file) void prepareAudio(file, file.name);
+  $("audio-file").value = ""; // Selecting the same file again should also work.
 };
+$("upload").onclick = () => $("audio-file").click();
+
+const dropZone = $("drop-zone");
+let dragDepth = 0;
+const inputBusy = () => preparing || recorder !== null || request !== null;
+// Prevent a dropped file from navigating away, including drops outside the card.
+window.addEventListener("dragover", (event) => {
+  if (Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
+});
+window.addEventListener("drop", (event) => {
+  if (Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
+  dragDepth = 0;
+  dropZone.classList.remove("dragging");
+});
+dropZone.addEventListener("dragenter", (event) => {
+  if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+  event.preventDefault();
+  dragDepth++;
+  if (!inputBusy()) dropZone.classList.add("dragging");
+});
+dropZone.addEventListener("dragleave", () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) dropZone.classList.remove("dragging");
+});
+dropZone.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  event.dataTransfer.dropEffect = inputBusy() ? "none" : "copy";
+});
+dropZone.addEventListener("drop", (event) => {
+  event.preventDefault();
+  if (inputBusy()) return;
+  const files = Array.from(event.dataTransfer.files);
+  if (files.length !== 1) {
+    $("status").textContent = "Drop one audio file at a time.";
+    return;
+  }
+  void prepareAudio(files[0], files[0].name);
+});
 
 function stopRecording() {
   clearTimeout(recordingTimer);
+  clearInterval(recordingClock);
   if (recorder?.state === "recording") recorder.stop();
   stream?.getTracks().forEach((track) => track.stop());
   stream = null;
@@ -112,6 +168,7 @@ $("record").onclick = async () => {
     recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
     recorder.onstop = () => {
       clearTimeout(recordingTimer);
+      clearInterval(recordingClock);
       stream?.getTracks().forEach((track) => track.stop());
       stream = null;
       const type = recorder.mimeType;
@@ -126,7 +183,13 @@ $("record").onclick = async () => {
       controls();
     };
     recorder.start();
-    $("status").textContent = "Recording… Select Stop recording when finished (stops automatically before 20 seconds).";
+    const started = performance.now();
+    const tick = () => {
+      const elapsed = Math.floor((performance.now() - started) / 1000);
+      $("status").textContent = `Recording · 0:${String(elapsed).padStart(2, "0")} / 0:19`;
+    };
+    tick();
+    recordingClock = setInterval(tick, 250);
     // Leave headroom for the recorder's final encoded audio frames.
     recordingTimer = setTimeout(stopRecording, (MAX_SECONDS - 1) * 1000);
   } catch (error) {
@@ -146,38 +209,80 @@ function renderResult(result, output) {
   decoded = result;
   modelOutput = output;
   $("ipa").append("[");
-  for (const phone of result.phones) {
-    const symbol = document.createElement("span");
+  for (const [index, phone] of result.phones.entries()) {
+    const symbol = document.createElement("button");
+    symbol.type = "button";
+    symbol.className = "sound-choice";
     symbol.textContent = phone.phoneme;
     symbol.dataset.start = phone.startFrame;
     symbol.dataset.end = phone.endFrame;
+    symbol.setAttribute("aria-label", `Sound ${index + 1}: ${phone.phoneme}`);
+    symbol.setAttribute("aria-pressed", "false");
+    symbol.onclick = () => selectPhone(index, true);
+    symbol.onkeydown = (event) => {
+      const next = { ArrowLeft: Math.max(0, index - 1), ArrowRight: Math.min(result.phones.length - 1, index + 1),
+        Home: 0, End: result.phones.length - 1 }[event.key];
+      if (next === undefined) return;
+      event.preventDefault();
+      selectPhone(next, true);
+      $("ipa").querySelectorAll("button")[next].focus();
+    };
     $("ipa").append(symbol);
-    const detail = document.createElement("details");
-    detail.className = "phone";
-    const summary = document.createElement("summary");
-    summary.append(phone.phoneme + " ");
-    const confidence = document.createElement("small");
-    confidence.textContent = `${Math.round(phone.confidence * 100)}%`;
-    summary.append(confidence);
-    detail.append(summary);
-    const times = document.createElement("p");
-    times.textContent = `Frames ${phone.startFrame}–${phone.endFrame - 1} · ${(phone.startFrame * FRAME_SECONDS).toFixed(2)}–${(phone.endFrame * FRAME_SECONDS).toFixed(2)}s`;
-    detail.append(times);
-    for (const alternative of phone.top_k) {
-      const row = document.createElement("p");
-      row.textContent = `${alternative.phoneme} · ${(alternative.probability * 100).toFixed(1)}%`;
-      detail.append(row);
-    }
-    $("phones").append(detail);
   }
   $("ipa").append("]");
+  $("phone-count").textContent = `${result.phones.length} sounds`;
+  $("copy-ipa").disabled = !result.phones.length;
   $("frame-cursor").max = result.path.length - 1;
   $("frame-cursor").value = 0;
   $("model-version").textContent = `Production model · ${output.deploy_marker || "version not reported"} · ${result.path.length} frames`;
   $("result").hidden = false;
   paintFrames();
   inspectFrame(0);
+  if (result.phones.length) selectPhone(0);
 }
+
+function selectPhone(index, seek = false) {
+  if (!decoded) return;
+  const phone = decoded.phones[index];
+  for (const [i, symbol] of $("ipa").querySelectorAll("button").entries()) {
+    symbol.setAttribute("aria-pressed", String(i === index));
+    symbol.tabIndex = i === index ? 0 : -1;
+  }
+  $("phones").hidden = false;
+  $("selected-symbol").textContent = phone.phoneme;
+  $("selected-position").textContent = `${index + 1} / ${decoded.phones.length}`;
+  $("selected-time").textContent = `${(phone.startFrame * FRAME_SECONDS).toFixed(2)}–${(phone.endFrame * FRAME_SECONDS).toFixed(2)} sec · approximate`;
+  $("selected-confidence").textContent = `${Math.round(phone.confidence * 100)}% confidence`;
+  $("alternatives").replaceChildren();
+  for (const alternative of phone.top_k) {
+    const chip = document.createElement("span");
+    chip.className = "alternative";
+    chip.append(alternative.id === modelOutput.frame_matrix.blank_id ? "Blank" : alternative.phoneme);
+    const percent = document.createElement("small");
+    percent.textContent = `${(alternative.probability * 100).toFixed(1)}%`;
+    chip.append(percent);
+    $("alternatives").append(chip);
+  }
+  if (seek) {
+    inspectFrame(phone.startFrame);
+    $("playback").currentTime = phone.startFrame * FRAME_SECONDS;
+  }
+}
+
+$("copy-ipa").onclick = async () => {
+  if (!decoded) return;
+  clearTimeout(copyTimer);
+  try {
+    await navigator.clipboard.writeText(`[${decoded.phones.map(phone => phone.phoneme).join("")}]`);
+    $("copy-status").textContent = "Copied";
+  } catch {
+    $("copy-status").textContent = "Copy unavailable. Select the IPA text to copy it.";
+  }
+  copyTimer = setTimeout(() => { $("copy-status").textContent = ""; }, 3000);
+};
+$("model-details").addEventListener("toggle", () => {
+  if ($("model-details").open) paintFrames();
+});
 
 function paintFrames() {
   if (!decoded) return;
@@ -199,7 +304,7 @@ function inspectFrame(index) {
   const text = `Frame ${index} · ${(index * FRAME_SECONDS).toFixed(2)}s · ${frame.phoneme} · ${(frame.probability * 100).toFixed(1)}%`;
   $("frame-detail").textContent = text;
   $("frame-cursor").setAttribute("aria-valuetext", text);
-  for (const symbol of $("ipa").querySelectorAll("span")) {
+  for (const symbol of $("ipa").querySelectorAll("button")) {
     symbol.classList.toggle("current-phone", index >= +symbol.dataset.start && index < +symbol.dataset.end);
   }
 }
