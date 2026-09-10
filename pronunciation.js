@@ -41,6 +41,7 @@ function controls() {
 }
 
 function clearResult() {
+  $("drop-zone").classList.remove("has-result");
   $("audio-explorer").hidden = true;
   modelOutput = null;
   decoded = null;
@@ -247,6 +248,7 @@ function renderResult(result, output) {
   $("frame-cursor").value = 0;
   $("model-version").textContent = `Production model · ${output.deploy_marker || "version not reported"} · ${result.path.length} frames`;
   $("result").hidden = false;
+  $("drop-zone").classList.add("has-result");
   paintFrames();
   explorer.show(result.phones);
   inspectFrame(0);

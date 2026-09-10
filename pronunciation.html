@@ -53,6 +53,8 @@
       <h2>IPA transcription <span id="phone-count"></span></h2>
       <button id="copy-ipa" class="quiet" type="button">Copy IPA</button>
     </div>
+    <div class="ipa-surface"><p id="ipa" aria-label="IPA transcription; select a sound to inspect it"></p></div>
+    <div class="result-caption"><p>Select a sound to highlight its audio span. Times are approximate.</p><span id="copy-status" role="status"></span></div>
     <section id="audio-explorer" aria-label="Audio and phoneme timeline" hidden>
       <div class="explorer-toolbar">
         <div class="explorer-transport"><button id="explorer-play" class="quiet" type="button">Play</button><span id="audio-clock" class="mono"></span><span id="now-playing" aria-label="Current phoneme">—</span></div>
@@ -64,17 +66,14 @@
           <div id="audio-plot">
             <div id="audio-axis" aria-hidden="true"></div>
             <div id="phoneme-track" aria-label="Phonemes at their approximate audio positions"></div>
-            <canvas id="spectrogram" height="200" aria-label="Spectrogram of the recording, time left to right, frequency bottom to top. Use the audio position slider to seek."></canvas>
+            <canvas id="spectrogram" height="200" role="slider" tabindex="0" aria-label="Audio position on spectrogram" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-describedby="spectrum-controls"></canvas>
             <div id="selected-region" aria-hidden="true" hidden></div>
             <div id="audio-playhead" aria-hidden="true"></div>
           </div>
         </div>
       </div>
-      <input id="audio-seek" type="range" min="0" max="0" step="0.01" value="0" aria-label="Audio position">
-      <div class="spectrum-caption"><span id="spectrum-status"></span><span>Click to seek · zoom for short sounds</span></div>
+      <div class="spectrum-caption"><span id="spectrum-status"></span><span id="spectrum-controls">Click or drag to seek · arrow keys to fine-tune</span></div>
     </section>
-    <div class="ipa-surface"><p id="ipa" aria-label="IPA transcription; select a sound to inspect it"></p></div>
-    <div class="result-caption"><p>Select a sound to highlight its audio span. Times are approximate.</p><span id="copy-status" role="status"></span></div>
     <div id="phones" class="sound-inspector" hidden aria-label="Selected sound">
       <div class="selected-sound"><span id="selected-symbol"></span><span id="selected-position"></span></div>
       <div class="sound-information">

@@ -12,11 +12,32 @@ export class AudioExplorer {
       if (!audio.paused) audio.pause();
       else audio.play().catch(() => { this.$("spectrum-status").textContent = "Use the audio player above to start playback."; });
     };
-    this.$("audio-seek").oninput = () => this.seek(+this.$("audio-seek").value);
     this.$("audio-zoom").onchange = () => { this.layout(); this.update(true); };
-    this.$("spectrogram").onclick = event => {
-      const bounds = this.$("spectrogram").getBoundingClientRect();
+    const spectrum = this.$("spectrogram");
+    const seekPointer = event => {
+      const bounds = spectrum.getBoundingClientRect();
       this.seek((event.clientX - bounds.left) / bounds.width * this.duration);
+    };
+    spectrum.onpointerdown = event => {
+      if (event.button !== 0) return;
+      spectrum.setPointerCapture(event.pointerId);
+      spectrum.focus({ preventScroll: true });
+      seekPointer(event);
+    };
+    spectrum.onpointermove = event => {
+      if (spectrum.hasPointerCapture(event.pointerId)) seekPointer(event);
+    };
+    spectrum.onpointerup = event => {
+      if (spectrum.hasPointerCapture(event.pointerId)) spectrum.releasePointerCapture(event.pointerId);
+    };
+    spectrum.onkeydown = event => {
+      const step = event.shiftKey ? .1 : .02;
+      const time = { ArrowLeft: this.audio.currentTime - step, ArrowDown: this.audio.currentTime - step,
+        ArrowRight: this.audio.currentTime + step, ArrowUp: this.audio.currentTime + step,
+        Home: 0, End: this.duration }[event.key];
+      if (time === undefined) return;
+      event.preventDefault();
+      this.seek(time);
     };
     for (const event of ["timeupdate", "seeked", "pause", "ended"]) audio.addEventListener(event, () => this.update());
     audio.addEventListener("play", () => {
@@ -52,7 +73,7 @@ export class AudioExplorer {
     this.clear();
     this.duration = samples.length / sampleRate;
     this.$("spectrum-status").textContent = "Drawing the spectrogram…";
-    this.$("audio-seek").max = this.duration;
+    this.$("spectrogram").setAttribute("aria-valuemax", this.duration);
     // Off the UI thread: a long clip must not block recording or playback controls.
     try {
       this.worker = new Worker(new URL("./spectrogram-worker.js", import.meta.url), { type: "module" });
@@ -173,8 +194,8 @@ export class AudioExplorer {
     const time = Math.min(this.duration, Math.max(0, this.audio.currentTime));
     this.$("audio-playhead").style.left = `${time / this.duration * this.width}px`;
     this.$("audio-clock").textContent = `${time.toFixed(2)} / ${this.duration.toFixed(2)}s`;
-    this.$("audio-seek").value = time;
-    this.$("audio-seek").setAttribute("aria-valuetext", `${time.toFixed(2)} seconds of ${this.duration.toFixed(2)}`);
+    this.$("spectrogram").setAttribute("aria-valuenow", time.toFixed(2));
+    this.$("spectrogram").setAttribute("aria-valuetext", `${time.toFixed(2)} seconds of ${this.duration.toFixed(2)}`);
     this.$("explorer-play").textContent = this.audio.paused ? "Play" : "Pause";
     const frame = Math.floor((time + 1e-6) / .02);
     const index = this.phones.findIndex(phone => frame >= phone.startFrame && frame < phone.endFrame);
