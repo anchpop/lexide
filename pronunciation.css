@@ -97,3 +97,31 @@ button.quiet { background: none; border-color: var(--border); padding: 0.4rem 0.
 .audio-input[aria-busy="true"] #status::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 7px; border: 1.5px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .audio-input[aria-busy="true"] #status::before { animation: none; } }
+#audio-explorer { margin-top: 1rem; border: 1px solid var(--border); border-radius: 10px; padding: 0.85rem; background: var(--surface); }
+.explorer-toolbar, .explorer-transport { display: flex; align-items: center; gap: 0.7rem; }
+.explorer-toolbar { justify-content: space-between; margin-bottom: 0.65rem; }
+#audio-clock { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+#now-playing { font-size: 23px; color: var(--accent); min-width: 1.3rem; text-align: center; }
+.zoom-control { font-size: 11px; color: var(--muted); white-space: nowrap; }
+#audio-zoom { font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 5px; }
+.spectrum-layout { display: flex; gap: 7px; }
+.frequency-axis { width: 33px; flex-shrink: 0; position: relative; margin-top: 60px; height: 200px; color: var(--muted); font-size: 9px; text-align: right; }
+.frequency-axis span { position: absolute; right: 0; }
+.frequency-axis span:nth-child(1) { top: -5px; }
+.frequency-axis span:nth-child(2) { top: 50%; transform: translateY(-50%); }
+.frequency-axis span:nth-child(3) { bottom: -4px; }
+#audio-scroll { overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: thin; border-radius: 5px; }
+#audio-plot { position: relative; }
+#audio-axis { height: 24px; position: relative; overflow: hidden; font-size: 9px; color: var(--muted); }
+#audio-axis span { position: absolute; top: 1px; border-left: 1px solid var(--border); padding-left: 3px; white-space: nowrap; }
+#phoneme-track { position: relative; height: 36px; background: var(--bg); border-top: 1px solid var(--border); }
+#phoneme-track button { position: absolute; height: 30px; top: 3px; overflow: hidden; padding: 0; border: 0; border-left: 1px solid var(--accent); border-radius: 2px; background: var(--accent-soft); color: var(--accent); font-size: 13px; }
+#phoneme-track button.narrow { color: transparent; }
+#phoneme-track button.selected, #phoneme-track button.playing { background: var(--accent); color: var(--bg); }
+#phoneme-track button.narrow.selected, #phoneme-track button.narrow.playing { color: transparent; }
+#spectrogram { display: block; width: 100%; height: 200px; cursor: crosshair; }
+#audio-playhead { position: absolute; top: 24px; bottom: 0; width: 2px; background: #fff; box-shadow: 0 0 0 1px #1118; pointer-events: none; }
+#selected-region { position: absolute; top: 60px; bottom: 0; border: 1px solid #b5fadc; background: #aff5d820; pointer-events: none; }
+#audio-seek { display: block; width: calc(100% - 40px); margin: 0.6rem 0 0.4rem 40px; accent-color: var(--accent); }
+.spectrum-caption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.3rem 1rem; color: var(--muted); font-size: 10px; }
+@media (max-width: 500px) { #audio-explorer { padding: 0.7rem; } .explorer-transport { gap: 0.4rem; } #audio-clock { font-size: 10px; } .zoom-control { font-size: 10px; } }

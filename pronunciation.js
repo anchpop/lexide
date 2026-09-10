@@ -1,3 +1,4 @@
+import { AudioExplorer } from "./audio-explorer.js";
 import { unpackMatrix, decodePath } from "./pronunciation-decoder.mjs";
 
 // Existing production Lexide model, also used by Yap. No credentials in the page.
@@ -17,6 +18,13 @@ let modelOutput = null;
 let decoded = null;
 let copyTimer = null;
 const FRAME_SECONDS = 0.02;
+const explorer = new AudioExplorer({
+  audio: $("playback"),
+  onPhone: (index, seek) => selectPhone(index, seek),
+  onFrame: time => {
+    if (decoded) inspectFrame(Math.min(decoded.path.length - 1, Math.floor((time + 1e-6) / FRAME_SECONDS)));
+  },
+});
 
 
 function controls() {
@@ -33,6 +41,7 @@ function controls() {
 }
 
 function clearResult() {
+  $("audio-explorer").hidden = true;
   modelOutput = null;
   decoded = null;
   $("model-version").textContent = "";
@@ -46,6 +55,7 @@ function clearResult() {
 }
 
 function clearAudio() {
+  explorer.clear();
   samples = null;
   $("clip-info").hidden = true;
   $("drop-zone").classList.remove("has-audio");
@@ -80,6 +90,7 @@ async function prepareAudio(blob, label) {
     source.start();
     const mono = await offline.startRendering();
     samples = Array.from(mono.getChannelData(0));
+    explorer.load(samples, SAMPLE_RATE);
     playbackURL = URL.createObjectURL(blob);
     $("playback").src = playbackURL;
     $("playback").hidden = false;
@@ -237,6 +248,7 @@ function renderResult(result, output) {
   $("model-version").textContent = `Production model · ${output.deploy_marker || "version not reported"} · ${result.path.length} frames`;
   $("result").hidden = false;
   paintFrames();
+  explorer.show(result.phones);
   inspectFrame(0);
   if (result.phones.length) selectPhone(0);
 }
@@ -263,10 +275,8 @@ function selectPhone(index, seek = false) {
     chip.append(percent);
     $("alternatives").append(chip);
   }
-  if (seek) {
-    inspectFrame(phone.startFrame);
-    $("playback").currentTime = phone.startFrame * FRAME_SECONDS;
-  }
+  explorer.select(index, seek);
+  if (seek) explorer.seek(phone.startFrame * FRAME_SECONDS);
 }
 
 $("copy-ipa").onclick = async () => {
@@ -315,7 +325,7 @@ $("frame-cursor").oninput = () => {
   $("playback").currentTime = index * FRAME_SECONDS;
 };
 $("playback").addEventListener("timeupdate", () => {
-  if (decoded) inspectFrame(Math.min(decoded.path.length - 1, Math.floor($("playback").currentTime / FRAME_SECONDS)));
+  if (decoded) inspectFrame(Math.min(decoded.path.length - 1, Math.floor(($("playback").currentTime + 1e-6) / FRAME_SECONDS)));
 });
 window.addEventListener("resize", paintFrames);
 $("download-frames").onclick = () => {
