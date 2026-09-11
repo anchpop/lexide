@@ -510,6 +510,50 @@ def run_narrowing(lang: str, data_dir: Path) -> None:
     narrow.run([lang])
 
 
+# The voice=null sources whose speaker identity comes from the embedding →
+# clustering pipeline (train/speaker-embed/). Tatoeba/TTS carry a real
+# `voice`; film carries a diarization-derived speaker_cluster from extraction.
+SPEAKER_CLUSTERED_SOURCES = ("fleurs", "pimsleur")
+
+
+def refresh_speaker_clusters(lang: str, data_dir: Path) -> None:
+    """Bring the language's speaker_cluster labels up to date, in place.
+
+    FLEURS/Pimsleur rows have voice=null; per-token acoustic analysis needs a
+    speaker id per clip (see "Speaker identity" in CLAUDE.md), so those rows
+    get a pseudo-speaker from ECAPA embeddings (Modal, per-clip cache — only
+    new clips are embedded) + agglomerative clustering. Runs after
+    phonemes.jsonl is written because clustering excludes silence-dropped
+    clips through it. Needs the deployed `speaker-embed` Modal app; pass
+    --skip-speaker-cluster for an offline run (the manifest keeps whatever
+    labels it had).
+    """
+    embed_dir = Path(__file__).resolve().parents[2] / "train" / "speaker-embed"
+    sys.path.insert(0, str(embed_dir))
+    try:
+        import embed
+        import cluster
+    finally:
+        sys.path.remove(str(embed_dir))
+    if data_dir.resolve() != embed.AUDIO.resolve():
+        # embed's cache keys and cluster's manifest paths are rooted at the
+        # canonical data/audio; silently clustering a different tree would
+        # mix caches across corpora.
+        raise ValueError(
+            f"speaker clustering only supports the canonical data dir "
+            f"{embed.AUDIO} (got {data_dir}); pass --skip-speaker-cluster"
+        )
+    clips = embed.clips_needing_embeddings(
+        [lang], set(SPEAKER_CLUSTERED_SOURCES), limit=None
+    )
+    if not clips:
+        return
+    print(f"{lang}: refreshing speaker clusters "
+          f"({len(clips)} {'/'.join(SPEAKER_CLUSTERED_SOURCES)} clips) ...")
+    embed.embed_clips(clips)
+    cluster.cluster_language(lang, sources=SPEAKER_CLUSTERED_SOURCES, write=True)
+
+
 def ensure_backend_sidecar(lang: str, data_dir: Path) -> Path:
     """Bring a backend-required language's label chain up to date, in place.
 
@@ -857,6 +901,8 @@ def _run_parallel_languages(
             ]
             if args.skip_vad:
                 cmd.append("--skip-vad")
+            if args.skip_speaker_cluster:
+                cmd.append("--skip-speaker-cluster")
             if args.allow_noncommercial:
                 cmd.append("--allow-noncommercial")
             if lang in backend_paths:
@@ -907,6 +953,11 @@ def main():
                              "Use only when you're certain vad coverage is "
                              "current — by default we keep vad in lockstep "
                              "with phonemes.")
+    parser.add_argument("--skip-speaker-cluster", action="store_true",
+                        help="Don't refresh manifest speaker_cluster labels "
+                             "for the voice=null sources (FLEURS/Pimsleur). "
+                             "Use for offline runs — embedding needs the "
+                             "deployed speaker-embed Modal app.")
     parser.add_argument(
         "--jobs", type=int, default=1,
         help="Process this many languages concurrently. Each language writes "
@@ -1218,6 +1269,9 @@ def main():
         if not args.skip_vad:
             print(f"{lang}: regenerating vad.jsonl ...")
             regenerate_vad(phonemes_path, lang_dir)
+
+        if not args.skip_speaker_cluster:
+            refresh_speaker_clusters(lang, args.data_dir)
 
     if langs_with_unknowns:
         print(f"\n{len(langs_with_unknowns)} language(s) had unknown tokens "

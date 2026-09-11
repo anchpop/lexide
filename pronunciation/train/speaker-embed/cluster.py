@@ -98,6 +98,74 @@ def gender_purity(files, labels, rows) -> tuple[float, int] | None:
     return float(np.mean(pur)), len(pur)
 
 
+def cluster_language(lang: str, *, sources=("fleurs", "pimsleur"),
+                     threshold: float = 0.15, pimsleur_threshold: float = 0.45,
+                     validate_gender: bool = False,
+                     write: bool = False) -> dict[str, str]:
+    """Assign speaker_cluster for one language's embedded sources.
+
+    Returns {file: cluster_id}. With write=True the manifest is rewritten:
+    rows of the clustered `sources` get their speaker_cluster replaced (so
+    stale labels on now-silent clips drop), while rows of every other source
+    keep theirs untouched — film rows carry a speaker_cluster from ElevenLabs
+    diarization at extraction time, which this pipeline must never strip.
+    """
+    valid = phonemes_fileset(lang)
+    if valid is None:
+        print(f"{lang}: WARNING — no phonemes.jsonl; clustering ALL clips "
+              f"(silent clips not excluded). Run preprocess first.")
+    assignments: dict[str, str] = {}
+
+    if "fleurs" in sources:
+        files, X, rows = load_clips(lang, "fleurs", valid)
+        if files:
+            labels = agglom(X, threshold)
+            for f, l in zip(files, labels):
+                assignments[f] = f"{lang}:fleurs:s{int(l):03d}"
+            n_clusters = len(set(labels))
+            msg = f"{lang} fleurs: {len(files)} clips → {n_clusters} speakers @ {threshold}"
+            if validate_gender:
+                gp = gender_purity(files, labels, rows)
+                if gp:
+                    msg += f"  | gender purity {gp[0]:.3f} ({gp[1]} clusters)"
+            print(msg)
+
+    if "pimsleur" in sources:
+        files, X, rows = load_clips(lang, "pimsleur", valid)
+        if files:
+            by_course: dict[str, list[int]] = defaultdict(list)
+            for i, f in enumerate(files):
+                by_course[course_of(f) or "_unknown"].append(i)
+            total_speakers = 0
+            for course, idxs in by_course.items():
+                sub = X[idxs]
+                labels = agglom(sub, pimsleur_threshold)
+                for j, l in zip(idxs, labels):
+                    assignments[files[j]] = f"{lang}:pims:{course}:s{int(l):03d}"
+                total_speakers += len(set(labels))
+            print(f"{lang} pimsleur: {len(files)} clips across {len(by_course)} courses "
+                  f"→ {total_speakers} speakers @ {pimsleur_threshold}")
+
+    if write and assignments:
+        p = AUDIO / lang / "manifest.jsonl"
+        out = []
+        for line in p.read_text().splitlines():
+            if not line.strip():
+                continue
+            d = json.loads(line)
+            if d.get("source") in sources:
+                # Rewrite fresh each run (drop stale labels, e.g. on clips
+                # now excluded as silent). Other sources keep their own
+                # speaker_cluster (film: diarization-derived).
+                d.pop("speaker_cluster", None)
+                if d["file"] in assignments:
+                    d["speaker_cluster"] = assignments[d["file"]]
+            out.append(json.dumps(d, ensure_ascii=False))
+        p.write_text("\n".join(out) + "\n")
+        print(f"   wrote speaker_cluster for {len(assignments)} clips to {p}")
+    return assignments
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--langs", nargs="+", required=True)
@@ -110,57 +178,11 @@ def main():
     args = ap.parse_args()
 
     for lang in args.langs:
-        valid = phonemes_fileset(lang)
-        if valid is None:
-            print(f"{lang}: WARNING — no phonemes.jsonl; clustering ALL clips "
-                  f"(silent clips not excluded). Run preprocess first.")
-        assignments: dict[str, str] = {}
-
-        if "fleurs" in args.sources:
-            files, X, rows = load_clips(lang, "fleurs", valid)
-            if files:
-                labels = agglom(X, args.threshold)
-                for f, l in zip(files, labels):
-                    assignments[f] = f"{lang}:fleurs:s{int(l):03d}"
-                n_clusters = len(set(labels))
-                msg = f"{lang} fleurs: {len(files)} clips → {n_clusters} speakers @ {args.threshold}"
-                if args.validate_gender:
-                    gp = gender_purity(files, labels, rows)
-                    if gp:
-                        msg += f"  | gender purity {gp[0]:.3f} ({gp[1]} clusters)"
-                print(msg)
-
-        if "pimsleur" in args.sources:
-            files, X, rows = load_clips(lang, "pimsleur", valid)
-            if files:
-                by_course: dict[str, list[int]] = defaultdict(list)
-                for i, f in enumerate(files):
-                    by_course[course_of(f) or "_unknown"].append(i)
-                total_speakers = 0
-                for course, idxs in by_course.items():
-                    sub = X[idxs]
-                    labels = agglom(sub, args.pimsleur_threshold)
-                    for j, l in zip(idxs, labels):
-                        assignments[files[j]] = f"{lang}:pims:{course}:s{int(l):03d}"
-                    total_speakers += len(set(labels))
-                print(f"{lang} pimsleur: {len(files)} clips across {len(by_course)} courses "
-                      f"→ {total_speakers} speakers @ {args.pimsleur_threshold}")
-
-        if args.write and assignments:
-            p = AUDIO / lang / "manifest.jsonl"
-            out = []
-            for line in p.read_text().splitlines():
-                if not line.strip():
-                    continue
-                d = json.loads(line)
-                # Rewrite speaker_cluster fresh each run (drop stale labels, e.g.
-                # on clips now excluded as silent).
-                d.pop("speaker_cluster", None)
-                if d["file"] in assignments:
-                    d["speaker_cluster"] = assignments[d["file"]]
-                out.append(json.dumps(d, ensure_ascii=False))
-            p.write_text("\n".join(out) + "\n")
-            print(f"   wrote speaker_cluster for {len(assignments)} clips to {p}")
+        cluster_language(
+            lang, sources=tuple(args.sources), threshold=args.threshold,
+            pimsleur_threshold=args.pimsleur_threshold,
+            validate_gender=args.validate_gender, write=args.write,
+        )
 
 
 if __name__ == "__main__":

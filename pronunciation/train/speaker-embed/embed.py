@@ -77,22 +77,18 @@ def clips_needing_embeddings(langs, sources, limit):
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--langs", nargs="+", default=None)
-    ap.add_argument("--sources", nargs="+", default=list(DEFAULT_SOURCES))
-    ap.add_argument("--limit", type=int, default=None, help="per-lang cap (testing)")
-    ap.add_argument("--batch", type=int, default=64)
-    ap.add_argument("--concurrency", type=int, default=12, help="parallel Modal calls")
-    args = ap.parse_args()
+def embed_clips(clips, *, batch: int = 64, concurrency: int = 12) -> int:
+    """Embed the uncached (lang, file) clips via the deployed Modal app.
 
-    clips = clips_needing_embeddings(args.langs, set(args.sources), args.limit)
+    Returns the number of newly embedded clips. Cache is written as each batch
+    returns (resumable: a kill mid-run just leaves more misses next time).
+    """
     cached = [c for c in clips if is_cached(*c)]
     misses = [c for c in clips if not is_cached(*c)]
     print(f"clips={len(clips)} | already cached={len(cached)} | to embed={len(misses)}")
     if not misses:
         print("nothing to embed — all cached (fast path).")
-        return
+        return 0
 
     import modal
     Embedder = modal.Cls.from_name("speaker-embed", "SpeakerEmbedder")
@@ -107,22 +103,35 @@ def main():
         by_key = {r["key"]: r["embedding"] for r in res}
         return [(lang, file, by_key[f"{lang}/{file}"]) for lang, file in chunk]
 
-    batches = [misses[i:i + args.batch] for i in range(0, len(misses), args.batch)]
+    batches = [misses[i:i + batch] for i in range(0, len(misses), batch)]
     t0, done = time.time(), 0
     # Concurrent Modal calls — the embed itself is cheap; this is round-trip
-    # bound, so parallel batches are the win. Cache is written as each returns
-    # (resumable: a kill mid-run just leaves more misses next time).
-    with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+    # bound, so parallel batches are the win.
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
         futs = [ex.submit(process_batch, b) for b in batches]
         for fut in as_completed(futs):
             for lang, file, emb in fut.result():
                 save_embedding(lang, file, emb)
                 done += 1
-            if done % (args.batch * 10) < args.batch or done >= len(misses):
+            if done % (batch * 10) < batch or done >= len(misses):
                 rate = done / (time.time() - t0)
                 print(f"  embedded {done}/{len(misses)} ({rate:.0f}/s)", flush=True)
     print(f"done: embedded {done} new clips in {time.time()-t0:.0f}s "
           f"({len(cached)} were already cached).")
+    return done
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--langs", nargs="+", default=None)
+    ap.add_argument("--sources", nargs="+", default=list(DEFAULT_SOURCES))
+    ap.add_argument("--limit", type=int, default=None, help="per-lang cap (testing)")
+    ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--concurrency", type=int, default=12, help="parallel Modal calls")
+    args = ap.parse_args()
+
+    clips = clips_needing_embeddings(args.langs, set(args.sources), args.limit)
+    embed_clips(clips, batch=args.batch, concurrency=args.concurrency)
 
 
 if __name__ == "__main__":
