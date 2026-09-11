@@ -77,3 +77,6 @@ tmp/
 temp/
 target/
 train/data/generated-by-big-model/
+
+# Generated browser assets; built from tagging/web-demo/www source files.
+tagging/web-demo/www/assets/

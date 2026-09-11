@@ -1,7 +1,8 @@
 # Lexide - Multilingual Linguistic Analysis 
 
-**[Live demo](https://anchpop.github.io/lexide/)** — the parsley sentence segmenter +
-tokenizer running in your browser · [`lexide` on crates.io](https://crates.io/crates/lexide)
+**Live demos:** [Segmentation](https://anchpop.github.io/lexide/) ·
+[Pronunciation](https://anchpop.github.io/lexide/pronunciation.html) ·
+[`lexide` on crates.io](https://crates.io/crates/lexide)
 
 There are two projects here, one is models for tagging sentences with POS labels and other info, the other is for converting audio input to a sequence of phonemes.
 

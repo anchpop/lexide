@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lexide · pronunciation</title>
+<script src="./assets/theme.d45efdaf2d93c633.js"></script>
+<link rel="stylesheet" href="./assets/demo.4678e990c17ac8ec.css">
+<link rel="stylesheet" href="./assets/pronunciation.0db8cad659fa03c3.css">
+</head>
+<body class="pronunciation-page">
+<main>
+  <nav class="demo-tabs" aria-label="Demos">
+    <a href="./">Segmentation</a>
+    <a href="./pronunciation.html" aria-current="page">Pronunciation</a>
+  </nav>
+  <header>
+    <span class="brand">lexide <span>/ pronunciation</span></span>
+    <nav aria-label="Model and appearance">
+      <a href="https://huggingface.co/anchpop/lexide-pronunciation" target="_blank" rel="noreferrer">model ↗</a>
+      <button id="theme"></button>
+    </nav>
+  </header>
+  <div class="intro">
+    <h1>Speech, sound by sound.</h1>
+    <p>Turn a short recording into IPA. Listen back and explore what the model hears.</p>
+  </div>
+  <section class="audio-input" id="drop-zone" aria-label="Audio input">
+    <div class="section-heading"><h2>Your audio</h2><span class="limit">20 sec max</span></div>
+    <input id="audio-file" type="file" accept="audio/*" hidden aria-label="Choose an audio clip">
+    <div class="source-picker">
+    <p class="drop-title">Drop an audio clip here</p>
+    <div class="source-actions">
+      <button id="upload" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M5 15v5h14v-5"/></svg>Upload audio</button>
+      <span class="or">or</span>
+      <button id="record" type="button">Record microphone</button>
+    </div>
+    <p class="drop-hint" id="audio-help">WAV, MP3 & other audio formats · up to 25 MB</p>
+    </div>
+    <div class="clip-info" id="clip-info" hidden><span id="clip-name"></span><span id="clip-duration"></span></div>
+    <audio id="playback" controls hidden></audio>
+    <div class="submit-row">
+      <p id="status" role="status" aria-live="polite">Choose a clip to get started.</p>
+      <div class="submit-actions">
+        <button id="cancel" type="button" hidden>Cancel</button>
+        <button id="retry" class="primary" type="button" hidden>Retry</button>
+      </div>
+    </div>
+  </section>
+  <section id="result" aria-label="Pronunciation result" hidden>
+    <div class="section-heading">
+      <h2>IPA transcription <span id="phone-count"></span></h2>
+      <button id="copy-ipa" class="quiet" type="button">Copy IPA</button>
+    </div>
+    <div class="ipa-surface"><p id="ipa" aria-label="IPA transcription; select a sound to inspect it"></p></div>
+    <div class="result-caption"><p>Select a sound to highlight its audio span. Times are approximate.</p><span id="copy-status" role="status"></span></div>
+    <section id="audio-explorer" aria-label="Audio and phoneme timeline" hidden>
+      <div class="explorer-toolbar">
+        <div class="explorer-transport"><button id="explorer-play" class="quiet" type="button">Play</button><span id="audio-clock" class="mono"></span><span id="now-playing" aria-label="Current phoneme">—</span></div>
+        <label class="zoom-control">Zoom <select id="audio-zoom"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+      </div>
+      <div class="spectrum-layout">
+        <div class="frequency-axis" aria-hidden="true"><span>8 kHz</span><span>4 kHz</span><span>0</span></div>
+        <div id="audio-scroll">
+          <div id="audio-plot">
+            <div id="audio-axis" aria-hidden="true"></div>
+            <div id="phoneme-track" aria-label="Phonemes at their approximate audio positions"></div>
+            <canvas id="spectrogram" height="200" role="slider" tabindex="0" aria-label="Audio position on spectrogram" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-describedby="spectrum-controls"></canvas>
+            <div id="selected-region" aria-hidden="true" hidden></div>
+            <div id="audio-playhead" aria-hidden="true"></div>
+          </div>
+        </div>
+      </div>
+      <div class="spectrum-caption"><span id="spectrum-status"></span><span id="spectrum-controls">Click or drag to seek · arrow keys to fine-tune</span></div>
+    </section>
+    <div id="phones" class="sound-inspector" hidden aria-label="Selected sound">
+      <div class="selected-sound"><span id="selected-symbol"></span><span id="selected-position"></span></div>
+      <div class="sound-information">
+        <div class="sound-heading"><span id="selected-time"></span><span id="selected-confidence"></span></div>
+        <div id="alternatives" aria-label="Model alternatives"></div>
+        <p class="hint">Confidence shows how strongly the model predicts each sound.</p>
+      </div>
+    </div>
+    <details id="model-details">
+      <summary><span>Model details</span><span class="details-caption">Frame timeline & raw output</span></summary>
+      <div class="details-content">
+        <div class="frame-view">
+          <label for="frame-cursor">Explore individual frames</label>
+          <canvas id="frame-strip" height="40" aria-label="Phoneme predictions over time. Use the slider below to inspect individual frames."></canvas>
+          <input id="frame-cursor" type="range" min="0" max="0" value="0" step="1" aria-describedby="frame-detail">
+          <p id="frame-detail" class="mono"></p>
+          <p class="hint">Colors distinguish sounds; gray marks CTC blanks, which can occur inside speech. Each frame advances 20 ms. The slider seeks audio; emission times are approximate sound boundaries.</p>
+        </div>
+        <div class="export-row"><button id="download-frames" class="quiet" type="button">Download model output ↓</button><span id="model-version"></span></div>
+      </div>
+    </details>
+  </section>
+  <footer><span>Multilingual phoneme recognition</span><span id="timing"></span></footer>
+</main>
+<script type="module" src="./assets/pronunciation.bea1bffd6cdd02ec.js"></script>
+</body>
+</html>

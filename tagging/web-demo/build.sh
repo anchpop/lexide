@@ -17,4 +17,6 @@ for f in char_tokenizer.safetensors sentence_segmenter.safetensors; do
     fi
 done
 
+python3 build-assets.py
+
 echo "done — serve with: python3 -m http.server -d www"
