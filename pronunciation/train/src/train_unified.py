@@ -385,6 +385,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
             stress_logits=outputs["stress_logits"] if stress_active else None,
             stress_weight=stress_weight,
             stress_targets=stress_seq,
+            stress_available=batch["stress_available"],
             language_head_logits=(
                 outputs["language_head_logits"] if stress_active else {}
             ),
@@ -623,6 +624,7 @@ def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool
             stress_logits=outputs["stress_logits"] if stress_active else None,
             stress_weight=stress_weight,
             stress_targets=stress_seq,
+            stress_available=batch["stress_available"],
             language_head_logits=(
                 outputs["language_head_logits"] if stress_active else {}
             ),

@@ -92,6 +92,7 @@ def joint_ctc_loss(
     stress_logits: torch.Tensor | None,
     stress_weight: float,
     stress_targets: torch.Tensor,
+    stress_available: torch.Tensor | None,
     language_head_logits: dict[str, torch.Tensor],
     language_head_specs: dict[str, dict],
     aligned_targets: dict[str, torch.Tensor],
@@ -102,8 +103,13 @@ def joint_ctc_loss(
     """Compute one joint CTC, grouping only to avoid irrelevant head graphs.
 
     `stress_logits=None` deliberately omits the stress factor (used during the
-    phone-only warmup).  Language heads are selected strictly by each spec's
-    `lang`; a group for another language never evaluates or references them.
+    phone-only warmup).  `stress_available` masks it per sample: a language
+    whose label chain emits no stress (kor/jpn/zho-hans) has "unlabeled", not
+    "unstressed", targets — its samples marginalize the stress factor out so
+    the head never learns to suppress stress on that language's audio.
+    `None` means available for every sample.  Language heads are selected
+    strictly by each spec's `lang`; a group for another language never
+    evaluates or references them.
 
     `reduction="mean"` matches torch CTC's mean reduction (each example
     normalized by its target length, then averaged).  `reduction="none"`
@@ -120,7 +126,7 @@ def joint_ctc_loss(
     for name, spec in language_head_specs.items():
         heads_by_lang[str(spec["lang"])].append(name)
 
-    groups: dict[tuple[str, ...], list[int]] = defaultdict(list)
+    groups: dict[tuple[bool, tuple[str, ...]], list[int]] = defaultdict(list)
     for index, lang in enumerate(langs):
         active_heads = []
         for name in heads_by_lang.get(lang, []):
@@ -128,17 +134,21 @@ def joint_ctc_loss(
             availability = factor_available.get(target_name)
             if availability is not None and bool(availability[index].item()):
                 active_heads.append(name)
-        groups[tuple(sorted(active_heads))].append(index)
+        stress_on = (
+            stress_logits is not None
+            and (stress_available is None or bool(stress_available[index].item()))
+        )
+        groups[(stress_on, tuple(sorted(active_heads)))].append(index)
 
     per_sample = phone_log_probs.new_zeros(batch_size, dtype=torch.float32)
-    for head_names, indices_list in groups.items():
+    for (stress_on, head_names), indices_list in groups.items():
         indices = torch.tensor(indices_list, device=phone_log_probs.device)
         factor_logits = []
         factor_targets = []
         factor_sizes = []
         factor_weights = []
 
-        if stress_logits is not None:
+        if stress_on:
             factor_logits.append(stress_logits.index_select(0, indices))
             factor_targets.append(stress_targets.index_select(0, indices))
             factor_sizes.append(stress_logits.shape[-1])

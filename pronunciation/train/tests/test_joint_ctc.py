@@ -89,6 +89,7 @@ def test_unrelated_and_unavailable_language_heads_receive_no_gradient():
         stress_logits=stress,
         stress_weight=0.3,
         stress_targets=torch.tensor([[0, 1], [1, 0]]),
+        stress_available=None,
         language_head_logits={
             "tha_tone": tha,
             "zho_hans_tone": zho,
@@ -115,6 +116,42 @@ def test_unrelated_and_unavailable_language_heads_receive_no_gradient():
     assert tha.grad[1].abs().sum() == 0
     assert zho.grad is None
     assert jpn.grad is None
+
+
+def test_stress_unavailable_sample_sends_no_stress_gradient():
+    # A language whose labels carry no stress (kor/jpn/zho-hans) has
+    # "unlabeled" stress, not "unstressed" — its samples must marginalize the
+    # stress factor out rather than train the head toward zero.
+    raw_phone = torch.randn(2, 6, 5, requires_grad=True)
+    phone_lp = F.log_softmax(raw_phone, dim=-1)
+    stress = torch.randn(2, 6, 3, requires_grad=True)
+
+    loss = joint_ctc_loss(
+        phone_log_probs=phone_lp,
+        phone_targets=torch.tensor([[1, 2], [2, 1]]),
+        target_lengths=torch.tensor([2, 2]),
+        input_lengths=torch.tensor([6, 6]),
+        phone_blank_id=0,
+        stress_logits=stress,
+        stress_weight=0.3,
+        stress_targets=torch.tensor([[0, 1], [0, 0]]),
+        stress_available=torch.tensor([True, False]),
+        language_head_logits={},
+        language_head_specs={},
+        aligned_targets={},
+        factor_available={},
+        langs=["eng", "kor"],
+    )
+    loss.backward()
+
+    assert raw_phone.grad is not None
+    # Both samples still train the phone factor...
+    assert raw_phone.grad[0].abs().sum() > 0
+    assert raw_phone.grad[1].abs().sum() > 0
+    # ...but only the stress-labeled sample touches the stress head.
+    assert stress.grad is not None
+    assert stress.grad[0].abs().sum() > 0
+    assert stress.grad[1].abs().sum() == 0
 
 
 def test_dataset_encodes_aligned_prosody_and_availability(tmp_path, monkeypatch):
@@ -227,6 +264,7 @@ def test_reduction_none_returns_ordered_per_sample_losses():
         stress_logits=stress,
         stress_weight=0.3,
         stress_targets=torch.tensor([[0, 1], [1, 0], [2, 2]]),
+        stress_available=torch.tensor([True, True, False]),
         language_head_specs={
             "tha_tone": {"lang": "tha", "target": "tone", "num_labels": 6},
         },
@@ -260,6 +298,7 @@ def test_reduction_none_returns_ordered_per_sample_losses():
             stress_logits=stress[i:i + 1],
             stress_weight=0.3,
             stress_targets=kwargs["stress_targets"][i:i + 1],
+            stress_available=kwargs["stress_available"][i:i + 1],
             language_head_specs=kwargs["language_head_specs"],
             language_head_logits={
                 "tha_tone": kwargs["language_head_logits"]["tha_tone"][i:i + 1],

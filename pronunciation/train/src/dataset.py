@@ -232,6 +232,22 @@ class StressDataset(Dataset):
                 "n_audio_samples": n_audio_samples,
             })
 
+        # Does this language's label chain carry stress at all? Some backends
+        # emit none (g2p-kor, pyopenjtalk, g2pm-ipa) — for those languages an
+        # all-zero stress target is "unlabeled", not "unstressed", and
+        # training on it would teach the stress head to suppress stress
+        # whenever the audio sounds like that language (violating
+        # faithful-not-smoothing: a learner's stress-like prominence must
+        # stay reportable). Corpus-level, not per-row: a single genuinely
+        # unstressed row in a stress language must keep its zero targets.
+        lang_carries_stress = any(any(s["stress_seq"]) for s in self.samples)
+        if self.samples and not lang_carries_stress:
+            print(f"  {phonemes_path.parent.name}: labels carry NO stress — "
+                  f"stress factor will be masked (marginalized) for this "
+                  f"language, not trained toward zero.")
+        for s in self.samples:
+            s["stress_available"] = lang_carries_stress
+
         total_skipped = sum(skipped.values())
         if total_skipped:
             print(f"  Skipped {total_skipped}: {skipped}")
@@ -265,6 +281,7 @@ class StressDataset(Dataset):
             ),
             "tone_available": sample["tone_available"],
             "pitch_accent_available": sample["pitch_accent_available"],
+            "stress_available": sample["stress_available"],
             "lang": sample["lang"],
             # Collate reads this: film clips skip synthetic degradation
             # (their audio is already real-world degraded).
@@ -639,6 +656,9 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
         ),
         "pitch_accent_available": torch.tensor(
             [item["pitch_accent_available"] for item in augmented], dtype=torch.bool,
+        ),
+        "stress_available": torch.tensor(
+            [item["stress_available"] for item in augmented], dtype=torch.bool,
         ),
         "vad_probs": vad_batch,   # (B, T_vad) or None if no VAD data in batch
         "vad_lens": vad_lens,
