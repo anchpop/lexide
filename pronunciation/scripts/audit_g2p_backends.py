@@ -515,8 +515,9 @@ def run_audit(lang: str, provider: str, *, manifest: Path, output: Path,
     Incremental: rows whose (file, sentence hash) already have a successful,
     schema-current entry are reused without touching the G2P tool, so a
     fully-cached refresh needs none of the backend dependencies installed.
-    A missing dependency aborts immediately (rather than recording thousands
-    of error rows) and names the module to install.
+    A backend that cannot run at all (missing dependency, no g2p binary)
+    aborts before the cache is touched rather than recording thousands of
+    error rows; the cache is rewritten atomically.
     """
     expected_lang, transcribe = PROVIDERS[provider]
     if lang != expected_lang:
@@ -545,6 +546,13 @@ def run_audit(lang: str, provider: str, *, manifest: Path, output: Path,
     if missing:
         # Probe the backend on one row BEFORE rewriting the cache file, so a
         # missing dependency aborts with the existing audit fully intact.
+        # Every provider already turns the backend's *refusals* (digits,
+        # foreign script — `Unlabelable`) into `exclude_reason` rows, so an
+        # exception escaping it is infrastructure — no g2p binary, a dead
+        # server, a missing module — and would poison every row the same
+        # way (2026-09-09: a G2P_BIN not exported into the audit subprocess
+        # cached 825 `g2p binary not found` rows that then failed the
+        # sidecar build).
         try:
             transcribe(missing[0]["sentence"])
         except ModuleNotFoundError as exc:
@@ -553,11 +561,17 @@ def run_audit(lang: str, provider: str, *, manifest: Path, output: Path,
                 f"{len(missing)} new/changed {lang} row(s) "
                 f"(pip install {exc.name}); audit cache left untouched."
             ) from exc
-        except Exception:
-            pass  # per-row failures are recorded as error rows below
+        except Exception as exc:
+            raise SystemExit(
+                f"{provider} cannot audit {lang} ({type(exc).__name__}: {exc}); "
+                f"{len(missing)} new/changed row(s) pending, audit cache "
+                f"left untouched."
+            ) from exc
 
     computed = 0
-    with output.open("w") as out:
+    errors = 0
+    tmp = output.with_name(output.name + ".tmp")
+    with tmp.open("w") as out:
         for index, rec in enumerate(records, 1):
             sentence = rec["sentence"]
             digest = hashlib.sha256(sentence.encode()).hexdigest()
@@ -576,7 +590,16 @@ def run_audit(lang: str, provider: str, *, manifest: Path, output: Path,
                 except Exception as exc:
                     backend_output = None
                     error = f"{type(exc).__name__}: {exc}"
+                    errors += 1
                 computed += 1
+                # The probe passed, so a run of failures means the backend
+                # died mid-audit; stop before the cache fills with them.
+                if errors >= 10 and errors == computed:
+                    raise SystemExit(
+                        f"{provider}: first {errors} computed {lang} rows all "
+                        f"failed (last: {error}); aborting, audit cache left "
+                        f"untouched."
+                    )
                 result = {
                     "file": rec["file"],
                     "lang": lang,
@@ -592,6 +615,10 @@ def run_audit(lang: str, provider: str, *, manifest: Path, output: Path,
             out.flush()
             if computed and (index % 25 == 0 or index == len(records)):
                 print(f"{provider}: {index}/{len(records)} ({computed} computed)")
+    tmp.replace(output)
+    if errors:
+        print(f"{provider}: {errors} of {computed} computed {lang} rows "
+              f"recorded an error (retried on the next run)")
     return output
 
 

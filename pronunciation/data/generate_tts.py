@@ -49,6 +49,14 @@ LANG_CONFIG = {
     "zho-hans": "cmn-CN",
     "hin": "hi-IN",
     "jpn": "ja-JP",
+    "kor": "ko-KR",
+    # Ride-along languages: no tagging corpus, so load_sentences falls back to
+    # data/tts_sentences/<lang>.jsonl (build_tts_sentences.py, Tatoeba text).
+    # fas is absent deliberately: neither Google Cloud TTS nor Gemini TTS
+    # supports Persian (ar-XA lists 30 Chirp3-HD voices, fa-IR lists zero).
+    "ara": "ar-XA",
+    "ces": "cs-CZ",
+    "dan": "da-DK",
 }
 
 TAGGING_DATA = Path(__file__).resolve().parent.parent.parent / "tagging" / "train" / "data"
@@ -113,8 +121,16 @@ def get_chirp3_voices(client, language_code: str) -> list[str]:
 
 
 def load_sentences(lang: str) -> list[str]:
-    """Load sentences from tagging data."""
+    """Load sentences from tagging data, else the Tatoeba-derived pool."""
     path = TAGGING_DATA / f"cleaned_{lang}.jsonl"
+    if not path.exists():
+        path = Path(__file__).resolve().parent / "tts_sentences" / f"{lang}.jsonl"
+    if not path.exists():
+        raise SystemExit(
+            f"No sentence source for {lang}: neither "
+            f"{TAGGING_DATA / f'cleaned_{lang}.jsonl'} nor {path} exists "
+            f"(run data/build_tts_sentences.py for ride-along languages)."
+        )
     sentences = []
     with open(path) as f:
         for line in f:
@@ -268,10 +284,15 @@ def synthesize_one(client, sentence, voice_name, language_code, audio_config, ou
                 input=synthesis_input,
                 voice=voice_params,
                 audio_config=audio_config,
+                # Without a deadline a gRPC call can wait forever; a network
+                # blip at startup once stranded all 10 workers indefinitely
+                # (2026-09-08, zero clips in 80 minutes, every thread parked).
+                timeout=60,
             )
             break
         except Exception as e:
-            if "429" in str(e) and attempt < 4:
+            retryable = "429" in str(e) or "Deadline" in type(e).__name__
+            if retryable and attempt < 4:
                 time.sleep(2 ** attempt)
                 continue
             print(f"Error synthesizing '{sentence[:60]}...': {e}")

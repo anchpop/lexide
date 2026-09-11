@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit local audio (FLEURS or Tatoeba) with Groq Whisper, phoneme-level PER.
+"""Audit local audio (FLEURS, Tatoeba, TTS, ...) with Groq Whisper, phoneme-level PER.
 
 One source-parameterized auditor for both corpora — they differ only in which
 manifest `source` to read and which exclusions file to write. We use
@@ -59,6 +59,7 @@ LANG_TO_ISO639_1 = {
     "deu": "de", "eng": "en", "fra": "fr", "ita": "it",
     "por": "pt", "rus": "ru", "spa": "es",
     "tha": "th", "zho-hans": "zh", "hin": "hi", "jpn": "ja",
+    "kor": "ko", "ara": "ar", "ces": "cs", "dan": "da",
 }
 
 
@@ -308,6 +309,39 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
     }
 
 
+def rescore(path: Path, langs: set[str] | None) -> None:
+    """Recompute expected/actual phonemes and PER from stored transcripts."""
+    if not path.exists():
+        raise SystemExit(f"{path} does not exist")
+    records = [json.loads(line) for line in path.open() if line.strip()]
+    todo = [r for r in records
+            if r.get("ok") and "whisper_text" in r
+            and (langs is None or r.get("lang") in langs)]
+    print(f"Rescoring {len(todo)} of {len(records)} records in {path}")
+    changed = 0
+    for rec in tqdm(todo, desc="rescore"):
+        espeak_lang = rec.get("espeak_voice") or LANG_TO_ESPEAK.get(rec["lang"])
+        if not espeak_lang:
+            continue
+        expected_phonemes, _, _ = phonemize(rec["expected"], espeak_lang)
+        try:
+            actual_phonemes, _, _ = phonemize(rec["whisper_text"], espeak_lang)
+        except Exception:
+            actual_phonemes = []
+        per = phoneme_cer(expected_phonemes, actual_phonemes)
+        if (expected_phonemes, actual_phonemes) != (rec.get("expected_phonemes"), rec.get("actual_phonemes")):
+            changed += 1
+        rec["expected_phonemes"] = expected_phonemes
+        rec["actual_phonemes"] = actual_phonemes
+        rec["per"] = per
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w") as out:
+        for rec in records:
+            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    tmp.replace(path)
+    print(f"Rescored {len(todo)}; phonemes changed on {changed}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True,
@@ -335,10 +369,20 @@ def main() -> None:
     )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--rescore", action="store_true",
+        help="No Groq calls: re-phonemize the stored expected/whisper_text of every "
+             "successful record (for --lang, if given) and recompute PER. For when the "
+             "G2P side of an audit changed — a new label backend, or a phonemizer bug.",
+    )
     args = parser.parse_args()
     if args.out is None:
         args.out = Path("train") / f"{args.source}_asr_exclusions.jsonl"
     load_env_file(args.env_file)
+
+    if args.rescore:
+        rescore(args.out, set(args.lang) if args.lang else None)
+        return
 
     records = load_records(args.audio_root, set(args.lang) if args.lang else None, args.source)
     if args.limit is not None:

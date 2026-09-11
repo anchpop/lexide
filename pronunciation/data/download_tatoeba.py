@@ -40,7 +40,7 @@ from wav_utils import repair_streamed_wav_header
 LANG_CONFIG = {
     "deu": "deu", "eng": "eng", "fra": "fra", "ita": "ita",
     "por": "por", "rus": "rus", "spa": "spa", "tha": "tha",
-    "zho-hans": "cmn", "hin": "hin", "jpn": "jpn",
+    "zho-hans": "cmn", "hin": "hin", "jpn": "jpn", "kor": "kor",
 }
 
 # Each thread gets its own requests.Session for keep-alive. Tatoeba's

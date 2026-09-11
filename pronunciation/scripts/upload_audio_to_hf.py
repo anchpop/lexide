@@ -11,11 +11,18 @@ finished, the local `data/audio/<lang>/` directories contain:
   - vad.jsonl          (optional; only present for sources that have VAD probs)
 
 This script uses `huggingface_hub.HfApi.upload_folder` to mirror those
-directories to `anchpop/lexide-pronunciation-audio` — which is what the
-sky_*.yaml training yamls download at runtime.
+directories to `anchpop/lexide-pronunciation-audio`.
 
-Run after all data prep is done and you're ready to swap the dataset
-that the next sky launch will pull.
+**Superseded for backups (2026-09-11).** Training no longer pulls this repo:
+the sky_*.yaml files mount `.work/pron_audio.tar` (built by preprocess.py)
+directly. The loose per-clip mirror this script uploads stalls on the Hub's
+25k-files-per-commit and 256-commits-per-hour caps (the August 2026 attempt
+died at 492 commits with a sixth of the corpus), so the repo now holds the
+packed tar instead, under `snapshots/<date>/` — split into 8 GB parts with
+SHA256SUMS, the train/*_exclusions.jsonl sidecars, and a README with the
+restore steps. To take a new snapshot, split the tar and `upload_folder` the
+directory with `path_in_repo="snapshots/<date>"` (one commit). Keep this
+script only if you need a browsable per-clip mirror for some other reason.
 """
 
 from __future__ import annotations

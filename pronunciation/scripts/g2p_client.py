@@ -20,9 +20,14 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 
 _proc: subprocess.Popen[str] | None = None
 _pid: int | None = None
+# The server answers requests in order on one pipe pair, so a request's
+# write and its readline must not interleave with another thread's (the
+# Groq audit phonemizes from a thread pool; unlocked, replies cross over).
+_lock = threading.Lock()
 
 
 class Unlabelable(RuntimeError):
@@ -75,11 +80,12 @@ def identity() -> str:
 
 def request(**req) -> dict:
     """One raw request (`text` plus `voice` or `lang`, optional `canon`)."""
-    proc = _server()
-    assert proc.stdin is not None and proc.stdout is not None
-    proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
-    proc.stdin.flush()
-    line = proc.stdout.readline()
+    with _lock:
+        proc = _server()
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline()
     if not line:
         raise RuntimeError(f"g2p exited (code {proc.poll()}) on request {req!r}")
     result = json.loads(line)

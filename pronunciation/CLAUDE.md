@@ -81,7 +81,11 @@ These are hard-won and override generic ML instincts. Violating them has burned 
 7. **Stress is suprasegmental.** It has a separate factor head rather than inline
    tokenizer entries, but that factor is composed into the same joint CTC symbol
    and alignment as the phone. Tone/accent factors follow the same rule and are
-   masked when the language or trustworthy label does not apply.
+   masked when the language or trustworthy label does not apply. Stress itself is
+   masked the same way (2026-09-08): a language whose label chain emits no stress
+   at all (kor/jpn/zho-hans — detected corpus-wide at dataset load) has
+   *unlabeled* stress, not zero stress, and its samples marginalize the factor
+   out rather than teach the head to suppress stress on that language's audio.
 
 8. **A prosody target must be decidable from the frames it sits on.** Japanese
    pitch accent was first encoded as a *downstep marker* — one positive mora per
@@ -202,8 +206,11 @@ So resolve the speaker as **`speaker_cluster or voice`** (cluster first — FLEU
 Pimsleur; else `voice` — Tatoeba/TTS), and only treat a clip as speaker-less if
 *both* are absent.
 
-**Speaker-embedding → clustering pipeline** (`train/speaker-embed/`, run in the
-preprocess phase; populates `speaker_cluster` for the `voice=null` sources):
+**Speaker-embedding → clustering pipeline** (`train/speaker-embed/`; populates
+`speaker_cluster` for the `voice=null` sources). `preprocess.py` runs it
+automatically per language after labels+VAD (`--skip-speaker-cluster` for
+offline runs); the standalone CLIs remain for tuning/review. Film rows'
+diarization-derived `speaker_cluster` is never touched by the rewrite:
 - `modal_embed.py` — ECAPA-TDNN (`speechbrain/spkrec-ecapa-voxceleb`) 192-d
   speaker-verification embeddings on Modal (T4). `embed.py` orchestrates with a
   per-clip cache (key = `sha256("<lang>/<file>")`), so re-runs only embed new clips.

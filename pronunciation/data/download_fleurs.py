@@ -28,6 +28,7 @@ LANG_CONFIG = {
     "zho-hans": "cmn_hans_cn",
     "hin": "hi_in",
     "jpn": "ja_jp",
+    "kor": "ko_kr",
 }
 
 # FLEURS audio dialects that differ from the canonical espeak voice in
