@@ -3,7 +3,7 @@
 # JSON + training priors, onnx = exported model artifacts (published on HF
 # anchpop/lexide-parsley/onnx/), tagger/output = training runs.
 data/big/
-data/processed/
+data/processed*/
 data/lemma_tables/
 data/onnx/
 tagger/output/
