@@ -4,6 +4,10 @@ Usage:
     python -m pronunciation.inference.infer --repo <HF-repo-or-local-dir> \\
         path/to/audio.wav [more.wav ...]
 
+    # Length-bucketed offline batches (tune for your GPU and clip durations):
+    python -m pronunciation.inference.infer --repo <repo> --batch-size 4 \\
+        --max-batch-seconds 60 *.wav
+
     # JSON output (one record per audio file) for downstream evaluation:
     python -m pronunciation.inference.infer --repo <repo> --format jsonl \\
         *.wav > predictions.jsonl
@@ -20,9 +24,11 @@ so the same call site loads everything needed for inference.
 import argparse
 import contextlib
 import json
+import math
 import sys
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 import torch
 from huggingface_hub import snapshot_download
@@ -69,63 +75,130 @@ def _is_special_token(token: str) -> bool:
     return token.startswith("<") and token.endswith(">")
 
 
-@torch.no_grad()
-def transcribe(
-    wav_path,
-    model: FactorizedCTCModel,
-    processor: Wav2Vec2Processor,
-    device: torch.device,
-    use_bf16: bool = False,
-):
-    audio, sr = sf.read(wav_path)
-    assert sr == 16000, f"expected 16kHz audio, got {sr}"
+def plan_batches(lengths, batch_size=8, max_batch_samples=960000):
+    """Length-sort within a caller-bounded window; budget includes padding.
 
-    # Training (dataset.py) feeds the RAW waveform — no feature-extractor
-    # normalization. Any model that computes a log-mel internally from
-    # input_values must get the raw waveform to match training: the Cohere
-    # front-end, the mel_sidechannel head, and the regularized-heads acoustic
-    # channel all do. (do_normalize's per-utterance scaling shifts the log-mel;
-    # mel_norm largely absorbs it, but feeding raw removes the dependence.)
-    # The plain wav2vec2 path keeps processor() — its GroupNorm encoder is
-    # scale-robust, so the published champion is unaffected.
-    #
-    # The side-channel transforms (mel bank + optional low-band spectrogram)
-    # run INSIDE model.forward — including the symmetric pre-padding that
-    # center-aligns analysis windows wider than wav2vec2's 400-sample
-    # receptive field with the encoder's frames (see AcousticSidechannel in
-    # train/src/factorized_ctc.py). Call sites must NOT pad, window, or
-    # otherwise pre-process the waveform to "help" the side-channel: feeding
-    # the raw 16 kHz signal is both necessary and sufficient, and any caller
-    # padding would double-shift the alignment.
-    _needs_raw = (
+    An oversized clip runs alone. Indices let callers restore input order.
+    """
+    if batch_size < 1 or max_batch_samples < 1:
+        raise ValueError("batch_size and max_batch_samples must be positive")
+    batch = []
+    for index in sorted(range(len(lengths)), key=lengths.__getitem__):
+        if batch and (len(batch) >= batch_size or
+                      lengths[index] * (len(batch) + 1) > max_batch_samples):
+            yield batch
+            batch = []
+        batch.append(index)
+    if batch:
+        yield batch
+
+
+def read_audio(path):
+    audio, sr = sf.read(path, dtype="float32")
+    if sr != 16000 or audio.ndim != 1 or len(audio) == 0:
+        raise ValueError(f"{path}: expected nonempty 16kHz mono audio")
+    if not np.isfinite(audio).all():
+        raise ValueError(f"{path}: audio contains nonfinite samples")
+    return audio
+
+
+def transcribe(wav_path, model, processor, device, use_bf16=False):
+    return transcribe_batch([wav_path], model, processor, device, use_bf16)[0]
+
+
+def transcribe_batch(paths, model, processor, device, use_bf16=False,
+                     batch_size=1, max_batch_seconds=60.0):
+    """Transcribe a bounded window of files, returning results in input order."""
+    if not math.isfinite(max_batch_seconds) or max_batch_seconds <= 0:
+        raise ValueError("max_batch_seconds must be finite and positive")
+    audios = [read_audio(path) for path in paths]
+    results = [None] * len(audios)
+    for indices in plan_batches([len(a) for a in audios], batch_size,
+                                max(1, int(max_batch_seconds * 16000))):
+        decoded = transcribe_audio_batch(
+            [audios[i] for i in indices], model, processor, device, use_bf16,
+        )
+        for i, tokens in zip(indices, decoded):
+            results[i] = tokens
+    return results
+
+
+@torch.inference_mode()
+def transcribe_audio_batch(audios, model, processor, device, use_bf16=False):
+    """Run a batch, splitting on CUDA OOM; a failing singleton still raises."""
+    try:
+        return _transcribe_audio_batch(audios, model, processor, device, use_bf16)
+    except torch.cuda.OutOfMemoryError:
+        if len(audios) <= 1:
+            raise
+    # Outside the except block: release the failed forward's traceback/tensors
+    # before retrying. Never drop a clip or substitute an empty prediction.
+    torch.cuda.empty_cache()
+    middle = len(audios) // 2
+    return (transcribe_audio_batch(audios[:middle], model, processor, device, use_bf16)
+            + transcribe_audio_batch(audios[middle:], model, processor, device, use_bf16))
+
+
+@torch.inference_mode()
+def _transcribe_audio_batch(audios, model, processor, device, use_bf16=False):
+    """One forward pass over mono float32 arrays; never decode padded frames."""
+    if not audios:
+        return []
+    lengths = torch.tensor([len(a) for a in audios], dtype=torch.long)
+    frame_lengths = model.backbone._get_feat_extract_output_lengths(lengths)
+    if (frame_lengths <= 0).any():
+        raise ValueError("audio is too short for the model's feature extractor")
+    # GroupNorm pools over time before the attention mask is applied. Padding
+    # changes valid frames for these checkpoints; retain singleton semantics.
+    # Cohere batching also remains singleton until its frontend is validated.
+    if (len(audios) > 1 and
+            (getattr(model.backbone.config, "feat_extract_norm", None) == "group"
+             or getattr(model.backbone.config, "model_type", "") == "cohere_conformer_ctc")):
+        return [transcribe_audio_batch([a], model, processor, device, use_bf16)[0]
+                for a in audios]
+    # Match training: acoustic sidechannels and Cohere take raw waveforms;
+    # plain wav2vec2 checkpoints retain feature-extractor normalization.
+    # Sidechannels align their own analysis windows inside the model. Only
+    # right-pad for batching here; never add analysis-window pre-padding.
+    needs_raw = (
         getattr(model.backbone.config, "model_type", "") == "cohere_conformer_ctc"
         or getattr(model, "mel_sidechannel", False)
         or getattr(model, "regularized_heads", False)
     )
-    if _needs_raw:
-        input_values = torch.from_numpy(audio).float().unsqueeze(0).to(device)
+    if needs_raw:
+        input_values = torch.nn.utils.rnn.pad_sequence(
+            [torch.as_tensor(a, dtype=torch.float32) for a in audios], batch_first=True,
+        )
     else:
-        inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
-        input_values = inputs.input_values.to(device)
-
+        # Normalize each utterance independently, before padding.
+        input_values = processor(
+            audios, sampling_rate=16000, return_tensors="pt", padding=True,
+            return_attention_mask=True,
+        ).input_values
+    attention_mask = None
+    if len(audios) > 1:
+        attention_mask = (torch.arange(input_values.shape[1])[None, :] < lengths[:, None])
+        attention_mask = attention_mask.long().to(device)
+    input_values = input_values.to(device)
     autocast_ctx = (
         torch.autocast(device_type=device.type, dtype=torch.bfloat16)
         if use_bf16 and device.type == "cuda"
         else contextlib.nullcontext()
     )
     with autocast_ctx:
-        out = model(input_values)
+        out = model(input_values, attention_mask=attention_mask)
 
-    log_probs = out["log_probs"]           # (1, T, V), proper distribution per frame
-    stress_logits = out["stress_logits"]   # (1, T, 3)
-    nonblank_logit = out["nonblank_logit"] # (1, T)
+    # Three compact transfers per batch, instead of .item() synchronizing the
+    # GPU for every frame/token. Keep the Python CTC run reduction on the CPU.
+    ids = out["log_probs"].argmax(-1).cpu().numpy()
+    stress = torch.log_softmax(out["stress_logits"].float(), -1).cpu().numpy()
+    nonblank = torch.sigmoid(out["nonblank_logit"]).float().cpu().numpy()
+    return [decode_frames(ids[i, :n], stress[i, :n], nonblank[i, :n],
+                          processor.tokenizer, model.blank_id)
+            for i, n in enumerate(frame_lengths.tolist())]
 
-    phoneme_ids = log_probs.argmax(-1).squeeze(0)
-    stress_log_probs = torch.log_softmax(stress_logits.float(), dim=-1).squeeze(0)
-    nonblank_probs = torch.sigmoid(nonblank_logit).squeeze(0)
-    tokenizer = processor.tokenizer
-    blank_id = model.blank_id
 
+def decode_frames(phoneme_ids, stress_log_probs, nonblank_probs, tokenizer, blank_id):
     # Greedy CTC collapse: drop blanks, drop repeats, drop special tokens.
     # Attach stress by summing stress log-probs over each token's emitted run
     # (argmax equals averaging) — the same per-frame product the joint CTC
@@ -136,7 +209,7 @@ def transcribe(
     stress_acc = None
     prev_id = -1
     for t in range(len(phoneme_ids)):
-        tid = phoneme_ids[t].item()
+        tid = int(phoneme_ids[t])
         if tid == blank_id:
             prev_id = -1
             continue
@@ -149,15 +222,15 @@ def transcribe(
         if _is_special_token(token):
             stress_acc = None
             continue
-        stress_acc = stress_log_probs[t].clone()
+        stress_acc = stress_log_probs[t].copy()
         result.append({
             "token": token,
             "stress": stress_acc,  # accumulated over the run; finalized below
             "frame": t,
-            "nonblank_prob": round(nonblank_probs[t].item(), 4),
+            "nonblank_prob": round(float(nonblank_probs[t]), 4),
         })
     for r in result:
-        r["stress"] = int(r["stress"].argmax().item())
+        r["stress"] = int(r["stress"].argmax())
     return result
 
 
@@ -180,7 +253,18 @@ def main():
                         help="cuda / cpu / mps. Default: cuda if available, else cpu.")
     parser.add_argument("--bf16", action="store_true",
                         help="Use bfloat16 autocast (CUDA only). Faster, slight precision drop.")
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Maximum clips per model forward (default: 1). "
+                             "Try 4 for throughput; batch shape can change predictions and emission timing.")
+    parser.add_argument("--max-batch-seconds", type=float, default=60,
+                        help="Padded audio budget per forward (default: 60 seconds).")
+    parser.add_argument("--sort-window", type=int, default=128,
+                        help="Files loaded and length-sorted at a time (default: 128).")
     args = parser.parse_args()
+    if args.batch_size < 1 or args.sort_window < 1:
+        parser.error("--batch-size and --sort-window must be positive")
+    if not math.isfinite(args.max_batch_seconds) or args.max_batch_seconds <= 0:
+        parser.error("--max-batch-seconds must be finite and positive")
 
     if args.device:
         device = torch.device(args.device)
@@ -193,18 +277,23 @@ def main():
         print(f"# Loading {args.repo} on {device}...", file=sys.stderr)
     model, processor = load_model(args.repo, device)
 
-    for path in args.paths:
-        tokens = transcribe(path, model, processor, device, use_bf16=args.bf16)
-        if args.format == "jsonl":
-            print(json.dumps({
-                "path": str(path),
-                "ipa": format_output(tokens),
-                "tokens": tokens,
-            }, ensure_ascii=False))
-        else:
-            print(f"\n{path}:")
-            print(f"  ipa: {format_output(tokens)}")
-            print(f"  tokens: {[t['token'] for t in tokens]}")
+    for start in range(0, len(args.paths), args.sort_window):
+        paths = args.paths[start:start + args.sort_window]
+        results = transcribe_batch(
+            paths, model, processor, device, use_bf16=args.bf16,
+            batch_size=args.batch_size, max_batch_seconds=args.max_batch_seconds,
+        )
+        for path, tokens in zip(paths, results):
+            if args.format == "jsonl":
+                print(json.dumps({
+                    "path": str(path),
+                    "ipa": format_output(tokens),
+                    "tokens": tokens,
+                }, ensure_ascii=False))
+            else:
+                print(f"\n{path}:")
+                print(f"  ipa: {format_output(tokens)}")
+                print(f"  tokens: {[t['token'] for t in tokens]}")
 
 
 if __name__ == "__main__":
