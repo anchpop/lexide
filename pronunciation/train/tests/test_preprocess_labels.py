@@ -151,3 +151,54 @@ def test_verifier_prefers_label_voice_and_keeps_legacy_fallback(tmp_path, monkey
     monkeypatch.setattr(sys, "argv", ["verify_espeak_build.py", "--langs", "spa"])
     assert verifier.main() == 0
     assert voices == ["es-419", "es-419", "es"]
+
+
+@pytest.mark.parametrize("skip", [False, True])
+def test_skip_narrowing_preserves_existing_labels(tmp_path, monkeypatch, skip):
+    lang_dir = tmp_path / "eng"
+    lang_dir.mkdir()
+    (lang_dir / "manifest.jsonl").write_text(json.dumps({
+        "file": "a.wav", "sentence": "hello", "source": "tts",
+    }) + "\n")
+    sf.write(lang_dir / "a.wav", np.full(1600, 0.1, dtype=np.float32), 16000)
+    narrowed = lang_dir / "phonemes_narrowed.jsonl"
+    narrowed.write_text("preserve existing narrowed labels\n")
+    calls = []
+    monkeypatch.setattr(preprocess, "phonemize", lambda *args: (["h"], [0], [(0, 1)]))
+    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"h"})
+    monkeypatch.setattr(preprocess, "run_narrowing", lambda *args: calls.append(args))
+    argv = ["preprocess.py", "--data-dir", str(tmp_path), "--skip-vad",
+            "--skip-speaker-cluster", "--no-pack"]
+    if skip:
+        argv.append("--skip-narrowing")
+    monkeypatch.setattr(sys, "argv", argv)
+    preprocess.main()
+    assert (lang_dir / "phonemes.jsonl").exists()
+    assert calls == ([] if skip else [("eng", tmp_path)])
+    assert narrowed.read_text() == "preserve existing narrowed labels\n"
+
+
+@pytest.mark.parametrize("skip", [False, True])
+def test_parallel_children_propagate_skip_narrowing(tmp_path, monkeypatch, skip):
+    from argparse import Namespace
+
+    commands = []
+
+    class Process:
+        pid = 123
+
+        def __init__(self, command, **kwargs):
+            commands.append(command)
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(preprocess, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(preprocess.subprocess, "Popen", Process)
+    args = Namespace(jobs=2, data_dir=tmp_path, espeak_batch_size=8,
+                     skip_vad=True, skip_speaker_cluster=True,
+                     skip_narrowing=skip, allow_noncommercial=False)
+    preprocess._run_parallel_languages(args, ["eng", "deu"], {})
+    assert len(commands) == 2
+    assert all(("--skip-narrowing" in command) == skip for command in commands)
+    assert all("--no-pack" in command for command in commands)

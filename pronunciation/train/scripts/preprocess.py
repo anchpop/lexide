@@ -269,8 +269,8 @@ VOCAB_EXTENSIONS: set[str] = {
     # not: Italian /dz/ (zio), Portuguese nasal diphthongs põe/muito, and
     # mãe's ɐ̃j (decomposed spellings, exactly as g2p writes them).
     "dz",
-    "õɪ̃",
-    "ũɪ̃",
+    "o\u0303\u026a\u0303",  # õɪ̃ (decomposed, as g2p writes it)
+    "u\u0303\u026a\u0303",  # ũɪ̃
     "ɐ̃j",
     # Stage-3 coarticulatory-nasalization narrowing (espeak_audit/narrow.py): an
     # oral vowel before a CODA nasal surfaces nasalized in every non-French
@@ -972,6 +972,8 @@ def _run_parallel_languages(
                 cmd.append("--skip-vad")
             if args.skip_speaker_cluster:
                 cmd.append("--skip-speaker-cluster")
+            if args.skip_narrowing:
+                cmd.append("--skip-narrowing")
             if args.allow_noncommercial:
                 cmd.append("--allow-noncommercial")
             if lang in backend_paths:
@@ -1022,6 +1024,9 @@ def main():
                              "Use only when you're certain vad coverage is "
                              "current — by default we keep vad in lockstep "
                              "with phonemes.")
+    parser.add_argument("--skip-narrowing", action="store_true",
+                        help="Leave existing narrowed labels untouched; regenerate "
+                             "them separately after this broad-label pass.")
     parser.add_argument("--skip-speaker-cluster", action="store_true",
                         help="Don't refresh manifest speaker_cluster labels "
                              "for the voice=null sources (FLEURS/Pimsleur). "
@@ -1328,7 +1333,8 @@ def main():
                   f"{override_align_failures} alignment failures "
                   f"(fell back to espeak stress)")
 
-        run_narrowing(lang, args.data_dir)
+        if not args.skip_narrowing:
+            run_narrowing(lang, args.data_dir)
 
         if not args.skip_vad:
             print(f"{lang}: regenerating vad.jsonl ...")
