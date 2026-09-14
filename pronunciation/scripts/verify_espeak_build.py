@@ -7,6 +7,15 @@ build: re-phonemize a sample of the existing phonemes.jsonl through the WHOLE
 path — phonemize() then validate_phonemes() (vocab + LANG_PHONEME_REMAP), using
 each row's own espeak_voice — and require byte-identical phoneme output.
 
+This checks the current PREPROCESS label canon, not raw g2p output. English
+now remaps exact tokens ɐ/ᵻ to ə while preserving ɪ: eSpeak's lexical choice
+is not a reliable acoustic distinction (ᵻ means "ɪ or ə"). Old English labels
+may therefore fail until deliberately regenerated. Do not normalize the stored
+references to conceal this expected migration. The label row's recorded voice
+wins, then legacy manifest metadata, then the language default. Do not infer
+new source dialects here: this verifier reproduces labels, not future policy.
+After regeneration it checks both that canon and the persisted per-clip voice.
+
 Run:  scripts/py-linux.sh scripts/verify_espeak_build.py [--per-lang N] [--langs rus,ita]
 
 Exit 0 = every sampled espeak-labeled row reproduces exactly.
@@ -81,7 +90,8 @@ def main() -> int:
         ph_bad = st_bad = 0
         examples = []
         for r in picked:
-            voice = voice_by_file.get(r["file"]) or LANG_TO_ESPEAK[lang]
+            voice = (r.get("espeak_voice") or voice_by_file.get(r["file"])
+                     or LANG_TO_ESPEAK[lang])
             ph, st, _spans = phonemize(r["sentence"], voice)
             ph, st, _unknown = validate_phonemes(ph, st, lang)
             if ph != r["phonemes"]:

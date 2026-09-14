@@ -20,14 +20,14 @@ import hashlib
 import json
 import random
 import time
+import unicodedata
+from collections import defaultdict
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, ConcatDataset, Subset, random_split
 from tqdm import tqdm
-
-import wandb
 
 from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec2Processor
 
@@ -38,6 +38,105 @@ from .dataset import (
 )
 from .factorized_ctc import FactorizedCTCModel
 from .joint_ctc import joint_ctc_loss
+
+
+def normalize_sentence(sentence: str) -> str:
+    """Ignore case, whitespace variation and trailing Unicode punctuation."""
+    sentence = " ".join(sentence.lower().split())
+    while sentence and (sentence[-1].isspace()
+                        or unicodedata.category(sentence[-1]).startswith("P")):
+        sentence = sentence[:-1]
+    return sentence
+
+
+def cap_clips_per_sentence(
+    ds: StressDataset, phonemes_path: Path, max_clips: int = 20,
+) -> None:
+    """Filter loaded samples in place, before source balancing and val splitting.
+
+    StressDataset keeps audio/label metadata but not sentence text. Read text
+    from the selected label file (including narrowed labels), matching only
+    surviving samples by wav_path. Keep the dataset type and sample order so
+    source balancing and cached audio-length lookup continue to work.
+    Applies to every source; TTS and FLEURS rarely repeat sentences.
+    """
+    if max_clips < 0:
+        raise ValueError("--max-clips-per-sentence must be nonnegative")
+    if max_clips == 0:
+        return
+    sentences = {}
+    with phonemes_path.open() as f:
+        for line in f:
+            if line.strip():
+                rec = json.loads(line)
+                sentences[str(phonemes_path.parent / rec["file"])] = normalize_sentence(
+                    rec["sentence"]
+                )
+    groups = defaultdict(list)
+    totals = defaultdict(int)
+    for i, sample in enumerate(ds.samples):
+        key = (sample.get("source") or "unknown", sample["lang"],
+               sentences[sample["wav_path"]])
+        groups[key].append(i)
+        totals[sample["lang"]] += 1
+    rng = random.Random(42)
+    removed = defaultdict(int)
+    dropped = set()
+    for (_, lang, _), indices in groups.items():
+        if len(indices) > max_clips:
+            kept = set(rng.sample(indices, max_clips))
+            dropped.update(i for i in indices if i not in kept)
+            removed[lang] += len(indices) - max_clips
+    ds.samples = [sample for i, sample in enumerate(ds.samples) if i not in dropped]
+    for lang in sorted(totals):
+        print(f"  {lang}: sentence cap removed {removed[lang]} / {totals[lang]} clips "
+              f"(max {max_clips} per source/sentence)")
+
+
+def cap_sources_second(datasets):
+    # Per-source per-lang second-place balancing. For each source class
+    # (pimsleur / fleurs / tatoeba / tts), find the second-most-populous
+    # lang's count C and cap every lang in that source at C. The biggest
+    # lang in each source gets random-downsampled; smaller langs stay.
+    #
+    # Concrete: pimsleur has eng=87k, fra=17k → all langs capped at 17k
+    # for pimsleur, dropping eng pimsleur by 70k. Other sources (fleurs/
+    # tatoeba/tts) are already inherently balanced across langs so this
+    # rarely cuts them.
+    # Pass 1: count (source, lang)
+    counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for ds in datasets:
+        for s in ds.samples:
+            counts[s.get("source") or "unknown"][s["lang"]] += 1
+    # Pass 2: per-source caps (= second-highest lang count, or top if
+    # only one lang has that source).
+    caps: dict[str, int] = {}
+    for source, lang_counts in counts.items():
+        top = sorted(lang_counts.values(), reverse=True)
+        caps[source] = top[1] if len(top) >= 2 else top[0]
+    print(f"Source-class caps (second-highest lang count per source): {caps}")
+    # Pass 3: build Subsets, sampling each (lang, source) down to its cap.
+    rng = random.Random(42)
+    new_datasets = []
+    for ds in datasets:
+        if not isinstance(ds, StressDataset):
+            new_datasets.append(ds)
+            continue
+        by_source: dict[str, list[int]] = defaultdict(list)
+        for i, s in enumerate(ds.samples):
+            by_source[s.get("source") or "unknown"].append(i)
+        kept: list[int] = []
+        for source, idxs in by_source.items():
+            cap = caps.get(source, len(idxs))
+            if len(idxs) > cap:
+                idxs = rng.sample(idxs, cap)
+            kept.extend(idxs)
+        kept.sort()
+        if len(kept) < len(ds):
+            lang = ds.samples[0]["lang"] if ds.samples else "?"
+            print(f"  {lang}: subsampled to {len(kept)} (from {len(ds)})")
+        new_datasets.append(Subset(ds, kept))
+    return new_datasets
 
 
 def _dataloader_worker_init(_worker_id: int) -> None:
@@ -818,6 +917,9 @@ def main():
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--hf-repo", type=str, default=None)
     parser.add_argument("--langs", nargs="*", default=None)
+    parser.add_argument("--max-clips-per-sentence", type=int, default=20,
+                        help="Maximum clips per (source, lang, normalized sentence), "
+                             "before source balancing (default 20; 0 disables).")
     parser.add_argument("--source-cap-second",
                         action=argparse.BooleanOptionalAction,
                         default=True,
@@ -828,7 +930,7 @@ def main():
                              "lang in that source. The most-populous lang "
                              "gets random-subsampled down; smaller langs are "
                              "untouched. Without this, English's 87k Pimsleur "
-                             "clips would dominate (~38% of the corpus) and "
+                             "clips would dominate (~38%% of the corpus) and "
                              "the model would learn English-pronunciation-"
                              "mostly. With it on (default), eng pimsleur "
                              "drops to ~17k (matching the next biggest, fra). "
@@ -919,6 +1021,9 @@ def main():
                              "Both flags must be set together — there's no default, so this "
                              "path can't trigger by accident.")
     args = parser.parse_args()
+
+    if args.max_clips_per_sentence < 0:
+        parser.error("--max-clips-per-sentence must be nonnegative")
 
     if args.stress_weight <= 0:
         raise SystemExit("--stress-weight must be positive")
@@ -1181,54 +1286,11 @@ def main():
                                excluded_target_hashes=asr_exclusions.get(lang_dir.name),
                                min_whisper_logprob=args.min_whisper_logprob)
             print(f"Loaded {lang_dir.name} from {phonemes_file.name}: {len(ds)} samples")
+            cap_clips_per_sentence(ds, phonemes_file, args.max_clips_per_sentence)
             datasets.append(ds)
 
     if args.source_cap_second and datasets:
-        # Per-source per-lang second-place balancing. For each source class
-        # (pimsleur / fleurs / tatoeba / tts), find the second-most-populous
-        # lang's count C and cap every lang in that source at C. The biggest
-        # lang in each source gets random-downsampled; smaller langs stay.
-        #
-        # Concrete: pimsleur has eng=87k, fra=17k → all langs capped at 17k
-        # for pimsleur, dropping eng pimsleur by 70k. Other sources (fleurs/
-        # tatoeba/tts) are already inherently balanced across langs so this
-        # rarely cuts them.
-        from collections import defaultdict
-        import random as _random
-        # Pass 1: count (source, lang)
-        counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        for ds in datasets:
-            for s in ds.samples:
-                counts[s.get("source") or "unknown"][s["lang"]] += 1
-        # Pass 2: per-source caps (= second-highest lang count, or top if
-        # only one lang has that source).
-        caps: dict[str, int] = {}
-        for source, lang_counts in counts.items():
-            top = sorted(lang_counts.values(), reverse=True)
-            caps[source] = top[1] if len(top) >= 2 else top[0]
-        print(f"Source-class caps (second-highest lang count per source): {caps}")
-        # Pass 3: build Subsets, sampling each (lang, source) down to its cap.
-        rng = _random.Random(42)
-        new_datasets = []
-        for ds in datasets:
-            if not isinstance(ds, StressDataset):
-                new_datasets.append(ds)
-                continue
-            by_source: dict[str, list[int]] = defaultdict(list)
-            for i, s in enumerate(ds.samples):
-                by_source[s.get("source") or "unknown"].append(i)
-            kept: list[int] = []
-            for source, idxs in by_source.items():
-                cap = caps.get(source, len(idxs))
-                if len(idxs) > cap:
-                    idxs = rng.sample(idxs, cap)
-                kept.extend(idxs)
-            kept.sort()
-            if len(kept) < len(ds):
-                lang = ds.samples[0]["lang"] if ds.samples else "?"
-                print(f"  {lang}: subsampled to {len(kept)} (from {len(ds)})")
-            new_datasets.append(Subset(ds, kept))
-        datasets = new_datasets
+        datasets = cap_sources_second(datasets)
     if not datasets:
         raise RuntimeError(f"No phonemes.jsonl files matched (langs={args.langs}).")
 
@@ -1383,6 +1445,8 @@ def main():
     run_name = args.model_name.split("/")[-1]
     if teacher is not None:
         run_name = f"distill-{run_name}"
+    import wandb
+
     wandb.init(project=args.wandb_project, name=run_name, config=vars(args))
     args.save_dir.mkdir(parents=True, exist_ok=True)
     best_val_loss = float("inf")

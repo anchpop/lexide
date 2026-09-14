@@ -83,6 +83,57 @@ LANG_TO_ESPEAK = {
     # in their manifest.jsonl.
 }
 
+
+def resolve_espeak_voice(rec: dict, lang: str) -> str:
+    """Select a clip's label voice without guessing its speaker's dialect.
+
+    Explicit metadata wins (notably Pimsleur's Spanish/Castilian course
+    mapping and per-film choices). Only Spanish FLEURS's es_419 dataset and
+    locale-scoped Chirp3 voice names supply a missing dialect. Tatoeba's
+    `voice` is a username, and Gemini's voice names carry no dialect.
+    Unknown dialects retain the canonical `es` fallback; that is a label
+    choice, not evidence that the speaker is Castilian.
+    """
+    if rec.get("espeak_voice"):
+        return rec["espeak_voice"]
+    if lang == "spa":
+        if rec.get("source") == "fleurs":
+            return "es-419"
+        if (rec.get("source") == "tts"
+                and rec.get("tts_backend") in (None, "chirp3")):
+            voice = rec.get("voice") or ""
+            if voice.startswith("es-US-Chirp3-HD-"):
+                return "es-419"
+            if voice.startswith("es-ES-Chirp3-HD-"):
+                return "es"
+    return LANG_TO_ESPEAK[lang]
+
+
+def persist_espeak_voices(manifest_path: Path, records: list[dict],
+                          entries: list[dict]) -> int:
+    """Record voices only for successfully emitted eSpeak label rows.
+
+    Keep excluded manifest rows and all unrelated metadata intact. Called
+    after label validation/writing, never as a standalone corpus backfill:
+    changing old manifests alone would misrepresent existing labels.
+    """
+    voices = {r["file"]: r["espeak_voice"] for r in entries
+              if r.get("phoneme_backend") == "espeak"}
+    changed = 0
+    for rec in records:
+        voice = voices.get(rec["file"])
+        if voice is not None and rec.get("espeak_voice") != voice:
+            rec["espeak_voice"] = voice
+            changed += 1
+    if changed:
+        tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+        with tmp.open("w") as out:
+            for rec in records:
+                out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        tmp.replace(manifest_path)
+    return changed
+
+
 # Languages whose training labels come from a qualified external backend
 # (LANGUAGE_EXPANSION.md; mirrors build_external_phoneme_sidecars.CONFIG).
 # Their LANG_TO_ESPEAK entries exist for audits and tooling, but main() never
@@ -138,6 +189,14 @@ TOKEN_REMAP: dict[str, str] = {
 # phonemic vowel length or (for Italian) lax /ɪ ʊ/, so we map each to the
 # nearest real vowel — the audio nativises, so this is faithful, not smoothing.
 LANG_PHONEME_REMAP: dict[str, dict[str, str]] = {
+    "eng": {
+        # Preprocess-time label canon, not a change to raw g2p output:
+        # eSpeak assigns ɐ/ᵻ lexically without a reliable acoustic distinction;
+        # ᵻ means "ɪ or ə", not a recoverable third vowel quality.
+        # Merge only these exact reduced-vowel tokens into schwa. Preserve
+        # genuine /ɪ/ (KIT), and do not rewrite diacritic-bearing variants.
+        "ɐ": "ə", "ᵻ": "ə",
+    },
     "fra": {
         # length-marked vowels -> short (French has no phonemic length)
         "uː": "u", "ɔː": "ɔ", "ɑː": "a", "oː": "o", "aː": "a",
@@ -203,6 +262,16 @@ VOCAB_EXTENSIONS: set[str] = {
     # Russian (/t/ vs /tʲ/), so these must be learnable, not collapsed.
     "ɫʲ",
     "ʃʲ",
+    # g2p 0.4.0 emits diphthongs, r-coloured vowels and affricates as single
+    # tokens (the split halves were brief offglides the CTC head kept losing
+    # to blank — anchpop/lexide#1). Most merged tokens (aɪ oʊ eɪ tʃ dʒ ts …)
+    # already exist in the base vocab as previously-dead rows; these four do
+    # not: Italian /dz/ (zio), Portuguese nasal diphthongs põe/muito, and
+    # mãe's ɐ̃j (decomposed spellings, exactly as g2p writes them).
+    "dz",
+    "õɪ̃",
+    "ũɪ̃",
+    "ɐ̃j",
     # Stage-3 coarticulatory-nasalization narrowing (espeak_audit/narrow.py): an
     # oral vowel before a CODA nasal surfaces nasalized in every non-French
     # language (population-confirmed in the espeak audit — A1-P0 depressed vs the
@@ -1103,8 +1172,7 @@ def main():
             # across rows (the old stdin batching did exactly that on 2-6% of
             # rows, caught 2026-08-24 by scripts/verify_espeak_build.py).
             phonemized_results = [
-                phonemize(rec["sentence"],
-                          rec.get("espeak_voice") or LANG_TO_ESPEAK[lang])
+                phonemize(rec["sentence"], resolve_espeak_voice(rec, lang))
                 for rec in tqdm(prepared_records, desc=f"{lang} phonemize")
             ]
         else:
@@ -1119,15 +1187,6 @@ def main():
         empty_phoneme_examples: list[str] = []
         entries: list[dict] = []
         for rec, phonemized_result in zip(prepared_records, phonemized_results):
-            # Prefer the per-record espeak voice if the manifest stored
-            # one (Pimsleur does, since "por" covers both Brazilian and
-            # European Portuguese, "spa" covers Castilian + Latin
-            # American, etc — these dialects share a lang code but
-            # need different espeak voices for faithful phoneme labels).
-            # Fall back to the canonical voice for FLEURS / Tatoeba rows.
-            # Note: Tatoeba uses `voice` for the uploader's display
-            # name (a human, not an espeak voice), so we deliberately
-            # read `espeak_voice` only.
             backend_rec = backend_records.get(rec["file"]) if backend_records is not None else None
             if backend_records is not None:
                 if backend_rec is None:
@@ -1188,6 +1247,8 @@ def main():
                     if backend_rec is not None else "espeak"
                 ),
             }
+            if backend_rec is None:
+                entry["espeak_voice"] = resolve_espeak_voice(rec, lang)
             if backend_rec is not None:
                 for k in (
                     "tone", "pitch_accent", "pitch_accent_exclude_reason",
@@ -1249,6 +1310,9 @@ def main():
             for entry in entries:
                 out.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+        voice_updates = persist_espeak_voices(manifest_path, records, entries)
+        if voice_updates:
+            print(f"{lang}: recorded {voice_updates} selected eSpeak voices in manifest")
         print(f"{lang}: wrote {len(entries)} entries to {phonemes_path}")
         if silent_dropped:
             print(f"{lang}: dropped {silent_dropped} silent/empty recording(s) "
