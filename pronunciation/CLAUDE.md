@@ -308,6 +308,24 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
     rebased fork's references to anything scoring the *current* production
     model — it emits corpus-canon (`ʲ`, tap-everywhere ita) and will
     spuriously mismatch.
+  - **g2p 0.4.0 relabel (2026-09-14) and the narrowing caveat.** The corpus
+    labels now come from g2p 0.4.0 (fork `cb97cc1d`): diphthongs, r-coloured
+    vowels and affricates are single tokens (`aɪ oʊ tʃ ts ɐ̃ʊ̃ …`; see
+    `.work/g2p-merge-diff.md`), English `ɐ`/`ᵻ` remap to `ə`, Latin American
+    Spanish is labeled with `es-419`, and the Persian `q1`/Russian `^` leaks are
+    fixed at the source. `phonemes_narrowed.jsonl` was rebuilt by **carrying
+    over** the old acoustic nasal/flap decisions with provenance checks
+    (`.work/relabel/narrow_regenerated.py`; 72.5k nasal + 5k flap kept, 6.2k
+    dropped), not by re-aligning, because the pinned aligner
+    (`vad-clean@2926e06`) has the merged tokens only as untrained rows.
+    **Until a model trained on the merged labels is pinned as the aligner, run
+    `preprocess.py --skip-narrowing`** and never re-run `measure_corpus.py` or
+    acoustic narrowing on the merged tokens: `run_narrowing` is unconditional
+    by default and its cache lookup keys on the exact new token sequence, so it
+    would silently replace the carried-over file with an empty narrowing.
+    `phonemes_narrowed_contextual.jsonl` (rule-based nasalization, compound
+    vowels left broad) is the alternate for the contextual-vs-acoustic A/B.
+    Pre-relabel labels are backed up under `.work/relabel/backup/<lang>/`.
   - *Historical, for context*: the 2026-08-10 "Russian drift" (`y` for `ɨ`,
     `ɭ` for `ɫ`/`ɫʲ`) was a stale compiled build — `ph_russian`'s ipa labels
     were fixed in source but the phoneme data was never recompiled.
