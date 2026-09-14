@@ -5,7 +5,7 @@ let Matrix;
 export async function initDecoder(bindings) {
   if (!ready) {
     ready = (async () => {
-      const wasm = bindings ?? await import("./pkg/parsley_web_demo.js");
+      const wasm = bindings ?? await import("../pkg/parsley_web_demo.js");
       if (!bindings) await wasm.default();
       Matrix = wasm.PronunciationMatrix;
     })().catch(error => { ready = undefined; throw error; });

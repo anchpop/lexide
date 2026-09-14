@@ -97,6 +97,62 @@ export class Parsley {
     }
 }
 if (Symbol.dispose) Parsley.prototype[Symbol.dispose] = Parsley.prototype.free;
+
+/**
+ * Own the unpacked matrix in WASM rather than round-tripping float arrays through JS.
+ */
+export class PronunciationMatrix {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        PronunciationMatrixFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_pronunciationmatrix_free(ptr, 0);
+    }
+    /**
+     * Stress stays on its original frame; only phone IDs determine CTC runs.
+     * @param {string} frames
+     * @returns {string}
+     */
+    decode(frames) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(frames, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.pronunciationmatrix_decode(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
+     * @param {string} payload
+     */
+    constructor(payload) {
+        const ptr0 = passStringToWasm0(payload, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.pronunciationmatrix_new(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        PronunciationMatrixFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+}
+if (Symbol.dispose) PronunciationMatrix.prototype[Symbol.dispose] = PronunciationMatrix.prototype.free;
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -126,6 +182,9 @@ function __wbg_get_imports() {
 const ParsleyFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_parsley_free(ptr, 1));
+const PronunciationMatrixFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_pronunciationmatrix_free(ptr, 1));
 
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);

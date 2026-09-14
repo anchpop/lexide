@@ -28,16 +28,32 @@ export class Parsley {
     token_spans(text: string, lang?: string | null): string;
 }
 
+/**
+ * Own the unpacked matrix in WASM rather than round-tripping float arrays through JS.
+ */
+export class PronunciationMatrix {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Stress stays on its original frame; only phone IDs determine CTC runs.
+     */
+    decode(frames: string): string;
+    constructor(payload: string);
+}
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_parsley_free: (a: number, b: number) => void;
+    readonly __wbg_pronunciationmatrix_free: (a: number, b: number) => void;
     readonly parsley_has_japanese_dictionary: (a: number) => number;
     readonly parsley_load_japanese_dictionary: (a: number, b: number, c: number) => [number, number];
     readonly parsley_new: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly parsley_sentence_spans: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly parsley_token_spans: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly pronunciationmatrix_decode: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pronunciationmatrix_new: (a: number, b: number) => [number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
