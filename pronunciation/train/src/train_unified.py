@@ -20,33 +20,26 @@ import hashlib
 import json
 import random
 import time
-import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, ConcatDataset, Subset, random_split
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 from tqdm import tqdm
 
 from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec2Processor
 
 from .dataset import (
-    StressDataset, collate_fn, collate_fn_augment,
+    StressDataset, collate_fn_augment,
     make_train_collate,
     LengthBucketedBatchSampler, TokenBudgetBatchSampler, get_audio_lengths,
 )
 from .factorized_ctc import FactorizedCTCModel
 from .joint_ctc import joint_ctc_loss
-
-
-def normalize_sentence(sentence: str) -> str:
-    """Ignore case, whitespace variation and trailing Unicode punctuation."""
-    sentence = " ".join(sentence.lower().split())
-    while sentence and (sentence[-1].isspace()
-                        or unicodedata.category(sentence[-1]).startswith("P")):
-        sentence = sentence[:-1]
-    return sentence
+from .validation_metrics import (
+    sentence_split, identify_validation, collate_identified, DecodeMetrics, normalize_sentence,
+)
 
 
 def cap_clips_per_sentence(
@@ -222,12 +215,21 @@ def load_asr_audit_exclusions(
     return exclusions
 
 
+def sample_vad_centers(probs, n_frames):
+    """Sample the 256-sample VAD grid at wav2vec2 receptive-field centers."""
+    positions = (200 + 320 * torch.arange(n_frames, device=probs.device)) / 256
+    positions = positions.clamp(max=len(probs) - 1)
+    left = positions.long()
+    right = (left + 1).clamp(max=len(probs) - 1)
+    return probs[left] + (probs[right] - probs[left]) * (positions - left)
+
+
 def vad_loss(nonblank_logit, vad_probs, vad_lens, n_frames):
     """Confidence-weighted BCE between sigmoid(nonblank_logit) and VAD probabilities.
 
     VAD is at 16 ms stride (62.5 fps); wav2vec2 nonblank_logit is at 20 ms
-    stride (50 fps). Interpolate per-sample with F.interpolate(mode='linear')
-    from the clip's valid VAD length to its valid wav2vec2 length.
+    stride (50 fps). Sample the fixed VAD grid at centers 200 + 320*i samples,
+    rather than stretching the clip's VAD sequence to the output length.
 
     Per-frame loss is weighted by the VAD model's confidence — frames where
     the VAD probability is near 0.5 (the model is unsure whether speech is
@@ -245,11 +247,9 @@ def vad_loss(nonblank_logit, vad_probs, vad_lens, n_frames):
     for i in range(B):
         n_v = int(vad_lens[i].item())
         n_f = int(n_frames[i].item())
-        if n_v < 2 or n_f < 1:
+        if n_v < 1 or n_f < 1:
             continue
-        # F.interpolate wants (B=1, C=1, L) → output (1, 1, n_f)
-        src = vad_probs[i, :n_v].unsqueeze(0).unsqueeze(0).float()
-        target = F.interpolate(src, size=n_f, mode="linear", align_corners=False).squeeze()
+        target = sample_vad_centers(vad_probs[i, :n_v].float(), n_f)
         target = target.clamp(0.0, 1.0)
         logit = nonblank_logit[i, :n_f].float()
         confidence = (target - 0.5).abs() * 2  # in [0, 1], 0 at p=0.5
@@ -406,7 +406,8 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 distill_temperature: float = 1.0,
                 profile_steps: bool = False,
                 log_every: int = 20,
-                loss_reference_batch: int | None = None):
+                loss_reference_batch: int | None = None,
+                optimizer_steps: int = 0, stress_warmup_steps: int | None = None):
     model.train()
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -437,6 +438,9 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
 
     pbar = tqdm(loader, desc=f"Epoch {epoch}")
     for batch in pbar:
+        # Warmup counts completed optimizer updates, not estimated epochs.
+        if stress_warmup_steps is not None:
+            stress_active = optimizer_steps >= stress_warmup_steps
         if profile_steps:
             torch.cuda.synchronize()
         timings["data"] += time.perf_counter() - last_end
@@ -608,6 +612,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         total_grad_norm += last_grad_norm
         max_grad_norm = torch.maximum(max_grad_norm, last_grad_norm)
         optimizer.step()
+        optimizer_steps += 1
         optimizer.zero_grad(set_to_none=True)
         if profile_steps:
             torch.cuda.synchronize()
@@ -649,6 +654,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
 
     ns = max(total_samples, 1)
     return {
+        "optimizer_steps": optimizer_steps,
         "ctc_loss": (total_ctc / ns).item(),
         "vad_loss": (total_vad / max(n_vad_batches, 1)).item() if n_vad_batches else 0.0,
         "off_manifold": (total_invalid / max(n_invalid_batches, 1)).item() if n_invalid_batches else 0.0,
@@ -677,13 +683,18 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
 @torch.no_grad()
 def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool,
                stress_weight: float, debug_finite: bool = False,
-               max_eval_batches: int | None = None):
+               max_eval_batches: int | None = None, tokenizer=None, decode_clip_ids=None):
     model.eval()
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         if use_bf16 else contextlib.nullcontext()
     )
     total_ctc = 0.0
+    total_phone = 0.0
+    total_samples = 0
+    phone_lang_sum = defaultdict(float)
+    decoder = (DecodeMetrics(tokenizer, blank_id, decode_clip_ids)
+               if tokenizer is not None and decode_clip_ids is not None else None)
     n_batches = 0
     lang_loss_sum: dict[str, float] = {}
     lang_count: dict[str, int] = {}
@@ -737,7 +748,24 @@ def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool
             reduction="none",
         )
         check_finite("eval/loss", ctc_loss, enabled=debug_finite)
-        total_ctc += ctc_loss.mean().item()
+        # One forward, two objectives: only phone-only CTC chooses NEW BEST.
+        phone_loss = joint_ctc_loss(
+            phone_log_probs=outputs["log_probs"], phone_targets=phoneme_ids,
+            target_lengths=phoneme_lens, input_lengths=n_frames,
+            phone_blank_id=blank_id, reduction="none",
+            stress_logits=None, stress_weight=stress_weight,
+            stress_targets=stress_seq, stress_available=None,
+            language_head_logits={}, language_head_specs={},
+            aligned_targets={}, factor_available={}, langs=batch["langs"],
+        ) if stress_active else ctc_loss
+        check_finite("eval/phone_loss", phone_loss, enabled=debug_finite)
+        total_ctc += ctc_loss.sum().item()
+        total_phone += phone_loss.sum().item()
+        total_samples += len(batch["langs"])
+        for lang, loss in zip(batch["langs"], phone_loss.tolist()):
+            phone_lang_sum[lang] += loss
+        if decoder is not None:
+            decoder.update(outputs, batch, n_frames)
         n_batches += 1
         # Per-language val loss: the joint mean hides a single broken
         # language (e.g. a bad new-language sidecar) behind seven good ones.
@@ -748,7 +776,11 @@ def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool
             break
 
     return {
-        "ctc_loss": total_ctc / max(n_batches, 1),
+        "ctc_loss": total_ctc / max(total_samples, 1),
+        "phone_ctc_loss": total_phone / max(total_samples, 1),
+        "per_lang_phone_ctc": {lang: phone_lang_sum[lang] / lang_count[lang]
+                               for lang in sorted(lang_count)},
+        "per_lang_decode": decoder.compute() if decoder is not None else {},
         "per_lang_ctc": {
             lang: lang_loss_sum[lang] / lang_count[lang]
             for lang in sorted(lang_loss_sum)
@@ -1002,8 +1034,8 @@ def main():
                         help="Diagnostic: stop validation after this many batches.")
     parser.add_argument("--eval-checkpoint", type=Path, default=None,
                         help="Evaluate a checkpoint dir on the val split and exit (no "
-                             "training). Runs the full val set twice: joint CTC (the "
-                             "reported metric) and phone-only CTC (marginalizing the "
+                             "training). Runs one forward per batch and reports joint "
+                             "CTC plus phone-only CTC (marginalizing the "
                              "stress/tone/pitch factors out -- the metric older runs "
                              "used). Prints both, their gap, and a per-language "
                              "breakdown, so a joint-metric run can be compared "
@@ -1020,7 +1052,11 @@ def main():
                              "training loop runs epochs [resume_epoch, epochs] inclusive. "
                              "Both flags must be set together — there's no default, so this "
                              "path can't trigger by accident.")
+    parser.add_argument("--resume-optimizer-steps", type=int, default=None,
+                        help="Completed updates for legacy checkpoints without training_state.json.")
     args = parser.parse_args()
+    if args.stress_warmup_steps < 0:
+        parser.error("--stress-warmup-steps must be nonnegative")
 
     if args.max_clips_per_sentence < 0:
         parser.error("--max-clips-per-sentence must be nonnegative")
@@ -1087,12 +1123,13 @@ def main():
 
     feature_table = None
     aux_feature_table = None
-    special_token_ids = None
+    # Sentinels are non-emittable in every architecture, not just feature modes.
+    from .articulatory import detect_special_token_ids
+    tokens = [t for t, _ in sorted(processor.tokenizer.get_vocab().items(), key=lambda x: x[1])]
+    special_token_ids = detect_special_token_ids(tokens)
     if args.use_features or args.use_aux_features:
-        from .articulatory import build_feature_table, detect_special_token_ids
-        tokens = [t for t, _ in sorted(processor.tokenizer.get_vocab().items(), key=lambda x: x[1])]
+        from .articulatory import build_feature_table
         table, fstats = build_feature_table(tokens)
-        special_token_ids = detect_special_token_ids(tokens)
         mode_name = "factorized" if args.use_features else "auxiliary"
         print(f"Articulatory features ({mode_name}): {table.shape[1]}-dim. "
               f"covered={fstats['covered']} multi={fstats['multi_segment']} "
@@ -1295,12 +1332,9 @@ def main():
         raise RuntimeError(f"No phonemes.jsonl files matched (langs={args.langs}).")
 
     full_dataset = ConcatDataset(datasets)
-    val_size = int(len(full_dataset) * args.val_split)
-    train_size = len(full_dataset) - val_size
-    train_ds, val_ds = random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42),
-    )
+    train_ds, val_ds = sentence_split(full_dataset, args.val_split)
+    val_ds, decode_clip_ids = identify_validation(val_ds)
+    train_size, val_size = len(train_ds), len(val_ds)
     print(f"Train: {train_size}, Val: {val_size}")
 
     # Length-bucketed batch sampler — pre-compute audio lengths for train_ds
@@ -1368,16 +1402,14 @@ def main():
     )
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_fn, num_workers=args.num_workers, pin_memory=True,
+        collate_fn=collate_identified, num_workers=args.num_workers, pin_memory=True,
         persistent_workers=args.num_workers > 0,
         worker_init_fn=_dataloader_worker_init if args.num_workers > 0 else None,
     )
 
     if args.eval_checkpoint is not None:
-        # Diagnostic: score one checkpoint on the val split under both metrics and
-        # exit before any training/optimizer/wandb setup. The val split is the
-        # same deterministic seed-42 holdout the training loop reports on, so the
-        # joint number here reproduces that run's ctc_val.
+        # Diagnostic: score the same sentence-disjoint holdout under both
+        # objectives, reusing its forward outputs for the fixed decode probe.
         eval_model = FactorizedCTCModel.load_from_dir(args.eval_checkpoint).to(device)
         if eval_model.vocab_size != len(processor.tokenizer):
             raise SystemExit(
@@ -1388,13 +1420,14 @@ def main():
         joint = eval_epoch(
             eval_model, val_loader, device, use_bf16=args.bf16,
             blank_id=eval_model.blank_id, stress_active=True,
-            stress_weight=args.stress_weight)
-        phone = eval_epoch(
-            eval_model, val_loader, device, use_bf16=args.bf16,
-            blank_id=eval_model.blank_id, stress_active=False,
-            stress_weight=args.stress_weight)
-        print(f"\njoint CTC (reported metric): {joint['ctc_loss']:.4f}")
-        print(f"phone-only CTC (older-run metric): {phone['ctc_loss']:.4f}")
+            stress_weight=args.stress_weight,
+            tokenizer=processor.tokenizer, decode_clip_ids=decode_clip_ids)
+        phone = {"ctc_loss": joint["phone_ctc_loss"],
+                 "per_lang_ctc": joint["per_lang_phone_ctc"]}
+        print(f"\njoint CTC (diagnostic): {joint['ctc_loss']:.4f}")
+        print(f"phone-only CTC (checkpoint objective): {phone['ctc_loss']:.4f}")
+        for lang, metrics in joint["per_lang_decode"].items():
+            print(f"  decode {lang}: {metrics}")
         print(f"joint - phone-only gap: {joint['ctc_loss'] - phone['ctc_loss']:+.4f}"
               f"  (the metric-definition confound, isolated on one checkpoint)")
         print("\nper-language  joint / phone-only:")
@@ -1403,7 +1436,6 @@ def main():
                   f"{phone['per_lang_ctc'].get(lang, float('nan')):.3f}")
         return
 
-    steps_per_epoch = len(train_loader)
     # Split params into 4 groups: {backbone, head} × {decay, no_decay}.
     # No decay for: 1D params (biases, LayerNorm weights) and the
     # layer-selection logits. Decaying tiny selector parameters biases
@@ -1451,6 +1483,19 @@ def main():
     args.save_dir.mkdir(parents=True, exist_ok=True)
     best_val_loss = float("inf")
     start_epoch = args.resume_epoch if args.resume_epoch is not None else 1
+    optimizer_steps = 0
+    if args.resume_from is not None:
+        state_path = args.resume_from / "training_state.json"
+        if state_path.exists():
+            state = json.loads(state_path.read_text())
+            optimizer_steps = state["optimizer_steps"]
+            best_val_loss = state.get("best_phone_ctc_loss", float("inf"))
+        elif args.resume_optimizer_steps is None:
+            raise SystemExit("Legacy resume requires --resume-optimizer-steps; epoch length is not an update count")
+    if args.resume_optimizer_steps is not None:
+        if args.resume_from is None or args.resume_optimizer_steps < 0:
+            raise SystemExit("--resume-optimizer-steps requires --resume-from and a nonnegative count")
+        optimizer_steps = args.resume_optimizer_steps
 
     hf_api = None
     if args.hf_repo:
@@ -1463,12 +1508,9 @@ def main():
         # across batches. Without this the sampler would yield the same order
         # every epoch (deterministic from the seeded generator).
         train_batch_sampler.set_epoch(epoch)
-        # Stress loss enabled when (epoch-1)*steps_per_epoch >= warmup. The first
-        # epoch has noisy alignment from random init — wait for CTC to find phonemes.
-        steps_so_far = (epoch - 1) * steps_per_epoch
-        stress_active = steps_so_far >= args.stress_warmup_steps
+        stress_active = optimizer_steps >= args.stress_warmup_steps
         print(f"\nEpoch {epoch}: stress_active={stress_active} "
-              f"(steps_so_far={steps_so_far}, warmup={args.stress_warmup_steps})")
+              f"(optimizer_steps={optimizer_steps}, warmup={args.stress_warmup_steps})")
 
         train_stats = train_epoch(
             model, train_loader, optimizer, device, epoch,
@@ -1486,17 +1528,22 @@ def main():
             profile_steps=args.profile_steps,
             log_every=args.log_every,
             loss_reference_batch=args.loss_reference_batch,
+            optimizer_steps=optimizer_steps, stress_warmup_steps=args.stress_warmup_steps,
         )
+        optimizer_steps = train_stats["optimizer_steps"]
+        stress_active = optimizer_steps >= args.stress_warmup_steps
         val_stats = eval_epoch(
             model, val_loader, device,
             use_bf16=args.bf16, blank_id=model.blank_id,
-            stress_active=stress_active, stress_weight=args.stress_weight,
+            # Joint diagnostics remain comparable even during phone-only warmup.
+            stress_active=True, stress_weight=args.stress_weight,
             debug_finite=args.debug_finite,
             max_eval_batches=args.max_eval_batches,
+            tokenizer=processor.tokenizer, decode_clip_ids=decode_clip_ids,
         )
         scheduler.step()
 
-        val_loss = val_stats["ctc_loss"]
+        val_loss = val_stats["phone_ctc_loss"]
         print(
             f"Epoch {epoch}: ctc_train={train_stats['ctc_loss']:.4f} "
             f"ctc_val={val_loss:.4f} "
@@ -1506,7 +1553,7 @@ def main():
             f"audio_rt={train_stats['audio_realtime_factor']:.1f}x "
             f"mem={train_stats['peak_mem_gb']:.1f}GB"
         )
-        print("  val by lang: " + " ".join(
+        print("  joint val by lang: " + " ".join(
             f"{lang}={loss:.3f}" for lang, loss in val_stats["per_lang_ctc"].items()
         ))
         if args.profile_steps:
@@ -1526,7 +1573,9 @@ def main():
             "train/off_manifold": train_stats["off_manifold"],
             "train/distill_loss": train_stats["distill_loss"],
             "train/nonblank_prob_mean": train_stats["nonblank_prob_mean"],
-            "val/ctc_loss": val_stats["ctc_loss"],
+            "val/ctc_loss": val_loss,
+            "val/joint_ctc_loss": val_stats["ctc_loss"],
+            "train/optimizer_steps": optimizer_steps,
             "lr/backbone": lrs[0],   # backbone_decay (same LR as backbone_no_decay)
             "lr/heads": lrs[2],      # head_decay (same LR as head_no_decay)
             "stress_active": int(stress_active),
@@ -1542,9 +1591,17 @@ def main():
             "grad/norm_max": train_stats["grad_norm_max"],
             **{
                 f"val/ctc_loss_{lang}": loss
-                for lang, loss in val_stats["per_lang_ctc"].items()
+                for lang, loss in val_stats["per_lang_phone_ctc"].items()
             },
+            **{f"val/joint_ctc_loss_{lang}": loss
+               for lang, loss in val_stats["per_lang_ctc"].items()},
+            **{f"val/{name}_{lang}": value
+               for lang, metrics in val_stats["per_lang_decode"].items()
+               for name, value in metrics.items()},
         }
+        for lang, metrics in val_stats["per_lang_decode"].items():
+            print(f"  decode {lang}: " + " ".join(
+                f"{name}={value:.4f}" for name, value in metrics.items()))
         wandb.log(log_dict)
 
         # Always save and push EVERY epoch's checkpoint. HF git history
@@ -1561,6 +1618,10 @@ def main():
         if not args.skip_save:
             model.save_to_dir(args.save_dir)
             processor.save_pretrained(args.save_dir)
+            (args.save_dir / "training_state.json").write_text(json.dumps({
+                "optimizer_steps": optimizer_steps,
+                "best_phone_ctc_loss": best_val_loss,
+            }))
         if hf_api is not None and not args.skip_save:
             tag = " [NEW BEST]" if is_new_best else ""
             print(f"Uploading epoch {epoch} (val_loss={val_loss:.4f}){tag} to HF...")

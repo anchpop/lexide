@@ -46,14 +46,14 @@ pip install --quiet panphon
 # on purpose: ~450k loose wavs defeat every remote transport we tried — rsync
 # crawls on them, and the Hub's 256-commits/hour ceiling turned a loose-file
 # dataset repo into a multi-day upload that stalled outright. One rsync'd file
-# beats both. Build it with `python train/scripts/preprocess.py`.
+# beats both. Build it with `python train/scripts/preprocess.py --skip-narrowing`.
 #
 # Fail closed: a missing mount used to silently fall through to a slow
 # re-download, but the worse failure is training on a partial corpus.
 if ! compgen -G "$HOME/data/*/phonemes.jsonl" > /dev/null; then
   echo "ERROR: no dataset at ~/data (expected ~/data/<lang>/phonemes.jsonl)." >&2
   echo "  The calling sky_*.yaml should untar ~/data.tar into ~/data before this runs." >&2
-  echo "  Rebuild the tar locally with: python train/scripts/preprocess.py" >&2
+  echo "  Rebuild the tar locally with: python train/scripts/preprocess.py --skip-narrowing" >&2
   exit 1
 fi
 echo "Using dataset at ~/data: $(ls ~/data | tr '\n' ' ')"
@@ -67,7 +67,8 @@ echo "Using dataset at ~/data: $(ls ~/data | tr '\n' ' ')"
 # so stale sidecars fail open per-row, not per-file.
 audit_args=()
 for sidecar in fleurs_asr_exclusions tatoeba_asr_exclusions \
-               tts_asr_exclusions lang_exclusions mixed_script_exclusions; do
+               tts_asr_exclusions lang_exclusions mixed_script_exclusions \
+               boilerplate_exclusions; do
   if [ -f "$sidecar.jsonl" ]; then
     audit_args+=(--audit-path "$sidecar.jsonl")
   fi

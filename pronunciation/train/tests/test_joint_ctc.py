@@ -188,7 +188,7 @@ def test_dataset_encodes_aligned_prosody_and_availability(tmp_path, monkeypatch)
     for row in rows:
         (tmp_path / row["file"]).touch()
 
-    monkeypatch.setattr("src.dataset.sf.info", lambda _: SimpleNamespace(frames=8000))
+    monkeypatch.setattr("src.dataset.sf.info", lambda _: SimpleNamespace(frames=8000, samplerate=16000))
     monkeypatch.setattr(
         "src.dataset.sf.read",
         lambda *args, **kwargs: (np.ones(8000, dtype=np.float32) * 0.1, 16000),

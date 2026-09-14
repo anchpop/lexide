@@ -380,6 +380,13 @@ class FactorizedCTCModel(nn.Module):
         for head in self.language_heads.values():
             _zero_head_bias(head)
 
+        # Every mode excludes sentinels from phone identity. Blank is emitted
+        # separately by nonblank_head, never by the phoneme distribution.
+        masked = set((special_token_ids or []) + [blank_id])
+        self.register_buffer(
+            "_masked_slots", torch.tensor(sorted(masked), dtype=torch.long),
+        )
+
         if feature_table is not None or aux_feature_table is not None:
             table = feature_table if feature_table is not None else aux_feature_table
             assert table.shape[0] == vocab_size, (
@@ -395,7 +402,6 @@ class FactorizedCTCModel(nn.Module):
             # got picked as the representative for that signature, any real
             # phoneme panphon couldn't cover (also all-unknown) would be excluded
             # from the unique-mass sum.
-            masked = set((special_token_ids or []) + [blank_id])
             seen = {}
             first_occurrence = torch.zeros(vocab_size, dtype=torch.bool)
             for v in range(vocab_size):
@@ -414,15 +420,6 @@ class FactorizedCTCModel(nn.Module):
             self.feature_head = nn.Linear(head_input_dim, self.num_features * NUM_FEATURE_VALUES)
             self.phoneme_head = None
             self.register_buffer("feature_table", feature_table.long())
-            # Special token ids (e.g. <s>, </s>, <unk>) must be masked to -inf
-            # in the derived phoneme logits — they're not real phonemes and
-            # shouldn't be emittable. blank_id is handled separately by
-            # nonblank_head; include it here too for consistency.
-            mask_ids = sorted(set((special_token_ids or []) + [blank_id]))
-            self.register_buffer(
-                "_masked_slots",
-                torch.tensor(mask_ids, dtype=torch.long),
-            )
             nn.init.zeros_(self.feature_head.bias)
         elif aux_feature_table is not None:
             # Mode: auxiliary factors. Direct phone identity and articulatory
@@ -433,11 +430,6 @@ class FactorizedCTCModel(nn.Module):
             # Blank/nonblank remains shared through nonblank_head.
             self.feature_head = nn.Linear(head_input_dim, self.num_features * NUM_FEATURE_VALUES)
             self.register_buffer("feature_table", aux_feature_table.long())
-            mask_ids = sorted(set((special_token_ids or []) + [blank_id]))
-            self.register_buffer(
-                "_masked_slots",
-                torch.tensor(mask_ids, dtype=torch.long),
-            )
             nn.init.zeros_(self.feature_head.bias)
             nn.init.zeros_(self.phoneme_head.bias)
         else:
@@ -446,7 +438,6 @@ class FactorizedCTCModel(nn.Module):
             self.phoneme_head = _mk_head(vocab_size)
             self.feature_head = None
             self.feature_table = None
-            self._masked_slots = None
             _zero_head_bias(self.phoneme_head)
 
         _zero_head_bias(self.nonblank_head)
@@ -613,14 +604,9 @@ class FactorizedCTCModel(nn.Module):
             l_ph = self.phoneme_head(hidden)
             mask_value = l_ph.new_tensor(CTC_MASK_VALUE)
             l_ph = l_ph.clone()
-            # Mask blank + special tokens (<s>, </s>, <unk>) from the direct
-            # phoneme distribution. In aux mode the feature table treats these
-            # as non-phonemes, and we don't want the direct head emitting them
-            # either — main CTC's blank lives on the separate nonblank_head.
-            if self._masked_slots is not None:
-                l_ph[..., self._masked_slots] = mask_value
-            else:
-                l_ph[..., self.blank_id] = mask_value
+            # Mask sentinels in both off and aux modes; main CTC's blank
+            # lives on the separate nonblank_head.
+            l_ph[..., self._masked_slots] = mask_value
             l_ph = F.log_softmax(l_ph, dim=-1)
 
             if self.use_aux_features:
@@ -724,6 +710,7 @@ class FactorizedCTCModel(nn.Module):
             "blank_id": self.blank_id,
             "num_stress_labels": self.num_stress_labels,
             "feature_mode": mode,
+            "masked_slots": self._masked_slots.cpu().tolist(),
             "feature_emission_weight": self.feature_emission_weight,
             # Keep `uses_features` for backward compatibility with older ckpts.
             "uses_features": (mode == "factorized"),
@@ -752,16 +739,11 @@ class FactorizedCTCModel(nn.Module):
             payload["feature_head"] = self.feature_head.state_dict()
             payload["feature_table"] = self.feature_table.cpu()
             payload["num_features"] = self.num_features
-            payload["masked_slots"] = self._masked_slots.cpu().tolist()
         elif mode == "aux":
             payload["phoneme_head"] = self.phoneme_head.state_dict()
             payload["feature_head"] = self.feature_head.state_dict()
             payload["feature_table"] = self.feature_table.cpu()
             payload["num_features"] = self.num_features
-            # The aux phoneme distribution also masks special tokens; without
-            # this, a reloaded model would let <s>, </s>, <unk> through the
-            # aux logits and silently change loss / off_manifold behavior.
-            payload["masked_slots"] = self._masked_slots.cpu().tolist()
         else:
             payload["phoneme_head"] = self.phoneme_head.state_dict()
         torch.save(payload, save_dir / "factorized_heads.pt")
@@ -778,12 +760,25 @@ class FactorizedCTCModel(nn.Module):
 
         factorized_table = heads.get("feature_table") if mode == "factorized" else None
         aux_table = heads.get("feature_table") if mode == "aux" else None
-        # masked_slots was saved for both factorized and aux from this code
-        # version onward; strip blank since the ctor always re-adds it.
-        special_ids = None
-        if mode in ("factorized", "aux"):
-            ms = heads.get("masked_slots", [])
-            special_ids = [i for i in ms if i != heads["blank_id"]]
+        # Saved masks are authoritative in every mode. Older checkpoints
+        # (especially off) omitted them; recover from the accompanying tokenizer
+        # without a network lookup or assumptions about token ordering.
+        special_ids = heads.get("masked_slots")
+        if special_ids is None and (load_dir / "vocab.json").is_file():
+            from transformers import Wav2Vec2CTCTokenizer
+            try:
+                from .articulatory import is_special_token
+            except ImportError:
+                from articulatory import is_special_token
+            tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(
+                str(load_dir), local_files_only=True,
+            )
+            special_ids = [
+                idx for token, idx in tokenizer.get_vocab().items()
+                if is_special_token(token) and idx < heads["vocab_size"]
+            ]
+        # Without a saved mask or tokenizer, retain legacy blank-only behavior.
+        # The constructor includes blank itself and deduplicates saved slots.
         regularized = heads.get("regularized_heads", False)
         mel_sidechannel = heads.get("mel_sidechannel", False)
         mlp_heads = heads.get("mlp_heads", False)

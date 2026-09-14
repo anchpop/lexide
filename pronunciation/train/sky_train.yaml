@@ -14,7 +14,7 @@ file_mounts:
   # One-tarball dataset staging: ~450k loose wavs choke rsync, and the Hub's
   # 256-commits/hour ceiling makes a loose-file dataset repo a multi-day
   # upload. Rebuild after any data or label change with:
-  #   python train/scripts/preprocess.py   (writes .work/pron_audio.tar)
+  #   python train/scripts/preprocess.py --skip-narrowing   (writes .work/pron_audio.tar)
   ~/data.tar: .work/pron_audio.tar
 
 setup: |
@@ -27,8 +27,30 @@ setup: |
   pip install transformers datasets soundfile tqdm wandb panphon
 
 run: |
-  if [ ! -e ~/data/eng/phonemes.jsonl ]; then
-    mkdir -p ~/data && tar -xf ~/data.tar -C ~/data && rm -f ~/data.tar
+  set -euo pipefail
+  # Keep the tar for warm reruns: without it we cannot verify dataset identity.
+  if [ ! -f ~/data.tar ]; then
+    echo 'Missing ~/data.tar; restage the dataset before training.' >&2
+    exit 1
+  fi
+  tar_id=$(sha256sum ~/data.tar | cut -d ' ' -f 1)
+  if [ ! -f ~/data/.tar_id ] || [ "$(cat ~/data/.tar_id)" != "$tar_id" ]; then
+    stage=$(mktemp -d "$HOME/data.stage.XXXXXX")
+    # Stage beside data so renames stay on the same filesystem. Failed tar
+    # extraction leaves the current dataset (including carried labels) intact.
+    trap 'rm -rf "$stage"' EXIT
+    tar -xf ~/data.tar -C "$stage"
+    printf '%s\n' "$tar_id" > "$stage/.tar_id"
+    backup=$(mktemp -d "$HOME/data.previous.XXXXXX")
+    if [ -e ~/data ]; then
+      mv ~/data "$backup/data"
+    fi
+    if ! mv "$stage" ~/data; then
+      if [ -e "$backup/data" ]; then mv "$backup/data" ~/data; fi
+      exit 1
+    fi
+    rm -rf "$backup"
+    trap - EXIT
   fi
   echo "data langs: $(ls ~/data | tr '\n' ' ')"
 

@@ -56,6 +56,8 @@ class StressDataset(Dataset):
             "no_phonemes": 0,
             "silent": 0,
             "too_short": 0,
+            "too_long": 0,
+            "ctc_infeasible": 0,
             "unreadable": 0,
             "asr_audit": 0,
             "stale_asr_audit": 0,
@@ -118,17 +120,16 @@ class StressDataset(Dataset):
                 skipped["missing_file"] += 1
                 continue
 
-            # Audio quality check — cheap (reads file header + samples once).
-            # Catches the e12ee45c06f03906.wav case (valid WAV, no actual audio).
+            # Header-only duration gates; never pair truncated audio with a
+            # full-utterance target. Express lengths at the model's 16 kHz.
             try:
                 info = sf.info(wav_path)
-                if info.frames < min_samples:
-                    skipped["too_short"] += 1
+                n_audio_samples = info.frames * 16000 // info.samplerate
+                if info.frames / info.samplerate > max_audio_sec:
+                    skipped["too_long"] += 1
                     continue
-                audio_sample, _ = sf.read(wav_path, dtype="float32")
-                rms = float(np.sqrt(np.mean(audio_sample.astype(np.float64) ** 2)))
-                if rms < min_rms:
-                    skipped["silent"] += 1
+                if n_audio_samples < min_samples:
+                    skipped["too_short"] += 1
                     continue
             except Exception:
                 skipped["unreadable"] += 1
@@ -206,11 +207,27 @@ class StressDataset(Dataset):
                 skipped["no_phonemes"] += 1
                 continue
 
-            n_audio_samples = info.frames
-            if n_audio_samples > self.max_audio_samples:
-                n_audio_samples = self.max_audio_samples
+            # XLS-R's convolutional encoder has a 400-sample receptive
+            # field and 320-sample stride. Check the actual retained target
+            # before decoding audio (a necessary CTC feasibility condition).
+            n_ctc_frames = max(0, (n_audio_samples - 400) // 320 + 1)
+            if len(phoneme_ids) > n_ctc_frames:
+                skipped["ctc_infeasible"] += 1
+                continue
+
+            try:
+                audio_sample, _ = sf.read(wav_path, dtype="float32")
+                rms = float(np.sqrt(np.mean(audio_sample.astype(np.float64) ** 2)))
+                if rms < min_rms:
+                    skipped["silent"] += 1
+                    continue
+            except Exception:
+                skipped["unreadable"] += 1
+                continue
+
             self.samples.append({
                 "wav_path": str(wav_path),
+                "sentence": rec.get("sentence", ""),
                 "phoneme_ids": phoneme_ids,
                 "stress_seq": stress_seq,
                 "tone_seq": tone_seq,
@@ -218,6 +235,9 @@ class StressDataset(Dataset):
                 "tone_available": tone_available,
                 "pitch_accent_available": pitch_accent_available,
                 "lang": rec["lang"],
+                "stress_available": (rec["lang"] != "fra"
+                                     or "stress_source" not in rec
+                                     or rec["stress_source"] == "override"),
                 # Source class (fleurs / tatoeba / pimsleur / tts). Used by
                 # --source-cap-second in train_unified.py to balance per-lang
                 # representation within each source so e.g. English (which has
@@ -227,8 +247,7 @@ class StressDataset(Dataset):
                 # treats empty as "no VAD signal, skip VAD loss for this clip".
                 "vad_probs": vad_by_file.get(rec["file"], []),
                 # Stored so the length-bucketed BatchSampler can query without
-                # re-statting the file. Capped at max_audio_samples since
-                # __getitem__ truncates above that.
+                # re-statting the file. Full length, never truncated.
                 "n_audio_samples": n_audio_samples,
             })
 
@@ -246,7 +265,15 @@ class StressDataset(Dataset):
                   f"stress factor will be masked (marginalized) for this "
                   f"language, not trained toward zero.")
         for s in self.samples:
-            s["stress_available"] = lang_carries_stress
+            s["stress_available"] = s["stress_available"] and lang_carries_stress
+
+        missing_provenance = sum(
+            rec["lang"] == "fra" and "stress_source" not in rec for rec in records
+        )
+        if missing_provenance:
+            print(f"  {phonemes_path.parent.name}: {missing_provenance} French rows "
+                  f"missing stress_source provenance — preserving legacy stress "
+                  f"masking; re-run preprocessing to record provenance.")
 
         total_skipped = sum(skipped.values())
         if total_skipped:
@@ -263,10 +290,7 @@ class StressDataset(Dataset):
         audio, sr = sf.read(sample["wav_path"], dtype="float32")
         assert sr == 16000, f"Expected 16kHz audio, got {sr}"
 
-        if len(audio) > self.max_audio_samples:
-            audio = audio[:self.max_audio_samples]
-
-        # Truncate VAD to the audio's frame count (in case audio was clipped above).
+        # Restrict VAD metadata to the full audio's frame count.
         # vad_probs is at 16ms stride — len(audio) // 256 frames cover the same span.
         n_vad_frames = len(audio) // VAD_FRAME_SAMPLES
         vad_probs = sample["vad_probs"][:n_vad_frames]

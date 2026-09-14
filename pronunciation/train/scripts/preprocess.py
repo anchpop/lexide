@@ -17,6 +17,7 @@ dataset.py.
 """
 
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -434,9 +435,10 @@ def apply_stress_override(
     For each text word that matches one of the LLM-flagged `stressed_words`
     (left-to-right, with repeated targets consuming successive occurrences),
     marks the LAST vowel in the corresponding IPA span as primary stress.
-    Returns None if the text-word count doesn't match word_spans (espeak
-    contraction or expansion broke the index alignment) — caller should fall
-    back to espeak's stress.
+    Returns None if word alignment fails or any requested stress cannot be
+    placed on a matching word's vowel — caller should fall back to espeak's
+    stress, not mark a partial/failed override as trusted. An empty sidecar
+    list deliberately supplies all-zero stress.
     """
     text_words = _atomic_words(sentence)
     aligned_spans = _merge_vowelless_spans(phonemes, word_spans)
@@ -450,12 +452,12 @@ def apply_stress_override(
     for stressed in stressed_words:
         atomics = _atomic_words(stressed)
         if not atomics:
-            continue
+            return None
         # LLM may return multi-token phrases or hyphenated compounds; rhythmic
         # stress falls on the final syllable of the final token.
         target = _strip_punct(atomics[-1])
         if not target:
-            continue
+            return None
         for i, w in enumerate(normalized):
             if used[i] or w != target:
                 continue
@@ -464,8 +466,12 @@ def apply_stress_override(
                 if phonemes[j][:1] in IPA_VOWELS:
                     stress[j] = STRESS_PRIMARY
                     break
+            else:
+                return None
             used[i] = True
             break
+        else:
+            return None
 
     return stress
 
@@ -557,6 +563,51 @@ def load_phoneme_backend(path: Path, lang: str | None = None) -> dict[str, dict]
     return records
 
 
+# g2p 0.4.0 compound classes (g2p/src/parse.rs vowel_unit/affricate);
+# vocabulary membership does not mean the old aligner's rows were trained.
+MERGED_TOKEN_BASES = frozenset({
+    "aɪ", "aʊ", "eɪ", "oʊ", "əʊ", "ɔɪ", "ɔʏ", "ɔø",
+    "ɑːɹ", "ɔːɹ", "ɛɹ", "ɪɹ", "ʊɹ",
+    "tʃ", "dʒ", "ts", "dz", "tɕ", "dʑ", "tʂ", "dʐ",
+    "pf", "bv", "tθ", "dð", "kx", "ɡɣ", "ʈʂ", "ɖʐ",
+    "ɐ̃ʊ̃", "ɐ̃ɪ̃", "õɪ̃", "ũɪ̃", "ɐ̃j",
+})
+# Decorations can occur on either half of an affricate (tːs, t͡ʃʲ).
+_MERGED_DECORATIONS = str.maketrans("", "", "ːʲʰ͜͡")
+_MERGED_UNDECORATED = {token.translate(_MERGED_DECORATIONS) for token in MERGED_TOKEN_BASES}
+
+
+def guard_narrowing_labels(lang: str, data_dir: Path, aligner_path: Path) -> None:
+    """Inspect literal model pins without importing Modal or cloud clients."""
+    pins = {}
+    for node in ast.parse(aligner_path.read_text()).body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in {
+                    "MODEL_ID", "MODEL_REVISION",
+                }:
+                    pins[target.id] = ast.literal_eval(node.value)
+    revision = pins.get("MODEL_REVISION", "")
+    old_revision = "2926e06f8092935f597e0018beb5d579b95b889a"
+    if (pins.get("MODEL_ID") != "anchpop/lexide-pronunciation-unified-vad-clean"
+            or not (len(revision) >= 7 and old_revision.startswith(revision))):
+        return
+    path = data_dir / lang / "phonemes.jsonl"
+    with path.open() as labels:
+        for line in labels:
+            if not line.strip():
+                continue
+            for token in json.loads(line)["phonemes"]:
+                if token.translate(_MERGED_DECORATIONS) in _MERGED_UNDECORATED:
+                    raise ValueError(
+                        f"Refusing narrowing: {path} contains merged token {token!r}, "
+                        "but modal_aligner is pinned to vad-clean@2926e06, whose "
+                        "merged-token rows are untrained. Use --skip-narrowing "
+                        "until a merged-label model is pinned; see the narrowing "
+                        "caveat in pronunciation/CLAUDE.md."
+                    )
+
+
 def run_narrowing(lang: str, data_dir: Path) -> None:
     """Regenerate phonemes_narrowed.jsonl for a language just labeled.
 
@@ -568,6 +619,7 @@ def run_narrowing(lang: str, data_dir: Path) -> None:
     abstain counts — re-run espeak_audit/measure_corpus.py to narrow them).
     """
     audit_dir = Path(__file__).resolve().parents[2] / "espeak_audit"
+    guard_narrowing_labels(lang, data_dir, audit_dir / "modal_aligner.py")
     sys.path.insert(0, str(audit_dir))
     try:
         import narrow
@@ -1213,6 +1265,7 @@ def main():
                 if phonemized_result is None:
                     raise RuntimeError("missing batched eSpeak result")
                 phonemes, stress, word_spans = phonemized_result
+            stress_source = "espeak"
             if backend_rec is None and rec["file"] in stress_overrides:
                 new_stress = apply_stress_override(
                     phonemes, word_spans, rec["sentence"],
@@ -1220,6 +1273,7 @@ def main():
                 )
                 if new_stress is not None:
                     stress = new_stress
+                    stress_source = "override"
                     override_applied += 1
                 else:
                     override_align_failures += 1
@@ -1245,6 +1299,7 @@ def main():
                 "sentence": rec["sentence"],
                 "phonemes": phonemes,
                 "stress": stress,
+                "stress_source": stress_source,
                 "source": rec.get("source"),
                 "license": rec.get("license"),
                 "phoneme_backend": (
