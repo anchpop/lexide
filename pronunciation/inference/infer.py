@@ -75,6 +75,24 @@ def _is_special_token(token: str) -> bool:
     return token.startswith("<") and token.endswith(">")
 
 
+def decide_frames(log_probs, nonblank_logit, tokenizer, blank_id):
+    """Choose factorized-CTC frame IDs, without collapsing repeated phones.
+
+    For joint log_probs shaped (..., V) and nonblank_logit shaped (...,),
+    emit iff nonblank_logit > 0 (ties are blank), then choose the best real
+    phone. Joint argmax would incorrectly let split phone mass favor blank.
+    Blank and bracket-wrapped special tokens are excluded; model-masked -inf
+    phone slots remain masked. As in the model's conditional distribution,
+    each emitting frame must have at least one finite eligible phone score.
+    Returns (...) IDs on the input device.
+    """
+    phone_scores = log_probs.clone()
+    excluded = [i for i in range(log_probs.shape[-1])
+                if i == blank_id or _is_special_token(tokenizer.convert_ids_to_tokens(i))]
+    phone_scores[..., excluded] = float("-inf")
+    return torch.where(nonblank_logit > 0, phone_scores.argmax(-1), blank_id)
+
+
 def plan_batches(lengths, batch_size=8, max_batch_samples=960000):
     """Length-sort within a caller-bounded window; budget includes padding.
 
@@ -190,7 +208,8 @@ def _transcribe_audio_batch(audios, model, processor, device, use_bf16=False):
 
     # Three compact transfers per batch, instead of .item() synchronizing the
     # GPU for every frame/token. Keep the Python CTC run reduction on the CPU.
-    ids = out["log_probs"].argmax(-1).cpu().numpy()
+    ids = decide_frames(out["log_probs"], out["nonblank_logit"],
+                        processor.tokenizer, model.blank_id).cpu().numpy()
     stress = torch.log_softmax(out["stress_logits"].float(), -1).cpu().numpy()
     nonblank = torch.sigmoid(out["nonblank_logit"]).float().cpu().numpy()
     return [decode_frames(ids[i, :n], stress[i, :n], nonblank[i, :n],

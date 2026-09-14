@@ -53,8 +53,12 @@ class Model:
         b, t = values.shape
         # Padding deliberately emits 'b', so failing to trim adds a token.
         ids = torch.where(values == 0, 2, 1)
-        return {"log_probs": torch.nn.functional.one_hot(ids, 4).float(),
-                "stress_logits": torch.zeros(b,t,3), "nonblank_logit": values}
+        nonblank_logit = torch.where(values == 0, 1.0, values)
+        phone_probs = torch.nn.functional.one_hot(ids, 4).float()
+        log_probs = torch.nn.functional.logsigmoid(nonblank_logit)[..., None] + phone_probs.log()
+        log_probs[..., self.blank_id] = torch.nn.functional.logsigmoid(-nonblank_logit)
+        return {"log_probs": log_probs,
+                "stress_logits": torch.zeros(b,t,3), "nonblank_logit": nonblank_logit}
 
 
 def test_raw_waveform_mask_trimming_and_order(tmp_path):

@@ -53,13 +53,20 @@ return_frames: true, return_frame_matrix: true}`. The response includes the
 full phoneme log-probability matrix as zlib/base64-compressed, row-major float16,
 its vocabulary and blank ID, per-frame stress labels, and the deployment marker.
 
-`www/pronunciation-decoder.mjs` unpacks the matrix using the browser's
-`DecompressionStream`, takes each frame's highest-probability phoneme, then
-performs greedy CTC collapse (merge adjacent repeats, then remove blanks).
-This is the best **frame path**, not a beam search for the sequence with the
-highest summed CTC probability. Float16 rounding may alter near-tied winners
-compared with the server's full-precision decoder. Per-phone confidence and
-alternatives average probabilities over the emitted run.
+`www/pronunciation-decoder.mjs` is a thin asynchronous loader for the WASM
+bindings. Wire validation, decompression and decoding reuse
+`lexide/src/pronunciation/mod.rs` via `#[path]`, with no JavaScript decoder.
+Decoding is **nonblank-first**: blank wins at probability >= 0.5; otherwise the
+highest-probability eligible phone wins, even when its individual joint
+probability is below blank. Special tokens and masked negative-infinity scores
+are excluded. Adjacent repeated phone IDs collapse; blanks separate repeats.
+This is not a beam search for the sequence with highest summed CTC probability.
+Float16 rounding can change near-ties and the half-probability boundary:
+encoded `ln(0.5)` rounds slightly below the threshold and therefore emits a
+phone; the decoder does not adjust quantized inputs. Stress stays attached to
+frames and never splits a phone run. Confidence and alternatives average
+conditionally normalized phone probabilities over the emitted run, excluding
+blank and specials; alternatives with zero mass throughout the run are omitted.
 
 Select a sound directly in the IPA to inspect its confidence and alternatives,
 and seek to its approximate audio position. Arrow keys move between sounds;
@@ -99,7 +106,7 @@ without running the model again. Audio samples are not included in this file.
 Run the decoder checks with:
 
 ```sh
-node --test tests/*.test.mjs
+./tests/run.sh  # build actual nodejs-target WASM, run JS and asset tests
 ```
 
 No API key or model weights are shipped to the browser for pronunciation.
@@ -116,8 +123,7 @@ copy the **entire contents** of `www/` into the Pages branch before publishing,
 including `demo.css`, `theme.js`, `pronunciation.html`, `pronunciation.js`,
 `pronunciation.css`, `pronunciation-decoder.mjs`, `audio-explorer.js`,
 `spectrogram.mjs`, `spectrogram-worker.js`, `pkg/`, and the segmentation weights. Keep the branch's `.nojekyll` file.
-There is no SPA rewrite or server to configure. The pronunciation page needs
-no WASM build of its own; it can be tested by serving `www/` directly.
+There is no SPA rewrite or server to configure. Both pages use the shared WASM package; run `build.sh` before serving `www/`.
 
 ### Browser asset versions
 

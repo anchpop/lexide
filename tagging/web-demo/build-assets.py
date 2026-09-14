@@ -40,6 +40,8 @@ def build(root):
             return f'{match[1]}./{emit(target)}{match[1]}'
 
         content = REFERENCE.sub(dependency, (root / name).read_text())
+        # Emitted modules are one directory deeper than editable source modules.
+        content = content.replace("\"./pkg/", "\"../pkg/").replace("'./pkg/", "'../pkg/")
         digest = sha256(content.encode()).hexdigest()[:16]
         filename = f'{Path(name).stem}.{digest}{Path(name).suffix}'
         (output / filename).write_text(content)

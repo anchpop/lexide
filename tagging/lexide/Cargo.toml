@@ -1,8 +1,8 @@
 [package]
 name = "lexide"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
-description = "Multilingual sentence segmentation, tokenization, and POS/lemma/dependency tagging for 10 languages"
+description = "Multilingual text analysis and pronunciation decoding, CTC scoring, and forced alignment"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/anchpop/lexide"
 
@@ -42,8 +42,9 @@ name = "matching"
 required-features = ["local"]
 
 [dependencies]
-# Core dependencies
-tokio = { version = "1.42", features = ["full"] }
+# Async runtime shared by the local and remote backends only.
+tokio = { version = "1.42", features = ["full"], optional = true }
+# Core dependencies (serde also supports the always-available text types).
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
@@ -64,9 +65,16 @@ hf-hub = { version = "0.4", optional = true, default-features = false, features 
 # Remote inference dependencies (only included with 'remote' feature)
 reqwest = { version = "0.12", features = ["json"], optional = true }
 
+# Offline pronunciation wire-format dependencies.
+half = { version = "2", optional = true }
+flate2 = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
+
 [features]
 # Backend selection - choose one (or both)
-local = ["segment", "dep:ort", "dep:tokenizers", "dep:fst"]
+local = ["segment", "dep:ort", "dep:tokenizers", "dep:fst", "dep:tokio"]
 # Just the 1M-param sentence segmenter (Segmenter::from_pretrained, ~4 MB download)
 segment = ["dep:safetensors", "dep:hf-hub"]
-remote = ["dep:reqwest"]
+remote = ["dep:reqwest", "dep:tokio"]
+# Pure CPU frame decoding/scoring; no inference runtime or HTTP client.
+pronunciation = ["dep:half", "dep:flate2", "dep:base64"]

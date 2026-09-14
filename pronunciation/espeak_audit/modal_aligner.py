@@ -130,7 +130,19 @@ class VadCleanAligner:
 
     def _reading(self, log_probs):
         """Greedy CTC decode -> phoneme symbols (the model's 'second opinion')."""
-        ids = log_probs[0].argmax(-1).tolist()
+        import math
+
+        # Local equivalent of pronunciation.inference.infer.decide_frames:
+        # P(blank) >= .5 means blank; otherwise pick a phone, not joint argmax.
+        phone_scores = log_probs[0].clone()
+        excluded = set(self.masked_slots) | {self.blank_id} | {
+            i for i, token in self.inv_vocab.items()
+            if token.startswith("<") and token.endswith(">")
+        }
+        phone_scores[..., list(excluded)] = float("-inf")
+        ids = phone_scores.argmax(-1)
+        ids[log_probs[0, :, self.blank_id] >= math.log(.5)] = self.blank_id
+        ids = ids.tolist()
         seq, prev = [], None
         for i in ids:
             if i != prev and i != self.blank_id:

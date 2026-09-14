@@ -337,7 +337,7 @@ $("download-frames").onclick = () => {
   const url = URL.createObjectURL(new Blob([JSON.stringify({
     ...modelOutput,
     demo_metadata: { sample_rate: SAMPLE_RATE, frame_stride_seconds: FRAME_SECONDS,
-      decoder: "greedy CTC over float16 phoneme matrix", phones: decoded.phones },
+      decoder: "nonblank-first CTC over float16 phoneme matrix", phones: decoded.phones },
   })], { type: "application/json" }));
   const link = document.createElement("a");
   link.href = url;
@@ -366,7 +366,9 @@ async function transcribe() {
     if (!response.ok) throw new Error(`The model returned an error (${response.status}). Please try again shortly.`);
     const data = await response.json();
     const matrix = await unpackMatrix(data.frame_matrix);
-    const result = decodePath(matrix, data.frames);
+    let result;
+    try { result = decodePath(matrix, data.frames); }
+    finally { matrix.free(); }
     if (request.signal.aborted) throw new DOMException("Aborted", "AbortError");
     renderResult(result, data);
     $("status").textContent = result.phones.length

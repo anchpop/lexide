@@ -4,6 +4,8 @@ pub mod matching;
 #[cfg(feature = "remote")]
 mod parsing;
 pub mod pos;
+#[cfg(feature = "pronunciation")]
+pub mod pronunciation;
 
 #[cfg(feature = "local")]
 mod local;

@@ -27,6 +27,9 @@ class AssetBuildTests(unittest.TestCase):
             self.assertEqual(first['theme.js'], updated['theme.js'])
             self.assertIn(updated['pronunciation.js'], (root / 'pronunciation.html').read_text())
             self.assertIn(updated['spectrogram-worker.js'], (root / 'assets' / updated['audio-explorer.js']).read_text())
+            decoder = (root / "assets" / updated["pronunciation-decoder.mjs"]).read_text()
+            self.assertIn('import("../pkg/parsley_web_demo.js")', decoder)
+            self.assertNotIn("node-pkg", decoder)
 
 
 if __name__ == '__main__':

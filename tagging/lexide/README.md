@@ -5,9 +5,14 @@ running in your browser, generating the equivalent Rust as you type.
 
 A Rust library for multilingual NLP analysis: sentence segmentation, tokenization,
 POS tagging, lemmatization, and dependency parsing for 10 languages
-(deu eng fra hin ita jpn kor por rus spa).
+(deu eng fra hin ita jpn kor por rus spa), plus offline pronunciation decoding,
+CTC scoring, and forced alignment from model frame probabilities.
 
-Three backends, selected by cargo feature:
+Capabilities selected by cargo feature:
+
+- **`pronunciation`** — pure CPU frame-matrix decoding, nonblank-first phoneme
+  decoding, CTC likelihood, and forced alignment. No model download, GPU,
+  async runtime, or HTTP client; usable from native Rust or WebAssembly.
 
 - **`segment`** — just the sentence segmenter: a 1M-param byte-level minGRU, pure Rust,
   one ~4 MB model download. The lightest entry point (see below).
@@ -21,6 +26,57 @@ Three backends, selected by cargo feature:
 
 Local and remote produce identical `Tokenization`s — the local pipeline is verified
 token-for-token against the parsley serve (`tests/parsley_parity.rs`).
+
+## Pronunciation
+
+```toml
+[dependencies]
+lexide = { version = "0.2", features = ["pronunciation"] }
+```
+
+Deserialize the endpoint's `frame_matrix` object into
+`lexide::pronunciation::FrameMatrixPayload`, then decode and rescore locally:
+
+```rust
+use lexide::pronunciation::{FrameMatrix, FrameMatrixPayload};
+
+fn rescore(payload: &FrameMatrixPayload, target: &[String]) -> anyhow::Result<()> {
+    let matrix = FrameMatrix::decode(payload)?;
+    let decoded = matrix.decode_path()?;
+    for run in &decoded.runs {
+        println!("{}: {}..{}", matrix.vocab[run.id], run.start_frame, run.end_frame);
+    }
+    println!("{:?}", matrix.score_target(target));
+    Ok(())
+}
+```
+
+The wire format is row-major `[T, V]`, little-endian float16, zlib + base64,
+with tokenizer vocabulary labels and a blank ID. Decoding validates dimensions,
+byte length, vocabulary, and log-probabilities; it preserves the original joint
+probabilities for `log_likelihood` and `force_align`.
+
+Free decoding first emits blank when its log-probability is at least `ln(0.5)`;
+otherwise it picks the best eligible phone. For example, 60% nonblank probability
+split 40/30/30 between phones is speech even though no individual joint phone
+probability beats blank. Special labels and masked `-inf` entries are excluded.
+Float16 quantization can move values near the threshold across it.
+
+`decode_path(&[f32], frames, vocab_size, blank_id)` also accepts raw matrices,
+without vocabulary-based special-label filtering. Its `DecodedPath` contains
+per-frame IDs including blanks and `PhoneRun`s with **exclusive** end frames.
+`FrameMatrix::decode_path` adds vocabulary filtering. `greedy_ids` returns the
+collapsed phone IDs; `id` looks up exact wire labels; `log_probs` exposes unchanged
+joint log-probabilities; `speech_fraction` measures nonblank frames in a range.
+`force_align` retains the original **inclusive** `AlignedPhoneme::end_frame`.
+`score_target` reports unknown/special target tokens in `oov` and scores the rest;
+impossible or empty targets have no likelihood. All payload/score/path types
+support serde serialization.
+
+`half`, `flate2`, and `base64` are optional pronunciation dependencies. `serde`
+remains a core dependency because the existing text types already require it;
+the text API remains available without features. Tokio is enabled only by
+`local`/`remote`, and reqwest only by `remote`.
 
 ## Sentence segmentation
 
@@ -52,7 +108,7 @@ Gaps between sentences (whitespace, headings, separators) are dropped; punctuati
 
 ```toml
 [dependencies]
-lexide = { version = "0.1", features = ["remote"] }
+lexide = { version = "0.2", features = ["remote"] }
 ```
 
 ```rust
