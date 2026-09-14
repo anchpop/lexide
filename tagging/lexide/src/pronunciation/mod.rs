@@ -17,13 +17,187 @@
 //! between several phones must not turn speech into a blank.
 //!
 //! Ported from yap's `phoneme-verify/src/ctc.rs`. This module performs no
-//! inference or networking; enable it with the `pronunciation` feature.
+//! inference; enable it with the `pronunciation` feature. Optional networking
+//! lives in `pronunciation::remote` behind `pronunciation-remote`.
 
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
+
+/// Cache-key decoder revision. Any change to decoding must bump this version.
+pub const DECODER_VERSION: &str = "nonblank_v1";
+
+/// Identity reported by the serving container's `marker_only` probe.
+/// Model fields are required: missing identity must never produce a cache key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelIdentity {
+    pub model_id: String,
+    pub model_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_marker: Option<String>,
+}
+
+/// Model-specific cache partition, compatible with yap's pronunciation cache.
+pub fn cache_version(identity: &ModelIdentity) -> String {
+    format!(
+        "{}@{}__{}",
+        identity.model_id.replace('/', "_"),
+        identity.model_revision.chars().take(12).collect::<String>(),
+        DECODER_VERSION,
+    )
+}
+
+/// One clip of raw mono audio samples (not encoded audio or base64).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PredictRequest {
+    pub audio: Vec<f32>,
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: u32,
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_phonemes: Option<Vec<String>>,
+    #[serde(default)]
+    pub return_frame_matrix: bool,
+    #[serde(default)]
+    pub return_frames: bool,
+}
+
+fn default_sample_rate() -> u32 {
+    16000
+}
+fn default_top_k() -> usize {
+    3
+}
+
+impl Default for PredictRequest {
+    fn default() -> Self {
+        Self {
+            audio: Vec::new(),
+            sample_rate: default_sample_rate(),
+            top_k: default_top_k(),
+            language: None,
+            target_phonemes: None,
+            return_frame_matrix: false,
+            return_frames: false,
+        }
+    }
+}
+
+/// A bare-phone alternative; stress is reported separately on the emission.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PhonemeAlternative {
+    pub phoneme: String,
+    pub probability: f64,
+}
+
+/// One CTC-collapsed phoneme, with stress embedded in `phoneme`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EmittedPhoneme {
+    pub phoneme: String,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub top_k: Vec<PhonemeAlternative>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stress: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitch_accent: Option<usize>,
+}
+
+/// Diagnostic phone-only top-k for a frame, including non-emitting frames.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PredictionFrame {
+    pub frame: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stress: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p_nonblank: Option<f64>,
+    #[serde(default)]
+    pub top_k: Vec<PhonemeAlternative>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitch_accent: Option<usize>,
+}
+
+/// The endpoint cannot score a target with no in-vocabulary phones.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TargetScoreError {
+    pub error: String,
+    #[serde(default)]
+    pub oov: Vec<String>,
+}
+
+/// Server target score, including its all-OOV error response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum PredictTargetScore {
+    Error(TargetScoreError),
+    Score(TargetScore),
+}
+
+/// Successful prediction. `phonemes` is required so error objects cannot be
+/// mistaken for successful silence; optional diagnostics may be absent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_version: Option<String>,
+    pub phonemes: Vec<EmittedPhoneme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_score: Option<PredictTargetScore>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_matrix: Option<FrameMatrixPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<Vec<PredictionFrame>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_marker: Option<String>,
+}
+
+/// A rejected clip within an otherwise successful batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PredictionError {
+    #[serde(rename = "type")]
+    pub error_type: String,
+    pub message: String,
+}
+
+/// Batch entries retain errors at their original request index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BatchResult {
+    Error { error: PredictionError },
+    Prediction(PredictResponse),
+}
+
+/// Ordered batch results. The marker is stamped on the envelope, not each item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_version: Option<String>,
+    pub results: Vec<BatchResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_marker: Option<String>,
+}
+
+#[cfg(feature = "pronunciation-remote")]
+pub mod remote;
 
 /// A contiguous nonblank run. Both indices are zero-based; end is exclusive.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

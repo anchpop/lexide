@@ -1,6 +1,6 @@
 [package]
 name = "lexide"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Multilingual text analysis and pronunciation decoding, CTC scoring, and forced alignment"
 license = "MIT OR Apache-2.0"
@@ -62,7 +62,7 @@ safetensors = { version = "0.6", optional = true }
 fst = { version = "0.4", optional = true }
 hf-hub = { version = "0.4", optional = true, default-features = false, features = ["ureq", "native-tls"] }
 
-# Remote inference dependencies (only included with 'remote' feature)
+# HTTP shared by the remote text and pronunciation clients.
 reqwest = { version = "0.12", features = ["json"], optional = true }
 
 # Offline pronunciation wire-format dependencies.
@@ -78,3 +78,5 @@ segment = ["dep:safetensors", "dep:hf-hub"]
 remote = ["dep:reqwest", "dep:tokio"]
 # Pure CPU frame decoding/scoring; no inference runtime or HTTP client.
 pronunciation = ["dep:half", "dep:flate2", "dep:base64"]
+# Async HTTP only; the caller supplies its runtime.
+pronunciation-remote = ["pronunciation", "dep:reqwest"]

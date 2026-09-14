@@ -14,6 +14,9 @@ Capabilities selected by cargo feature:
   decoding, CTC likelihood, and forced alignment. No model download, GPU,
   async runtime, or HTTP client; usable from native Rust or WebAssembly.
 
+- **`pronunciation-remote`** — typed async HTTP client and model-identity discovery
+  for the hosted phonemizer; includes `pronunciation`.
+
 - **`segment`** — just the sentence segmenter: a 1M-param byte-level minGRU, pure Rust,
   one ~4 MB model download. The lightest entry point (see below).
 - **`local`** — the full parsley tagger in-process on CPU: the byte-minGRU models, the
@@ -31,7 +34,7 @@ token-for-token against the parsley serve (`tests/parsley_parity.rs`).
 
 ```toml
 [dependencies]
-lexide = { version = "0.2", features = ["pronunciation"] }
+lexide = { version = "0.3", features = ["pronunciation"] }
 ```
 
 Deserialize the endpoint's `frame_matrix` object into
@@ -76,7 +79,61 @@ support serde serialization.
 `half`, `flate2`, and `base64` are optional pronunciation dependencies. `serde`
 remains a core dependency because the existing text types already require it;
 the text API remains available without features. Tokio is enabled only by
-`local`/`remote`, and reqwest only by `remote`.
+`local`/`remote`, and reqwest by `remote`/`pronunciation-remote`.
+
+### Hosted phonemizer
+
+`pronunciation` also exports the serde wire schema: `ModelIdentity`,
+`PredictRequest`, `EmittedPhoneme`, `PredictResponse`, and `BatchResponse`, with
+typed alternatives, diagnostic frames, target scores (including all-OOV errors),
+and per-item batch errors. Optional fields tolerate older endpoints; unknown
+server fields are ignored. Single and batch envelopes expose optional `model_id`,
+`model_revision`, `decoder_version`, and `deploy_marker`, so newer deployments
+can describe themselves on each inference response.
+
+Enable `pronunciation-remote` for `pronunciation::remote::PhonemizerClient`:
+
+```rust,no_run
+use lexide::pronunciation::{cache_version, PredictRequest};
+use lexide::pronunciation::remote::PhonemizerClient;
+
+async fn predict(audio: Vec<f32>) -> anyhow::Result<()> {
+    let client = PhonemizerClient::new(
+        "https://anchpop--wav2vec2-phoneme-wav2vec2phoneme-predict.modal.run",
+    )?;
+    let identity = client.identity().await?;
+    let version = cache_version(&identity);
+    let response = client.predict(&PredictRequest {
+        audio, return_frame_matrix: true, ..Default::default()
+    }).await?;
+    println!("{version}: {:?}", response.phonemes);
+    Ok(())
+}
+```
+
+Audio is raw mono samples; defaults match the endpoint (16 kHz, top-k 3).
+`identity()` uses the deployed protocol: **POST `{"marker_only": true}` to the
+predict URL**, not a nonexistent GET health route. `check_identity(expected)`
+returns that identity only if its deploy marker matches. This is a one-shot
+probe, not a guarantee about later containers: validate each prediction's marker
+(or the batch envelope's marker) before caching.
+
+`predict_batch(&[PredictRequest])` sends 1–64 requests and returns ordered
+`BatchResult::Prediction` / `BatchResult::Error` entries. The batch marker remains
+on the envelope. Modal's batch URL is derived from the `-predict.modal.run`
+suffix; use `with_endpoints(http_client, predict_url, batch_url)` for custom URLs,
+authentication or timeouts. There is no caching or retry layer. Native callers
+supply a Tokio runtime for reqwest; this feature does not enable lexide's optional
+Tokio dependency or its text client.
+
+`cache_version(&identity)` yields
+`<model_id with '/' replaced by '_'>@<first 12 revision chars>__nonblank_v1`, e.g.
+`anchpop_lexide-pronunciation@edcbbbf43a7f__nonblank_v1`. It uses the crate's
+`DECODER_VERSION`, not the optional server-reported decoder version; callers
+using server-decoded predictions should check that version when present.
+**Any decoder change must bump `DECODER_VERSION`.** Caching stays with the caller.
+The schema and offline decoder remain WebAssembly-friendly without the remote
+feature.
 
 ## Sentence segmentation
 
@@ -108,7 +165,7 @@ Gaps between sentences (whitespace, headings, separators) are dropped; punctuati
 
 ```toml
 [dependencies]
-lexide = { version = "0.2", features = ["remote"] }
+lexide = { version = "0.3", features = ["remote"] }
 ```
 
 ```rust
