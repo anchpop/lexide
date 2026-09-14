@@ -124,6 +124,19 @@ These are hard-won and override generic ML instincts. Violating them has burned 
 - **Labels**: espeak-ng (the maintainer's **fork**, see gotchas) → `phonemes.jsonl`
   (broad) → optional `phonemes_narrowed.jsonl` (narrowed; see `espeak_audit/`).
 
+### Modal app
+
+The hosted endpoint lives in `modal/wav2vec2_phoneme.py`, beside the model;
+`modal/PRONUNCIATION_BATCHING.md` documents its API, batching, and local tests.
+The sibling yap repo consumes it by URL; the app name and endpoint URLs stay
+unchanged. From the lexide repo root, stop the app before deploying so warm
+containers do not keep serving old code (only when a deployment is authorized):
+
+```bash
+~/.modal-venv/bin/modal app stop wav2vec2-phoneme
+~/.modal-venv/bin/modal deploy pronunciation/modal/wav2vec2_phoneme.py
+```
+
 ## Data → training pipeline
 
 1. **Acquire** (`data/`): `download_fleurs.py` (read sentences, multi-speaker),
@@ -233,6 +246,7 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
   `narrow.py`, `nasal_acoustic.py`, `pitch_accent_audit.py`, REPORT*.md.
 - `vad_compare/` — Rust `vad_compute` (framewise VAD).
 - `inference/` — `infer.py`.
+- `modal/` — hosted pronunciation app, batching helper, API docs, and tests (moved from yap).
 - `scripts/` — orchestration + one-off audits/backfills.
 
 ## Conventions & gotchas
