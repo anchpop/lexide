@@ -39,15 +39,22 @@ impl PhonemizerClient {
         })
     }
 
+    /// Replace the HTTP client while retaining the configured endpoint URLs.
+    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+        self.http = http;
+        self
+    }
+
     /// Discover model identity without inference. The deployed Python endpoint
     /// has no GET health route: it accepts `POST {"marker_only": true}` on predict.
-    /// A load-error probe lacks model fields and therefore fails deserialization.
+    /// Rejects `load_error` even if the response also contains model fields.
     pub async fn identity(&self) -> Result<ModelIdentity> {
         #[derive(Serialize)]
         struct Probe {
             marker_only: bool,
         }
-        self.http
+        let probe = self
+            .http
             .post(&self.predict_url)
             .json(&Probe { marker_only: true })
             .send()
@@ -55,7 +62,8 @@ impl PhonemizerClient {
             .error_for_status()?
             .json()
             .await
-            .context("invalid model identity")
+            .context("invalid model identity")?;
+        parse_identity(probe)
     }
 
     /// Probe and require an exact deploy marker, including rejecting its absence.
@@ -113,6 +121,13 @@ impl PhonemizerClient {
         }
         Ok(batch)
     }
+}
+
+fn parse_identity(probe: serde_json::Value) -> Result<ModelIdentity> {
+    if let Some(error) = probe.get("load_error") {
+        bail!("model identity probe reported load_error: {error}");
+    }
+    serde_json::from_value(probe).context("invalid model identity")
 }
 
 fn batch_endpoint(single: &str) -> Result<String> {

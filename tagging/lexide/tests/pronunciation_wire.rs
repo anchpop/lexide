@@ -62,11 +62,48 @@ fn identity_and_cache_version_match_yap() {
 
 #[test]
 fn request_round_trip_and_python_defaults() {
-    round_trip::<PredictRequest>(json!({"audio": [0.0, 0.5, -0.5], "sample_rate": 16000,
+    round_trip::<PredictRequest>(
+        json!({"audio_f32_b64": "AAAAAAAAAD8AAAC/", "sample_rate": 16000,
         "top_k": 3, "language": "eng", "target_phonemes": ["a"],
-        "return_frame_matrix": true, "return_frames": true}));
-    let minimal: PredictRequest = serde_json::from_value(json!({"audio": []})).unwrap();
+        "return_frame_matrix": true, "return_frames": true}),
+    );
+    let minimal: PredictRequest = serde_json::from_value(json!({"audio_f32_b64": ""})).unwrap();
     assert_eq!(minimal, PredictRequest::default());
+    assert_eq!(PredictRequest::from_samples(&[]), minimal);
+    assert!(serde_json::from_value::<PredictRequest>(json!({"audio": []})).is_err());
+}
+
+#[test]
+fn request_audio_encoding_matches_known_little_endian_bytes() {
+    // IEEE 754: +0 = 00000000, +0.5 = 3f000000, -0.5 = bf000000.
+    // The '/' distinguishes standard base64 from the URL-safe alphabet.
+    let request = PredictRequest::from_samples(&[0.0, 0.5, -0.5]);
+    assert_eq!(request.audio_f32_b64, "AAAAAAAAAD8AAAC/");
+    assert_eq!(
+        PredictRequest::from_samples(&[1.0]).audio_f32_b64,
+        "AACAPw=="
+    );
+    assert_eq!(
+        serde_json::to_value(request).unwrap(),
+        json!({"audio_f32_b64": "AAAAAAAAAD8AAAC/", "sample_rate": 16000,
+            "top_k": 3, "return_frame_matrix": false, "return_frames": false})
+    );
+}
+
+#[test]
+fn request_audio_base64_round_trip_preserves_sample_bits() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let samples = [0.0, -0.0, 0.5, -0.5, f32::MIN_POSITIVE, f32::MAX];
+    let request = PredictRequest::from_samples(&samples);
+    let parsed = round_trip::<PredictRequest>(serde_json::to_value(&request).unwrap());
+    assert_eq!(parsed, request);
+    let bytes = STANDARD.decode(&parsed.audio_f32_b64).unwrap();
+    let bits: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect();
+    assert_eq!(bits, samples.map(f32::to_bits));
 }
 
 #[test]

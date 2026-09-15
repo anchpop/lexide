@@ -104,16 +104,20 @@ async fn predict(audio: Vec<f32>) -> anyhow::Result<()> {
     let identity = client.identity().await?;
     let version = cache_version(&identity);
     let response = client.predict(&PredictRequest {
-        audio, return_frame_matrix: true, ..Default::default()
+        return_frame_matrix: true, ..PredictRequest::from_samples(&audio)
     }).await?;
     println!("{version}: {:?}", response.phonemes);
     Ok(())
 }
 ```
 
-Audio is raw mono samples; defaults match the endpoint (16 kHz, top-k 3).
+`PredictRequest::from_samples` encodes mono samples as standard base64 of
+little-endian float32 bytes in `audio_f32_b64`; defaults match the endpoint
+(16 kHz, top-k 3). Override `sample_rate` for other source rates.
 `identity()` uses the deployed protocol: **POST `{"marker_only": true}` to the
-predict URL**, not a nonexistent GET health route. `check_identity(expected)`
+predict URL**, not a nonexistent GET health route. It rejects any response
+containing `load_error`, even alongside valid model fields, and includes the
+error value in its diagnostic. `check_identity(expected)`
 returns that identity only if its deploy marker matches. This is a one-shot
 probe, not a guarantee about later containers: validate each prediction's marker
 (or the batch envelope's marker) before caching.
@@ -122,7 +126,8 @@ probe, not a guarantee about later containers: validate each prediction's marker
 `BatchResult::Prediction` / `BatchResult::Error` entries. The batch marker remains
 on the envelope. Modal's batch URL is derived from the `-predict.modal.run`
 suffix; use `with_endpoints(http_client, predict_url, batch_url)` for custom URLs,
-authentication or timeouts. There is no caching or retry layer. Native callers
+or `new(predict_url)?.with_http_client(http_client)` to retain derived URLs with
+custom authentication or timeouts. There is no caching or retry layer. Native callers
 supply a Tokio runtime for reqwest; this feature does not enable lexide's optional
 Tokio dependency or its text client.
 

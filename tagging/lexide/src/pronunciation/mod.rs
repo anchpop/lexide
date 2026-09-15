@@ -51,10 +51,11 @@ pub fn cache_version(identity: &ModelIdentity) -> String {
     )
 }
 
-/// One clip of raw mono audio samples (not encoded audio or base64).
+/// One clip of mono audio for the hosted phonemizer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PredictRequest {
-    pub audio: Vec<f32>,
+    /// Standard base64 of little-endian float32 samples, not an encoded audio file.
+    pub audio_f32_b64: String,
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
     #[serde(default = "default_top_k")]
@@ -76,10 +77,25 @@ fn default_top_k() -> usize {
     3
 }
 
+impl PredictRequest {
+    /// Encode mono samples as little-endian float32 base64, with 16 kHz defaults.
+    /// Set `sample_rate` if the source differs; the server validates the waveform.
+    pub fn from_samples(samples: &[f32]) -> Self {
+        let bytes: Vec<u8> = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        Self {
+            audio_f32_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for PredictRequest {
     fn default() -> Self {
         Self {
-            audio: Vec::new(),
+            audio_f32_b64: String::new(),
             sample_rate: default_sample_rate(),
             top_k: default_top_k(),
             language: None,
