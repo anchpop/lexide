@@ -262,6 +262,23 @@ def _g2p_hin(text: str) -> dict[str, Any]:
     return {**result, "canon": "current", "g2p": g2p_client.identity()}
 
 
+def _g2p_audit_output(
+    text: str, lang: str, project: Callable[[dict], dict[str, Any]],
+) -> dict[str, Any]:
+    """Share request/refusal handling, not the providers' audit projections."""
+    import g2p_client
+
+    try:
+        response = g2p_client.request(text=text, lang=lang)
+    except g2p_client.Unlabelable as exc:
+        output = {"exclude_reason": exc.reason}
+    else:
+        # Only a backend refusal becomes an exclusion. Projection errors and
+        # infrastructure failures still escape, before identity is requested.
+        output = project(response)
+    return {**output, "g2p": g2p_client.identity()}
+
+
 def _g2p_zho(text: str) -> dict[str, Any]:
     """The production Mandarin chain: g2pM + pinyin_to_ipa ported into the
     g2p crate (`src/mandarin`), byte-identical to `_g2pm_ipa` →
@@ -271,16 +288,10 @@ def _g2p_zho(text: str) -> dict[str, Any]:
     excluded rather than trained with a hole. Output is already in sidecar
     shape: phonemes, stress (all 0), tone (per phoneme, None off the
     tone-bearing phone), and the pinyin as `raw`."""
-    import g2p_client
-
-    try:
-        r = g2p_client.request(text=text, lang="zho-hans")
-    except g2p_client.Unlabelable as exc:
-        return {"exclude_reason": exc.reason, "g2p": g2p_client.identity()}
-    return {
+    return _g2p_audit_output(text, "zho-hans", lambda r: {
         "phonemes": r["phonemes"], "stress": r["stress"], "tone": r["tone"],
-        "pinyin": r["raw"], "g2p": g2p_client.identity(),
-    }
+        "pinyin": r["raw"],
+    })
 
 
 def _g2p_jpn(text: str) -> dict[str, Any]:
@@ -292,19 +303,13 @@ def _g2p_jpn(text: str) -> dict[str, Any]:
     ケー, 年 vs とし) and in accent-phrase chaining. `pitch_accent` is
     lexide's shape; the ASR-confidence withhold is applied by the label stage
     because it needs the manifest row."""
-    import g2p_client
-
-    try:
-        r = g2p_client.request(text=text, lang="jpn")
-    except g2p_client.Unlabelable as exc:
-        return {"exclude_reason": exc.reason, "g2p": g2p_client.identity()}
-    return {
+    return _g2p_audit_output(text, "jpn", lambda r: {
         "phonemes": r["phonemes"], "stress": r["stress"],
         "pitch_accent": [None if p is None else {**p, "source": "openjtalk-citation"}
                          for p in r.get("pitch", [])],
         "pitch_accent_exclude_reason": r.get("accent_withheld"),
-        "phones": r["raw"].split(), "g2p": g2p_client.identity(),
-    }
+        "phones": r["raw"].split(),
+    })
 
 
 def _g2p_tha(text: str) -> dict[str, Any]:
@@ -313,16 +318,10 @@ def _g2p_tha(text: str) -> dict[str, Any]:
     `thai_labels`' tokenization/tone/stress applied in Rust. Identical to
     `_vachana_thai` → `thai_labels`; mixed Thai/Latin rows are excluded as
     before."""
-    import g2p_client
-
-    try:
-        r = g2p_client.request(text=text, lang="tha")
-    except g2p_client.Unlabelable as exc:
-        return {"exclude_reason": exc.reason, "g2p": g2p_client.identity()}
-    return {
+    return _g2p_audit_output(text, "tha", lambda r: {
         "phonemes": r["phonemes"], "stress": r["stress"], "tone": r.get("tone", []),
-        "ipa_with_tone": r["raw"], "g2p": g2p_client.identity(),
-    }
+        "ipa_with_tone": r["raw"],
+    })
 
 
 def _g2p_kor(text: str) -> dict[str, Any]:
@@ -336,17 +335,11 @@ def _g2p_kor(text: str) -> dict[str, Any]:
     (2026-09-03 audit; espeak `ko` 47%). Digits, Latin, hanja, and bare jamo
     are excluded (`korean_digits:` etc.). Korean has no stress or tone:
     `tone` is all None so the row is in sidecar shape."""
-    import g2p_client
-
-    try:
-        r = g2p_client.request(text=text, lang="kor")
-    except g2p_client.Unlabelable as exc:
-        return {"exclude_reason": exc.reason, "g2p": g2p_client.identity()}
-    return {
+    return _g2p_audit_output(text, "kor", lambda r: {
         "phonemes": r["phonemes"], "stress": r["stress"],
         "tone": [None] * len(r["phonemes"]),
-        "hangul_pronunciation": r["raw"], "g2p": g2p_client.identity(),
-    }
+        "hangul_pronunciation": r["raw"],
+    })
 
 
 def _pinyin_syllables_to_ipa(syllables: list[str | None]) -> list[dict | None]:
