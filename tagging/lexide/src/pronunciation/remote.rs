@@ -53,13 +53,14 @@ impl PhonemizerClient {
         struct Probe {
             marker_only: bool,
         }
-        let probe = self
+        let response = self
             .http
             .post(&self.predict_url)
             .json(&Probe { marker_only: true })
             .send()
+            .await?;
+        let probe = checked(response)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("invalid model identity")?;
@@ -82,12 +83,14 @@ impl PhonemizerClient {
     }
 
     pub async fn predict(&self, request: &PredictRequest) -> Result<PredictResponse> {
-        self.http
+        let response = self
+            .http
             .post(&self.predict_url)
             .json(request)
             .send()
+            .await?;
+        checked(response)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("invalid prediction response")
@@ -102,13 +105,14 @@ impl PhonemizerClient {
         struct BatchRequest<'a> {
             requests: &'a [PredictRequest],
         }
-        let batch: BatchResponse = self
+        let response = self
             .http
             .post(&self.batch_url)
             .json(&BatchRequest { requests })
             .send()
+            .await?;
+        let batch: BatchResponse = checked(response)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("invalid batch response")?;
@@ -128,6 +132,28 @@ fn parse_identity(probe: serde_json::Value) -> Result<ModelIdentity> {
         bail!("model identity probe reported load_error: {error}");
     }
     serde_json::from_value(probe).context("invalid model identity")
+}
+
+/// How much of an error response to quote. Modal's rejections are short JSON;
+/// the limit only guards against an endpoint returning an HTML error page.
+const BODY_EXCERPT_CHARS: usize = 2000;
+
+/// Fail on an error status while keeping the endpoint's response body, which
+/// is where the reason a clip was rejected lives (`error_for_status` alone
+/// discards it). The `reqwest::Error` stays in the chain, so callers can still
+/// recover the status to decide whether the failure is worth retrying.
+async fn checked(response: reqwest::Response) -> Result<reqwest::Response> {
+    let Some(error) = response.error_for_status_ref().err() else {
+        return Ok(response);
+    };
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let excerpt: String = body.trim().chars().take(BODY_EXCERPT_CHARS).collect();
+    Err(anyhow::Error::new(error).context(if excerpt.is_empty() {
+        format!("endpoint returned {status}")
+    } else {
+        format!("endpoint returned {status}: {excerpt}")
+    }))
 }
 
 fn batch_endpoint(single: &str) -> Result<String> {

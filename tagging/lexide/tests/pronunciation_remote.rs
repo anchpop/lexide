@@ -16,6 +16,16 @@ fn with_response<F: Future<Output = ()>>(
     response: Value,
     test: impl FnOnce(PhonemizerClient) -> F,
 ) {
+    with_status_response(path, expected_request, 200, response, test)
+}
+
+fn with_status_response<F: Future<Output = ()>>(
+    path: &'static str,
+    expected_request: Value,
+    status: u16,
+    response: Value,
+    test: impl FnOnce(PhonemizerClient) -> F,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
@@ -57,7 +67,7 @@ fn with_response<F: Future<Output = ()>>(
             expected_request
         );
         let body = response.to_string();
-        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        write!(stream, "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
     });
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("x-test-client", "replacement".parse().unwrap());
@@ -150,6 +160,34 @@ fn predict_batch_rejects_result_count_mismatch() {
         |client| async move {
             let error = client.predict_batch(&[request]).await.unwrap_err();
             assert_eq!(error.to_string(), "batch returned 0 results for 1 clips");
+        },
+    );
+}
+
+#[test]
+fn error_status_reports_the_body_and_preserves_the_status() {
+    let request = PredictRequest::from_samples(&[0.5]);
+    let expected = serde_json::to_value(&request).unwrap();
+    with_status_response(
+        "/predict",
+        expected,
+        422,
+        json!({"detail": "clip exceeds the maximum length"}),
+        |client| async move {
+            let error = client.predict(&request).await.unwrap_err();
+            let rendered = format!("{error:#}");
+            // The endpoint's reason is what makes a rejection diagnosable.
+            assert!(
+                rendered.contains("clip exceeds the maximum length"),
+                "{rendered}"
+            );
+            assert!(rendered.contains("422"), "{rendered}");
+            // Callers classify retries by recovering the status from the chain.
+            let status = error
+                .chain()
+                .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+                .find_map(reqwest::Error::status);
+            assert_eq!(status, Some(reqwest::StatusCode::UNPROCESSABLE_ENTITY));
         },
     );
 }
