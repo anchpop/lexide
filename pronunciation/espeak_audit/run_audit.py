@@ -79,7 +79,9 @@ def select_clips(lang: str, voice: str, source: str, n: int,
 def prep_clip(d: dict, lang: str, vocab: dict) -> dict:
     """espeak fork -> phonemes/ids + audio samples for one clip."""
     voice = LANG_TO_VOICE[lang]
-    phonemes, stress, word_spans = preprocess.phonemize(d["sentence"], voice)
+    result = preprocess.phonemize(d["sentence"], lang, voice=voice)
+    phonemes, stress = result["phonemes"], result["stress"]
+    word_spans = [tuple(s) for s in result["word_spans"]]
     word_of = [-1] * len(phonemes)
     for wi, (s, e) in enumerate(word_spans):
         for j in range(s, e):

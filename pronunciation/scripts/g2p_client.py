@@ -96,15 +96,10 @@ def request(**req) -> dict:
     return result
 
 
-def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[tuple[int, int]]]:
-    """Phonemize one utterance with espeak voice `espeak_lang`.
-
-    Returns (phonemes, stress, word_spans): the model-label tokenization
-    (continuation diacritics folded onto the previous token, ʲ onto a
-    preceding consonant, language-switch markers stripped) with stress codes
-    0/1/2, and word_spans[i] = (start, end) into `phonemes` for the i-th word
-    espeak emitted. Embedded newlines are spaces — a sentence is one
-    utterance.
+def phonemize(text: str, lang: str, voice: str | None = None, canon: str = "current") -> dict:
+    """Phonemize one utterance in `lang`, optionally overriding the default
+    voice/dialect (espeak languages only). Returns the full structured
+    response: phonemes, stress, word_spans, plus any factors the language
+    provides (tone/pitch/syllables). `canon` only affects Hindi.
     """
-    r = request(text=text, voice=espeak_lang)
-    return r["phonemes"], r["stress"], [tuple(s) for s in r["word_spans"]]
+    return request(text=text, lang=lang, voice=voice, canon=canon)

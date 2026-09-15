@@ -420,7 +420,7 @@ def process_lesson(mp3_path: Path, lesson_id: str,
         # wrongly drop every segment on machines without the espeak fork.
         if espeak_lang is not None and target_lang not in BACKEND_REQUIRED_LANGS:
             try:
-                phonemes, _, _ = phonemize(text, espeak_lang)
+                phonemes = phonemize(text, target_lang, voice=espeak_lang)["phonemes"]
             except Exception:
                 continue
             if not phonemes:

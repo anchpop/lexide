@@ -68,11 +68,11 @@ def test_provider_exclusions_are_unlabelable(monkeypatch, lang):
     ("unknown", "en-gb", "en-gb"), ("unknown", None, None),
 ])
 def test_espeak_voice_and_unknown_language(monkeypatch, lang, voice, wanted):
-    phonemize = Mock(return_value=(["a"], [0], []))
+    phonemize = Mock(return_value={"phonemes": ["a"], "stress": [0], "word_spans": []})
     monkeypatch.setattr(audit, "phonemize", phonemize)
     assert audit.label_phonemes("text", lang, voice) == (["a"] if wanted else [])
     if wanted:
-        phonemize.assert_called_once_with("text", wanted)
+        phonemize.assert_called_once_with("text", lang, voice=wanted)
     else:
         phonemize.assert_not_called()
 

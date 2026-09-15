@@ -92,7 +92,8 @@ def main() -> int:
         for r in picked:
             voice = (r.get("espeak_voice") or voice_by_file.get(r["file"])
                      or LANG_TO_ESPEAK[lang])
-            ph, st, _spans = phonemize(r["sentence"], voice)
+            result = phonemize(r["sentence"], lang, voice=voice)
+            ph, st = result["phonemes"], result["stress"]
             ph, st, _unknown = validate_phonemes(ph, st, lang)
             if ph != r["phonemes"]:
                 ph_bad += 1

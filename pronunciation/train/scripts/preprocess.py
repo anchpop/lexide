@@ -736,8 +736,7 @@ def parse_phoneme_backend_args(values: list[str] | None) -> dict[str, Path]:
 
 
 # All G2P (espeak languages and Hindi alike) goes through the `g2p` binary —
-# see scripts/g2p_client.py. `phonemize(text, voice)` keeps its historical
-# signature for the callers in scripts/ and data/.
+# see scripts/g2p_client.py for the shared language + optional voice API.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from g2p_client import phonemize  # noqa: E402,F401  (re-exported)
 
@@ -1228,10 +1227,14 @@ def main():
             # so espeak's clause-per-line output can never be misassigned
             # across rows (the old stdin batching did exactly that on 2-6% of
             # rows, caught 2026-08-24 by scripts/verify_espeak_build.py).
-            phonemized_results = [
-                phonemize(rec["sentence"], resolve_espeak_voice(rec, lang))
-                for rec in tqdm(prepared_records, desc=f"{lang} phonemize")
-            ]
+            phonemized_results = []
+            for rec in tqdm(prepared_records, desc=f"{lang} phonemize"):
+                r = phonemize(rec["sentence"], lang,
+                              voice=resolve_espeak_voice(rec, lang))
+                phonemized_results.append(
+                    (r["phonemes"], r["stress"],
+                     [tuple(s) for s in r["word_spans"]])
+                )
         else:
             phonemized_results = [None] * len(prepared_records)
 

@@ -90,7 +90,9 @@ def test_written_stress_provenance(tmp_path, monkeypatch, sentence, targets,
             "file": "a.wav", "stressed_words": targets,
         }) + "\n")
     sf.write(lang_dir / "a.wav", np.full(1600, 0.1, dtype=np.float32), 16000)
-    monkeypatch.setattr(preprocess, "phonemize", lambda *args: (["u"], [2], [(0, 1)]))
+    monkeypatch.setattr(preprocess, "phonemize", lambda *args, **kwargs: {
+        "phonemes": ["u"], "stress": [2], "word_spans": [[0, 1]],
+    })
     monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"u"})
     monkeypatch.setattr(sys, "argv", [
         "preprocess.py", "--data-dir", str(tmp_path), "--skip-narrowing",

@@ -74,7 +74,9 @@ def label_phonemes(text: str, lang: str, espeak_voice: str | None = None) -> lis
             raise Unlabelable(reason, f"{provider}: {reason}")
         return labels["phonemes"]
     voice = espeak_voice or LANG_TO_ESPEAK.get(lang)
-    return phonemize(text, voice)[0] if voice else []
+    if not voice:
+        return []
+    return phonemize(text, lang, voice=voice)["phonemes"]
 
 GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 LANG_TO_ISO639_1 = {

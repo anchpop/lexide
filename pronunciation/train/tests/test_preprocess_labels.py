@@ -96,9 +96,10 @@ def test_preprocess_persists_voice_only_after_valid_labels(tmp_path, monkeypatch
     sf.write(lang_dir / "a.wav", np.full(1600, 0.1, dtype=np.float32), 16000)
     calls = []
 
-    def phonemize(text, voice):
-        calls.append((text, voice))
-        return (["s"] if valid else ["INVALID"], [0], [(0, 1)])
+    def phonemize(text, lang, *, voice):
+        calls.append((text, lang, voice))
+        return {"phonemes": ["s"] if valid else ["INVALID"],
+                "stress": [0], "word_spans": [[0, 1]]}
 
     monkeypatch.setattr(preprocess, "phonemize", phonemize)
     monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"s"})
@@ -117,7 +118,7 @@ def test_preprocess_persists_voice_only_after_valid_labels(tmp_path, monkeypatch
             preprocess.main()
         assert manifest.read_text() == original
         assert not (lang_dir / "phonemes.jsonl").exists()
-    assert calls == [("cinco", "es-419")]
+    assert calls == [("cinco", "spa", "es-419")]
 
 
 def test_verifier_prefers_label_voice_and_keeps_legacy_fallback(tmp_path, monkeypatch):
@@ -141,9 +142,10 @@ def test_verifier_prefers_label_voice_and_keeps_legacy_fallback(tmp_path, monkey
     ]))
     voices = []
 
-    def phonemize(text, voice):
+    def phonemize(text, lang, *, voice):
+        assert lang == "spa"
         voices.append(voice)
-        return ["s"], [0], [(0, 1)]
+        return {"phonemes": ["s"], "stress": [0], "word_spans": [[0, 1]]}
 
     monkeypatch.setattr(verifier, "REPO", tmp_path)
     monkeypatch.setattr(verifier, "phonemize", phonemize)
@@ -164,7 +166,9 @@ def test_skip_narrowing_preserves_existing_labels(tmp_path, monkeypatch, skip):
     narrowed = lang_dir / "phonemes_narrowed.jsonl"
     narrowed.write_text("preserve existing narrowed labels\n")
     calls = []
-    monkeypatch.setattr(preprocess, "phonemize", lambda *args: (["h"], [0], [(0, 1)]))
+    monkeypatch.setattr(preprocess, "phonemize", lambda *args, **kwargs: {
+        "phonemes": ["h"], "stress": [0], "word_spans": [[0, 1]],
+    })
     monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"h"})
     monkeypatch.setattr(preprocess, "run_narrowing", lambda *args: calls.append(args))
     argv = ["preprocess.py", "--data-dir", str(tmp_path), "--skip-vad",
