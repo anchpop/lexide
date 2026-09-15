@@ -222,6 +222,45 @@ def test_external_backend_provenance_preserved(tmp_path, monkeypatch, provider_s
     assert written["stress"] == [2]
 
 
+def test_hindi_flat_sidecar_annotations_survive_preprocess(tmp_path, monkeypatch):
+    import audit_g2p_backends
+    import build_external_phoneme_sidecars
+
+    cases = build_external_phoneme_sidecars.read_jsonl(
+        TRAIN / "tests/fixtures/hindi_flat/cases.jsonl"
+    )
+    case = next(c for c in cases if c["record"]["file"] == "synthetic-multiword.wav")
+    rec = case["record"]
+    lang_dir = tmp_path / "hin"
+    lang_dir.mkdir()
+    (lang_dir / "manifest.jsonl").write_text(json.dumps(rec) + "\n")
+    (lang_dir / "g2p_audit_g2p-hin.jsonl").write_text(json.dumps({
+        "file": rec["file"],
+        "sentence_sha256": hashlib.sha256(rec["sentence"].encode()).hexdigest(),
+        "provider_schema": audit_g2p_backends.PROVIDER_SCHEMA["g2p-hin"],
+        "output": case["response"],
+    }) + "\n")
+    backend = build_external_phoneme_sidecars.build_sidecar("hin", data_root=tmp_path)
+    expected = json.loads(backend.read_text())
+    sf.write(lang_dir / rec["file"], np.full(1600, 0.1, dtype=np.float32), 16000)
+    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: set(expected["phonemes"]))
+
+    def no_espeak(*args, **kwargs):
+        raise AssertionError("Hindi must not fall back to eSpeak")
+
+    monkeypatch.setattr(preprocess, "phonemize", no_espeak)
+    monkeypatch.setattr(sys, "argv", [
+        "preprocess.py", "--data-dir", str(tmp_path), "--skip-narrowing",
+        "--skip-vad", "--skip-speaker-cluster", "--no-pack",
+        "--phoneme-backend", f"hin={backend}",
+    ])
+    preprocess.main()
+    written = json.loads((lang_dir / "phonemes.jsonl").read_text())
+    for key in ("phonemes", "stress", "syllables", "stress_source"):
+        assert written[key] == expected[key]
+    assert "word_spans" not in written
+
+
 def test_failed_promotion_restores_old_dataset(tmp_path, stage, monkeypatch):
     write_tar(tmp_path, {"eng/phonemes.jsonl": "old"})
     assert stage().returncode == 0

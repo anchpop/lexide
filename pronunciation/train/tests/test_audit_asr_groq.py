@@ -32,17 +32,20 @@ def test_required_provider_and_conversion(monkeypatch, lang, provider):
     )
 
 
-def test_hindi_current_canon_and_word_flattening(monkeypatch):
+def test_hindi_current_canon_and_flat_labels(monkeypatch):
     import g2p_client
 
-    word = {"phonemes": ["k", "ɛ"], "stress": [0, 1], "syllables": [
-        {"start": 0, "end": 2, "nucleus": 1, "stress": 1},
-    ]}
-    words = Mock(return_value=[word, word])
-    monkeypatch.setattr(g2p_client, "hindi_words", words)
+    request = Mock(return_value={
+        "phonemes": ["k", "ɛ", "k", "ɛ"], "stress": [0, 1, 0, 1],
+        "word_spans": [[0, 2], [2, 4]], "syllables": [
+            {"start": 0, "end": 2, "nucleus": 1, "moras": 2, "stressed": True},
+            {"start": 2, "end": 4, "nucleus": 3, "moras": 2, "stressed": True},
+        ],
+    })
+    monkeypatch.setattr(g2p_client, "request", request)
     monkeypatch.setattr(g2p_client, "identity", lambda: "test-build")
     assert audit.label_phonemes("कह", "hin") == ["k", "ɛ", "k", "ɛ"]
-    words.assert_called_once_with("कह", "current")
+    request.assert_called_once_with(text="कह", lang="hin", canon="current")
 
 
 @pytest.mark.parametrize("lang", sorted(audit.BACKEND_REQUIRED_LANGS))

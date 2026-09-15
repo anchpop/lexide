@@ -261,8 +261,9 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
   a C compiler), or point `G2P_BIN` at a checkout's `target/release/g2p`.
   `scripts/g2p_client.py` talks to one long-lived `g2p serve` process;
   `preprocess.phonemize()` re-exports its espeak entry point, and the Hindi
-  sidecar provider is `g2p-hin` (`hindi_words(text, canon)`; `legacy` is
-  byte-identical to the Python chain, `current` has the corrections). There
+  sidecar provider is `g2p-hin` (reached via
+  `g2p_client.request(lang="hin", canon=...)`; `legacy` is byte-identical to
+  the Python chain, `current` has the corrections). There
   is no espeak binary or data path to configure any more, and no
   `ESPEAK_NG_BIN`/`ESPEAK_NG_DATA_PATH`. **Never install mainline espeak.**
   Mandarin (`g2p-zho`, g2pM ported, identical labels), Japanese

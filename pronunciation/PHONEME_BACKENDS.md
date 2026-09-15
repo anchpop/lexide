@@ -46,6 +46,41 @@ Both fail closed. If you are adding a language whose labels should not come
 from eSpeak, add it to `BACKEND_REQUIRED_LANGS` **and** to `CONFIG`, in the
 same change — `CONFIG` is what the check reads.
 
+## Hindi flat-response contract
+
+The `g2p-hin` provider requests `lang="hin", canon="current"` through
+`g2p_client.request`. Audit schema **2** preserves g2p's flat phones, numeric
+stress, absolute syllables and word spans, plus the canon and build identity
+(on refusals too). Schema-1 word-local audits must be regenerated; the
+standalone sidecar builder refuses them rather than interpreting the old shape.
+
+`g2p_hindi_labels` keeps the flat arrays and absolute indices. The only schema
+mappings are syllable `stressed` → numeric `stress`, word-span membership →
+syllable `word`, and the existing `roy-2017-rules-on-schwa-hin` provenance.
+The sidecar schema is unchanged: it does **not** gain `raw` or `word_spans`.
+`hindi_labels` remains for historical word-shaped audit reproduction, not the
+production request path.
+
+`train/tests/test_hindi_flat_labels.py` checks exact serialized sidecar bytes
+against goldens captured through the old production path with pinned g2p 0.4.0
+and the current canon. Fixture provenance lives beside the goldens. From
+`pronunciation/train` on Linux:
+
+```bash
+LEXIDE_DATA_VENV=~/.venv-lexide-tests \
+G2P_BIN=/data/coding/g2p/target/release/g2p \
+LEXIDE_HINDI_FULL_SHADOW=1 \
+direnv exec /data/coding/yap bash ../scripts/py-linux.sh \
+  -m pytest tests/test_hindi_flat_labels.py -q -s
+```
+
+The full shadow checks every Hindi manifest disposition, including exclusions,
+in temporary directories. It compares old and direct adapters against the
+**same binary/canon**; it never updates goldens or corpus files. Any difference
+between newly generated labels and an older on-disk sidecar is a separate
+relabel diff, not evidence that the adapter changed behavior. This Hindi-only
+simplification does not remove `BACKEND_REQUIRED_LANGS` or change other backends.
+
 ## Consumers outside this repo
 
 Anything scoring audio against this model must generate targets from the same

@@ -108,26 +108,3 @@ def phonemize(text: str, espeak_lang: str) -> tuple[list[str], list[int], list[t
     """
     r = request(text=text, voice=espeak_lang)
     return r["phonemes"], r["stress"], [tuple(s) for s in r["word_spans"]]
-
-
-def hindi_words(text: str, canon: str = "current") -> list[dict]:
-    """Hindi labels per Devanagari word: `{"phonemes", "stress", "syllables"}`
-    with syllable spans relative to the word (the shape lexide's sidecar
-    builder consumes). `canon` is `current` (audited corrections) or `legacy`
-    (byte-identical to the Python schwa-stress-hin chain the 2026-08 corpus
-    was labeled with). Raises `Unlabelable` for digits or Latin script."""
-    r = request(text=text, lang="hin", canon=canon)
-    words = []
-    for start, end in r["word_spans"]:
-        syllables = [
-            {"start": s["start"] - start, "end": s["end"] - start,
-             "nucleus": s["nucleus"] - start, "moras": s["moras"],
-             "stress": int(s["stressed"])}
-            for s in r.get("syllables", []) if start <= s["start"] < end
-        ]
-        words.append({
-            "phonemes": r["phonemes"][start:end],
-            "stress": r["stress"][start:end],
-            "syllables": syllables,
-        })
-    return words

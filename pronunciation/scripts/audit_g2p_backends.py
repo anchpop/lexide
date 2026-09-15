@@ -256,10 +256,10 @@ def _g2p_hin(text: str) -> dict[str, Any]:
     import g2p_client
 
     try:
-        words = g2p_client.hindi_words(text, "current")
+        result = g2p_client.request(text=text, lang="hin", canon="current")
     except g2p_client.Unlabelable as exc:
-        return {"words": [], "exclude_reason": exc.reason, "g2p": g2p_client.identity()}
-    return {"words": words, "canon": "current", "g2p": g2p_client.identity()}
+        result = {"exclude_reason": exc.reason}
+    return {**result, "canon": "current", "g2p": g2p_client.identity()}
 
 
 def _g2p_zho(text: str) -> dict[str, Any]:
@@ -481,6 +481,8 @@ PROVIDERS: dict[str, tuple[str, Callable[[str], dict[str, Any]]]] = {
 }
 
 PROVIDER_SCHEMA = {name: 1 for name in PROVIDERS}
+# Flat g2p response, not the old word-local reconstruction (including refusals).
+PROVIDER_SCHEMA["g2p-hin"] = 2
 PROVIDER_SCHEMA["pyopenjtalk"] = 2
 PROVIDER_SCHEMA["schwa-hin"] = 2
 # 5: loanword फ → /f/ via _HINDI_NATIVE_PH_PREFIXES (2026-08-24 listen audit)

@@ -279,6 +279,55 @@ def hindi_labels(rec: dict, audit: dict) -> dict:
     }
 
 
+def g2p_hindi_labels(rec: dict, audit: dict) -> dict:
+    """Adapt absolute g2p Hindi labels without rebuilding word-local arrays.
+
+    Only the sidecar's syllable stress/word/provenance fields differ from the
+    wire format. Keep the historical field order too: the shadow gate compares
+    serialized sidecar bytes, not just equivalent dictionaries.
+    """
+    out = audit["output"]
+    if out.get("exclude_reason"):
+        return {"exclude_reason": out["exclude_reason"]}
+    phonemes, stress = out["phonemes"], out["stress"]
+    if len(phonemes) != len(stress):
+        raise ValueError(f"Hindi word stress misalignment in {rec['file']}")
+    native_syllables = out.get("syllables", [])
+    syllables = []
+    phone_cursor = 0
+    syllable_index = 0
+    for word_index, (start, end) in enumerate(out["word_spans"]):
+        if start != phone_cursor or not start < end <= len(phonemes):
+            raise ValueError(f"Hindi word span invariant failed in {rec['file']}")
+        syllable_cursor = start
+        while (syllable_index < len(native_syllables)
+               and native_syllables[syllable_index]["start"] < end):
+            s = native_syllables[syllable_index]
+            syllable_stress = int(s["stressed"])
+            if (s["start"] != syllable_cursor
+                    or not s["start"] <= s["nucleus"] < s["end"] <= end
+                    or stress[s["nucleus"]] != syllable_stress):
+                raise ValueError(f"Hindi syllable invariant failed in {rec['file']}")
+            syllables.append({
+                "start": s["start"], "end": s["end"], "nucleus": s["nucleus"],
+                "moras": s["moras"], "stress": syllable_stress, "word": word_index,
+                "source": "roy-2017-rules-on-schwa-hin",
+            })
+            syllable_cursor = s["end"]
+            syllable_index += 1
+        if syllable_cursor != end:
+            raise ValueError(f"Hindi syllables do not cover word in {rec['file']}")
+        phone_cursor = end
+    if phone_cursor != len(phonemes) or syllable_index != len(native_syllables):
+        raise ValueError(f"Hindi word/syllable coverage failed in {rec['file']}")
+    if not phonemes:
+        return {"exclude_reason": "hindi_no_devanagari_phones"}
+    return {
+        "phonemes": phonemes, "stress": stress, "syllables": syllables,
+        "stress_source": "roy-2017-rules-on-schwa-hin",
+    }
+
+
 def japanese_labels(rec: dict, audit: dict) -> dict:
     native = audit["output"]["phones"]
     contexts = audit["output"]["fullcontext"]
@@ -460,7 +509,7 @@ CONFIG = {
     # The g2p crate's port of schwa-stress-hin plus the audited corrections;
     # `schwa-stress-hin` (the Python original) stays in PROVIDERS for
     # reproducing the 2026-08 labels.
-    "hin": ("g2p-hin", hindi_labels),
+    "hin": ("g2p-hin", g2p_hindi_labels),
     # The same vachana-thai, run by the g2p crate as a pinned uv project, with
     # thai_labels' parsing in Rust (`vachana-thai` stays in PROVIDERS).
     "tha": ("g2p-tha", g2p_flat_labels),
@@ -479,6 +528,8 @@ CONFIG = {
 def build_sidecar(lang: str, *, data_root: Path = DATA_ROOT,
                   output: Path | None = None) -> Path:
     """Convert the language's canonical audit into its hash-bound sidecar."""
+    from audit_g2p_backends import PROVIDER_SCHEMA
+
     provider, convert = CONFIG[lang]
     lang_dir = data_root / lang
     manifest = read_jsonl(lang_dir / "manifest.jsonl")
@@ -491,6 +542,8 @@ def build_sidecar(lang: str, *, data_root: Path = DATA_ROOT,
         digest = hashlib.sha256(rec["sentence"].encode()).hexdigest()
         if audit is None or audit["sentence_sha256"] != digest or audit.get("error"):
             raise ValueError(f"missing/stale/failed audit for {lang}/{rec['file']}")
+        if lang == "hin" and audit.get("provider_schema", 1) != PROVIDER_SCHEMA[provider]:
+            raise ValueError(f"obsolete Hindi audit schema for {rec['file']}; rerun {provider} audit")
         labels = convert(rec, audit)
         excluded += "exclude_reason" in labels
         dispositions.append({
