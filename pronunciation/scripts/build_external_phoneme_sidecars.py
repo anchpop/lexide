@@ -13,6 +13,9 @@ import hashlib
 import json
 import re
 import unicodedata
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 
@@ -279,19 +282,9 @@ def hindi_labels(rec: dict, audit: dict) -> dict:
     }
 
 
-def g2p_hindi_labels(rec: dict, audit: dict) -> dict:
-    """Adapt absolute g2p Hindi labels without rebuilding word-local arrays.
-
-    Only the sidecar's syllable stress/word/provenance fields differ from the
-    wire format. Keep the historical field order too: the shadow gate compares
-    serialized sidecar bytes, not just equivalent dictionaries.
-    """
-    out = audit["output"]
-    if out.get("exclude_reason"):
-        return {"exclude_reason": out["exclude_reason"]}
+def g2p_syllables_factor(rec: dict, out: dict, result: dict) -> None:
+    """Validate absolute Hindi coverage and append sidecar syllable metadata."""
     phonemes, stress = out["phonemes"], out["stress"]
-    if len(phonemes) != len(stress):
-        raise ValueError(f"Hindi word stress misalignment in {rec['file']}")
     native_syllables = out.get("syllables", [])
     syllables = []
     phone_cursor = 0
@@ -320,12 +313,8 @@ def g2p_hindi_labels(rec: dict, audit: dict) -> dict:
         phone_cursor = end
     if phone_cursor != len(phonemes) or syllable_index != len(native_syllables):
         raise ValueError(f"Hindi word/syllable coverage failed in {rec['file']}")
-    if not phonemes:
-        return {"exclude_reason": "hindi_no_devanagari_phones"}
-    return {
-        "phonemes": phonemes, "stress": stress, "syllables": syllables,
-        "stress_source": "roy-2017-rules-on-schwa-hin",
-    }
+    result["syllables"] = syllables
+    result["stress_source"] = "roy-2017-rules-on-schwa-hin"
 
 
 def japanese_labels(rec: dict, audit: dict) -> dict:
@@ -471,29 +460,22 @@ def japanese_labels(rec: dict, audit: dict) -> dict:
     return result
 
 
-def g2p_flat_labels(rec: dict, audit: dict) -> dict:
-    """Providers whose g2p output is already in sidecar shape (phonemes,
-    stress, tone), or an exclusion."""
-    out = audit["output"]
-    if out.get("exclude_reason"):
-        return {"exclude_reason": out["exclude_reason"]}
-    if len(out["phonemes"]) != len(out["stress"]) or len(out["phonemes"]) != len(out["tone"]):
+def g2p_tone_factor(rec: dict, out: dict, result: dict) -> None:
+    if len(out["phonemes"]) != len(out["tone"]):
         raise ValueError(f"g2p label misalignment in {rec['file']}")
-    if not out["phonemes"]:
-        return {"exclude_reason": "g2p_no_phonemes"}
-    return {"phonemes": out["phonemes"], "stress": out["stress"], "tone": out["tone"]}
+    result["tone"] = out["tone"]
 
 
-def g2p_japanese_labels(rec: dict, audit: dict) -> dict:
-    """g2p's Japanese output (phones, pitch factor, and the parse-derived
-    withhold reasons) plus the one check that needs the manifest row: a
-    Whisper transcript below the accent bar may have guessed the kanji, and
-    pitch accent is lexical, so the accent factor is withheld."""
-    out = audit["output"]
-    if out.get("exclude_reason"):
-        return {"exclude_reason": out["exclude_reason"]}
-    result = {"phonemes": out["phonemes"], "stress": out["stress"]}
+def g2p_pitch_accent_factor(rec: dict, out: dict, result: dict) -> None:
+    """Keep parse-derived withholding ahead of the recording's Whisper gate."""
     withhold = out.get("pitch_accent_exclude_reason")
+    # The provider uses [] as an absent-factor sentinel on parse withholding.
+    # Other present arrays must align, even if Whisper will withhold the factor.
+    if "pitch_accent" in out:
+        pitch = out["pitch_accent"]
+        absent = pitch == [] and withhold is not None
+        if not absent and (pitch is None or len(pitch) != len(out["phonemes"])):
+            raise ValueError(f"g2p pitch accent misalignment in {rec['file']}")
     if withhold is None:
         logprob = rec.get("whisper_avg_logprob")
         if logprob is not None and logprob < JAPANESE_ACCENT_MIN_WHISPER_LOGPROB:
@@ -502,6 +484,39 @@ def g2p_japanese_labels(rec: dict, audit: dict) -> dict:
         result["pitch_accent_exclude_reason"] = withhold
     else:
         result["pitch_accent"] = out["pitch_accent"]
+
+
+@dataclass(frozen=True)
+class G2PLabelSpec:
+    empty_reason: str | None
+    factors: tuple[Callable[[dict, dict, dict], None], ...]
+    stress_misalignment: str = "g2p label misalignment"
+
+
+TONE_SPEC = G2PLabelSpec("g2p_no_phonemes", (g2p_tone_factor,))
+HINDI_SPEC = G2PLabelSpec(
+    "hindi_no_devanagari_phones", (g2p_syllables_factor,), "Hindi word stress misalignment",
+)
+# The original Japanese converter emits empty arrays (or an accent withholding
+# reason), NOT g2p_no_phonemes. None preserves that observable byte-level contract.
+JAPANESE_SPEC = G2PLabelSpec(None, (g2p_pitch_accent_factor,))
+
+
+def g2p_labels(rec: dict, audit: dict, spec: G2PLabelSpec) -> dict:
+    """Adapt g2p's flat superset without changing per-language field presence/order."""
+    out = audit["output"]
+    if out.get("exclude_reason"):
+        return {"exclude_reason": out["exclude_reason"]}
+    phonemes, stress = out["phonemes"], out["stress"]
+    if len(phonemes) != len(stress):
+        raise ValueError(f"{spec.stress_misalignment} in {rec['file']}")
+    result = {"phonemes": phonemes, "stress": stress}
+    # Factors validate before the empty disposition, as the Hindi/tone adapters
+    # always did. An empty phone array cannot conceal bad spans or factor arrays.
+    for build_factor in spec.factors:
+        build_factor(rec, out, result)
+    if not phonemes and spec.empty_reason is not None:
+        return {"exclude_reason": spec.empty_reason}
     return result
 
 
@@ -509,19 +524,19 @@ CONFIG = {
     # The g2p crate's port of schwa-stress-hin plus the audited corrections;
     # `schwa-stress-hin` (the Python original) stays in PROVIDERS for
     # reproducing the 2026-08 labels.
-    "hin": ("g2p-hin", g2p_hindi_labels),
+    "hin": ("g2p-hin", partial(g2p_labels, spec=HINDI_SPEC)),
     # The same vachana-thai, run by the g2p crate as a pinned uv project, with
     # thai_labels' parsing in Rust (`vachana-thai` stays in PROVIDERS).
-    "tha": ("g2p-tha", g2p_flat_labels),
+    "tha": ("g2p-tha", partial(g2p_labels, spec=TONE_SPEC)),
     # The g2p crate's port of g2pM + pinyin_to_ipa (`g2pm-ipa` stays in
     # PROVIDERS; labels are identical where both label a row).
-    "zho-hans": ("g2p-zho", g2p_flat_labels),
+    "zho-hans": ("g2p-zho", partial(g2p_labels, spec=TONE_SPEC)),
     # OpenJTalk via jpreprocess inside the g2p crate (`pyopenjtalk` stays in
     # PROVIDERS; 99.2% of rows identical, see _g2p_jpn).
-    "jpn": ("g2p-jpn", g2p_japanese_labels),
+    "jpn": ("g2p-jpn", partial(g2p_labels, spec=JAPANESE_SPEC)),
     # g2pk2 + mecab-ko inside the g2p crate (see _g2p_kor). No Korean audio
     # has been collected yet; this is the label chain for when it is.
-    "kor": ("g2p-kor", g2p_flat_labels),
+    "kor": ("g2p-kor", partial(g2p_labels, spec=TONE_SPEC)),
 }
 
 

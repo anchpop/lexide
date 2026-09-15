@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import audit_asr_groq as audit
+import build_external_phoneme_sidecars as sidecars
 from preprocess import required_backend_provider
 
 
@@ -18,7 +19,9 @@ from preprocess import required_backend_provider
     ("jpn", "g2p-jpn"), ("kor", "g2p-kor"),
 ])
 def test_required_provider_and_conversion(monkeypatch, lang, provider):
+    assert audit.CONFIG is sidecars.CONFIG
     assert required_backend_provider(lang) == provider == audit.CONFIG[lang][0]
+    assert audit.CONFIG[lang][1].func is sidecars.g2p_labels
     assert audit.PROVIDERS[provider][0] == lang
     generate = Mock(return_value={"native": "output"})
     convert = Mock(return_value={"phonemes": ["production", "tokens"]})

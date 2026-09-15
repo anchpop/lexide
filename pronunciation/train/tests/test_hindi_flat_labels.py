@@ -86,7 +86,7 @@ def test_frozen_goldens_are_byte_identical(tmp_path, monkeypatch):
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["record"]["file"])
 def test_adapter_preserves_annotations_and_input(case):
     response = copy.deepcopy(case["response"])
-    labels = sidecars.g2p_hindi_labels(case["record"], {"output": response})
+    labels = sidecars.CONFIG["hin"][1](case["record"], {"output": response})
     assert response == case["response"]
     assert "word_spans" not in labels and "raw" not in labels and "tone" not in labels
     if "exclude_reason" in labels:
@@ -109,7 +109,7 @@ def test_empty_response_preserves_hindi_reason(syllables):
     response = {"raw": "", "phonemes": [], "stress": [], "word_spans": []}
     if syllables is not None:
         response["syllables"] = syllables
-    assert sidecars.g2p_hindi_labels({"file": "empty"}, {"output": response}) == {
+    assert sidecars.CONFIG["hin"][1]({"file": "empty"}, {"output": response}) == {
         "exclude_reason": "hindi_no_devanagari_phones",
     }
 
@@ -124,7 +124,7 @@ def test_bad_alignment_fails_closed(field, value):
     response = copy.deepcopy(case["response"])
     response[field] = value
     with pytest.raises(ValueError, match="Hindi"):
-        sidecars.g2p_hindi_labels(case["record"], {"output": response})
+        sidecars.CONFIG["hin"][1](case["record"], {"output": response})
 
 
 @pytest.mark.parametrize("field,value", [
@@ -135,16 +135,16 @@ def test_bad_syllable_fails_closed(field, value):
     response = copy.deepcopy(case["response"])
     response["syllables"][0][field] = value
     with pytest.raises(ValueError, match="Hindi"):
-        sidecars.g2p_hindi_labels(case["record"], {"output": response})
+        sidecars.CONFIG["hin"][1](case["record"], {"output": response})
 
 
 def test_trailing_syllable_and_missing_mandatory_fields_fail():
     response = {"phonemes": [], "stress": [], "word_spans": [],
                 "syllables": [{"start": 0, "end": 1, "nucleus": 0, "stressed": False, "moras": 1}]}
     with pytest.raises(ValueError, match="coverage"):
-        sidecars.g2p_hindi_labels({"file": "bad"}, {"output": response})
+        sidecars.CONFIG["hin"][1]({"file": "bad"}, {"output": response})
     with pytest.raises(KeyError):
-        sidecars.g2p_hindi_labels({"file": "bad"}, {"output": {"syllables": []}})
+        sidecars.CONFIG["hin"][1]({"file": "bad"}, {"output": {"syllables": []}})
 
 
 @pytest.mark.parametrize("reason", [None, "hindi_digits:१२", "hindi_latin_script:test"])

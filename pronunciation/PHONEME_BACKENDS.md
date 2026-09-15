@@ -54,7 +54,7 @@ stress, absolute syllables and word spans, plus the canon and build identity
 (on refusals too). Schema-1 word-local audits must be regenerated; the
 standalone sidecar builder refuses them rather than interpreting the old shape.
 
-`g2p_hindi_labels` keeps the flat arrays and absolute indices. The only schema
+`g2p_labels` with `HINDI_SPEC` keeps the flat arrays and absolute indices. The only schema
 mappings are syllable `stressed` → numeric `stress`, word-span membership →
 syllable `word`, and the existing `roy-2017-rules-on-schwa-hin` provenance.
 The sidecar schema is unchanged: it does **not** gain `raw` or `word_spans`.
@@ -78,8 +78,62 @@ The full shadow checks every Hindi manifest disposition, including exclusions,
 in temporary directories. It compares old and direct adapters against the
 **same binary/canon**; it never updates goldens or corpus files. Any difference
 between newly generated labels and an older on-disk sidecar is a separate
-relabel diff, not evidence that the adapter changed behavior. This Hindi-only
-simplification does not remove `BACKEND_REQUIRED_LANGS` or change other backends.
+relabel diff, not evidence that the adapter changed behavior.
+
+## Shared g2p sidecar adapter
+
+`build_external_phoneme_sidecars.CONFIG` pairs each provider with a partial of
+`g2p_labels(rec, audit, spec)`. Frozen specs declare the empty disposition and
+ordered factor builders; the common adapter preserves `phonemes`, `stress`,
+then the language's structured annotations. It does not homogenize schemas:
+
+| languages | appended fields, in order | empty phones |
+|---|---|---|
+| `tha`, `zho-hans`, `kor` | `tone` | `exclude_reason: g2p_no_phonemes` |
+| `hin` | `syllables`, `stress_source` | `exclude_reason: hindi_no_devanagari_phones` |
+| `jpn` | `pitch_accent` **or** `pitch_accent_exclude_reason` | retain empty arrays / accent withholding |
+
+The Japanese empty behavior deliberately follows the **original converter**.
+Provider exclusions precede validation. Hindi absolute word/syllable coverage
+and tone alignment are validated **before** empty dispositions. Japanese stress
+and present pitch arrays must now align with phones, even when accent is
+withheld, except for the provider's existing `pitch_accent: []` sentinel with
+an explicit withholding reason. This rejects malformed inputs but leaves valid
+serialized bytes unchanged.
+A provider accent-withholding reason (including an empty string) takes priority
+over Whisper confidence; otherwise only logprobs **below** `-0.35` withhold
+accent. Missing optional factors stay missing; no null fields are added.
+Korean's provider still fabricates aligned `[None, ...]` tones for compatibility.
+`BACKEND_REQUIRED_LANGS` and the eSpeak-fallback guards remain unchanged.
+
+`train/tests/test_g2p_superset_labels.py` compares all five languages with frozen
+original-converter oracles and exact sidecar goldens. Hindi reuses its earlier
+fixtures; `train/tests/fixtures/g2p_superset/` adds Thai, Mandarin, Japanese and
+Korean captures with pinned-binary SHA256/build identity and current canon.
+Audio-language samples take four filenames from **every** source/backend
+stratum (including both TTS backends), plus synthetic edge cases. **Korean has
+no audio**: its verification is text fixtures and synthetic adapter cases only.
+Empty Thai requests fail inside vachana and empty Mandarin responses omit the
+provider-required tone field; their empty-adapter cases are synthetic, not
+claims of successful binary requests. No provider behavior is changed here.
+
+Run the offline gate from `/data/coding/lexide/pronunciation/train`:
+
+```bash
+LEXIDE_DATA_VENV=~/.venv-lexide-tests \
+G2P_BIN=/data/coding/g2p/target/release/g2p \
+direnv exec /data/coding/yap bash ../scripts/py-linux.sh \
+  -m pytest tests/test_g2p_superset_labels.py tests/test_hindi_flat_labels.py -q
+```
+
+Add `LEXIDE_G2P_LIVE_SHADOW=1` to replay binary-generated fixture cases;
+synthetic adapter-only cases remain frozen. `LEXIDE_G2P_FULL_SHADOW=1` opts
+into fresh pinned-binary conversion of **every** Hindi/Thai/Mandarin/Japanese
+manifest row (potentially slow). `LEXIDE_G2P_CACHED_SHADOW=1` instead compares
+both adapters over existing full audits, checking manifest hashes and schema;
+those audits may use an older binary and this is **not** a live-provider gate.
+Every mode writes only temporary sidecars, reports drift rather than refreshing
+goldens, and never regenerates production audits/labels.
 
 ## Consumers outside this repo
 
