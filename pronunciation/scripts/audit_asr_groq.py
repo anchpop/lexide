@@ -4,10 +4,13 @@
 One source-parameterized auditor for both corpora — they differ only in which
 manifest `source` to read and which exclusions file to write. We use
 **phoneme-level** error, not raw text: both the expected sentence and Whisper's
-transcript are run through the SAME espeak pipeline that builds phonemes.jsonl
-(preprocess.phonemize), so orthographic differences that don't change sound
+transcript use the production label provider: g2p-tha (vachana-thai), g2p-hin
+(current canon), g2p-zho, g2p-jpn, g2p-kor, or preprocess.phonemize (eSpeak)
+for the remaining languages. Orthographic differences that don't change sound
 (apostrophes, capitalization, "15" vs "fifteen", name transliteration) normalize
-away, while genuine pronunciation/content mismatch shows up as phoneme distance.
+away when accepted by the provider, while genuine pronunciation/content mismatch
+shows up as phoneme distance. An unlabelable reference omits PER and uses the
+loader's CER/WER fallback; an unlabelable Whisper transcript remains a mismatch.
 
 Whisper is called with the target language forced (--force-language, default on):
 we already know the intended language from the label, so forcing it removes
@@ -48,11 +51,30 @@ import requests
 import soundfile as sf
 from tqdm import tqdm
 
-# Reuse the same espeak phonemizer the training pipeline uses, so the audit
-# comparison is in the EXACT phoneme space the model is trained against.
+# Reuse the production provider registry and sidecar converters rather than
+# maintaining a second language/backend mapping for the audit.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "train" / "scripts"))
-from preprocess import phonemize, LANG_TO_ESPEAK  # noqa: E402
+from preprocess import BACKEND_REQUIRED_LANGS, phonemize, LANG_TO_ESPEAK  # noqa: E402
+from audit_g2p_backends import PROVIDERS  # noqa: E402
+from build_external_phoneme_sidecars import CONFIG  # noqa: E402
+from g2p_client import Unlabelable  # noqa: E402
+
+
+def label_phonemes(text: str, lang: str, espeak_voice: str | None = None) -> list[str]:
+    """Use the training label chain, preserving per-clip voices for eSpeak."""
+    if lang in BACKEND_REQUIRED_LANGS:
+        # CONFIG is also required_backend_provider's authority. PROVIDERS routes
+        # tha/hin/zho-hans/jpn/kor to _g2p_tha/_g2p_hin (current canon)/
+        # _g2p_zho/_g2p_jpn/_g2p_kor; CONFIG converts their output to label tokens.
+        provider, convert = CONFIG[lang]
+        output = PROVIDERS[provider][1](text)
+        labels = convert({"sentence": text, "file": "<asr>"}, {"output": output})
+        if reason := labels.get("exclude_reason"):
+            raise Unlabelable(reason, f"{provider}: {reason}")
+        return labels["phonemes"]
+    voice = espeak_voice or LANG_TO_ESPEAK.get(lang)
+    return phonemize(text, voice)[0] if voice else []
 
 GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 LANG_TO_ISO639_1 = {
@@ -236,19 +258,24 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
             payload = resp.json()
             text = payload.get("text", "")
 
-            expected_phonemes: list[str] = []
-            actual_phonemes: list[str] = []
-            if not args.text_only:
-                # Per-clip espeak voice (FLEURS dialects) overrides the canonical one.
-                espeak_lang = record.get("espeak_voice") or LANG_TO_ESPEAK.get(record["lang"])
-                expected_phonemes, _, _ = phonemize(record["expected"], espeak_lang) if espeak_lang else ([], [], [])
+            score_phonemes = not args.text_only
+            if score_phonemes:
                 try:
-                    actual_phonemes, _, _ = phonemize(text, espeak_lang) if espeak_lang else ([], [], [])
-                except Exception:
-                    # If espeak chokes on the Whisper output (rare; usually
-                    # non-target-language transliterations), the audit just falls
-                    # back to maximum CER for this clip.
-                    actual_phonemes = []
+                    expected_phonemes = label_phonemes(
+                        record["expected"], record["lang"], record.get("espeak_voice"),
+                    )
+                except Unlabelable:
+                    # No valid reference: omit PER so the loader uses CER/WER.
+                    score_phonemes = False
+                else:
+                    try:
+                        actual_phonemes = label_phonemes(
+                            text, record["lang"], record.get("espeak_voice"),
+                        )
+                    except Exception:
+                        # An unlabelable Whisper output against a valid reference
+                        # remains a mismatch (empty actual phones gives PER 1).
+                        actual_phonemes = []
 
             expected_sha = hashlib.sha256(record["expected"].encode()).hexdigest()
 
@@ -276,18 +303,19 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
                 "whisper_no_speech_prob": no_speech_prob,
                 "whisper_compression_ratio": compression_ratio,
                 "expected_sha256": expected_sha,
-                "expected_phonemes": expected_phonemes,
-                "actual_phonemes": actual_phonemes,
                 "cer": text_cer(record["expected"], text),
                 "wer": text_wer(record["expected"], text),
                 # Full verbose_json — keep for future re-analysis without
                 # paying Groq again.
                 "whisper": payload,
             }
-            # Omitting `per` in text-only mode is deliberate: the exclusion
-            # loader then applies its CER/WER thresholds instead of treating a
-            # fabricated phoneme score as truth.
-            if not args.text_only:
+            # Text-only and unlabelable references deliberately omit phoneme
+            # fields: the loader applies its CER/WER thresholds instead.
+            for key in ("per", "expected_phonemes", "actual_phonemes"):
+                result.pop(key, None)
+            if score_phonemes:
+                result["expected_phonemes"] = expected_phonemes
+                result["actual_phonemes"] = actual_phonemes
                 result["per"] = phoneme_cer(expected_phonemes, actual_phonemes)
             return result
         except requests.HTTPError as e:
@@ -320,12 +348,22 @@ def rescore(path: Path, langs: set[str] | None) -> None:
     print(f"Rescoring {len(todo)} of {len(records)} records in {path}")
     changed = 0
     for rec in tqdm(todo, desc="rescore"):
-        espeak_lang = rec.get("espeak_voice") or LANG_TO_ESPEAK.get(rec["lang"])
-        if not espeak_lang:
+        if (rec["lang"] not in BACKEND_REQUIRED_LANGS
+                and not (rec.get("espeak_voice") or LANG_TO_ESPEAK.get(rec["lang"]))):
             continue
-        expected_phonemes, _, _ = phonemize(rec["expected"], espeak_lang)
         try:
-            actual_phonemes, _, _ = phonemize(rec["whisper_text"], espeak_lang)
+            expected_phonemes = label_phonemes(
+                rec["expected"], rec["lang"], rec.get("espeak_voice"),
+            )
+        except Unlabelable:
+            changed += any(key in rec for key in ("per", "expected_phonemes", "actual_phonemes"))
+            for key in ("per", "expected_phonemes", "actual_phonemes"):
+                rec.pop(key, None)
+            continue
+        try:
+            actual_phonemes = label_phonemes(
+                rec["whisper_text"], rec["lang"], rec.get("espeak_voice"),
+            )
         except Exception:
             actual_phonemes = []
         per = phoneme_cer(expected_phonemes, actual_phonemes)
@@ -365,7 +403,7 @@ def main() -> None:
     parser.add_argument("--force-language", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--text-only", action="store_true",
-        help="Skip eSpeak/PER and audit transcript CER/WER only (useful while an external G2P is being qualified).",
+        help="Skip phonemization/PER and audit transcript CER/WER only (useful while a G2P is being qualified).",
     )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--dry-run", action="store_true")
