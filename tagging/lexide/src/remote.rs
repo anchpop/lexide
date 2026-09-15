@@ -93,8 +93,9 @@ pub struct RemoteConfig {
 impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
-            endpoint_url: std::env::var("LEXIDE_ENDPOINT_URL")
-                .unwrap_or_else(|_| "https://anchpop--lexide-gemma-4-31b-vllm-serve.modal.run".to_string()),
+            endpoint_url: std::env::var("LEXIDE_ENDPOINT_URL").unwrap_or_else(|_| {
+                "https://anchpop--lexide-gemma-4-31b-vllm-serve.modal.run".to_string()
+            }),
             max_tokens: 512,
             temperature: 0.0,
             pool_max_idle_per_host: 256,
@@ -223,7 +224,11 @@ impl RemoteClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("parsley segment endpoint returned error {}: {}", status, error_text);
+            anyhow::bail!(
+                "parsley segment endpoint returned error {}: {}",
+                status,
+                error_text
+            );
         }
 
         let parsed: SegmentResponse = response

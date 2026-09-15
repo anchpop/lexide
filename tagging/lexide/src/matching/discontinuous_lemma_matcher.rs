@@ -250,10 +250,8 @@ mod tests {
         let patterns = vec![("ne_que".to_string(), vec!["ne", "que"])];
         let matcher = DiscontinuousLemmaMatcher::new(&patterns, None);
 
-        let tokenization = make_tokenization(&[
-            ("ne", PartOfSpeech::Part),
-            ("que", PartOfSpeech::Sconj),
-        ]);
+        let tokenization =
+            make_tokenization(&[("ne", PartOfSpeech::Part), ("que", PartOfSpeech::Sconj)]);
         let matches = matcher.find_all(&tokenization);
 
         assert_eq!(matches.len(), 1);
@@ -265,10 +263,8 @@ mod tests {
         let patterns = vec![("ne_que".to_string(), vec!["ne", "que"])];
         let matcher = DiscontinuousLemmaMatcher::new(&patterns, None);
 
-        let tokenization = make_tokenization(&[
-            ("que", PartOfSpeech::Sconj),
-            ("ne", PartOfSpeech::Part),
-        ]);
+        let tokenization =
+            make_tokenization(&[("que", PartOfSpeech::Sconj), ("ne", PartOfSpeech::Part)]);
         let matches = matcher.find_all(&tokenization);
 
         assert_eq!(matches.len(), 0);
@@ -280,10 +276,8 @@ mod tests {
         let matcher = DiscontinuousLemmaMatcher::new(&patterns, None);
 
         // Same lemmas, different POS tags — should still match (POS ignored)
-        let tokenization = make_tokenization(&[
-            ("ne", PartOfSpeech::Adv),
-            ("que", PartOfSpeech::Pron),
-        ]);
+        let tokenization =
+            make_tokenization(&[("ne", PartOfSpeech::Adv), ("que", PartOfSpeech::Pron)]);
         let matches = matcher.find_all(&tokenization);
 
         assert_eq!(matches.len(), 1);
@@ -404,10 +398,7 @@ mod tests {
             "ne_que".to_string(),
             vec![
                 ("ne", None),
-                (
-                    "que",
-                    Some(GapConstraint::ContainsPos(PartOfSpeech::Verb)),
-                ),
+                ("que", Some(GapConstraint::ContainsPos(PartOfSpeech::Verb))),
             ],
         )];
         let matcher = DiscontinuousLemmaMatcher::with_constraints(&patterns, None);
@@ -442,10 +433,7 @@ mod tests {
             "a_b".to_string(),
             vec![
                 ("a", None),
-                (
-                    "b",
-                    Some(GapConstraint::ContainsPos(PartOfSpeech::Verb)),
-                ),
+                ("b", Some(GapConstraint::ContainsPos(PartOfSpeech::Verb))),
             ],
         )];
         let matcher = DiscontinuousLemmaMatcher::with_constraints(&patterns, None);

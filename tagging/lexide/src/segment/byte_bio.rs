@@ -99,7 +99,15 @@ impl MinGru {
     /// out[t * stride + offset ..][..hidden] (so fwd/bwd can interleave into one buffer).
     /// Projections are batched over the whole sequence (they don't depend on the hidden
     /// state); only the cheap elementwise recurrence runs sequentially.
-    fn scan(&self, xs: &[f32], len: usize, reverse: bool, out: &mut [f32], stride: usize, offset: usize) {
+    fn scan(
+        &self,
+        xs: &[f32],
+        len: usize,
+        reverse: bool,
+        out: &mut [f32],
+        stride: usize,
+        offset: usize,
+    ) {
         let h_dim = self.hidden();
         let z_all = self.to_z.apply_all(xs, len);
         let cand_all = self.to_h.apply_all(xs, len);
@@ -447,7 +455,10 @@ mod tests {
     fn spans_basic() {
         // "ab cd": B I O B I -> [(0,2),(3,5)]
         let labels = [0, 1, 2, 0, 1, 2, 0]; // BOS a b ' ' c d EOS
-        assert_eq!(spans_from_byte_labels("ab cd", &labels), vec![(0, 2), (3, 5)]);
+        assert_eq!(
+            spans_from_byte_labels("ab cd", &labels),
+            vec![(0, 2), (3, 5)]
+        );
     }
 
     #[test]
@@ -472,7 +483,9 @@ mod prior_parity_tests {
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
     }
 
     /// Bit-parity against PyTorch for a *concat-mode* prior checkpoint.
@@ -486,13 +499,18 @@ mod prior_parity_tests {
     #[test]
     fn concat_prior_matches_pytorch() {
         let model = ByteBioModel::load(&fixture("concat_parity.safetensors")).unwrap();
-        assert!(model.wants_prior(), "fixture model should carry a prior embedding");
-        assert!(model.prior_dim > 0, "should have loaded in concat mode, not add");
+        assert!(
+            model.wants_prior(),
+            "fixture model should carry a prior embedding"
+        );
+        assert!(
+            model.prior_dim > 0,
+            "should have loaded in concat mode, not add"
+        );
 
-        let cases: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(fixture("concat_parity.json")).unwrap(),
-        )
-        .unwrap();
+        let cases: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(fixture("concat_parity.json")).unwrap())
+                .unwrap();
         for c in cases.as_array().unwrap() {
             let text = c["text"].as_str().unwrap();
             let lang = c.get("lang").and_then(|v| v.as_str());

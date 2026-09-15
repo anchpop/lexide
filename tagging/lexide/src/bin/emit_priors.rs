@@ -94,7 +94,11 @@ fn main() -> Result<()> {
                 .as_deref()
         };
         if spans_mode {
-            writeln!(jsonl, "{}", serde_json::json!({ "spans": proposal_spans(text, chosen) }))?;
+            writeln!(
+                jsonl,
+                "{}",
+                serde_json::json!({ "spans": proposal_spans(text, chosen) })
+            )?;
             continue;
         }
         // Same rule as `PriorSet::ids`: for a language with no whitespace, "no lexicon"

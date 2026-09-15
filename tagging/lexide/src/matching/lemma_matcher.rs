@@ -66,10 +66,7 @@ impl<K: Clone> LemmaMatcher<K> {
     /// # Returns
     ///
     /// A vector of matches, where each match contains the pattern index and token positions.
-    pub fn find_all<'a>(
-        &'a self,
-        tokenization: &'a Tokenization,
-    ) -> Vec<Match<'a, LemmaPos, K>> {
+    pub fn find_all<'a>(&'a self, tokenization: &'a Tokenization) -> Vec<Match<'a, LemmaPos, K>> {
         let lemma_pos_sequence: Vec<LemmaPos> = tokenization
             .tokens
             .iter()

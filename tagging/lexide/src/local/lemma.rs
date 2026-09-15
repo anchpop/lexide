@@ -103,8 +103,12 @@ pub fn build_table<W: Write>(
             continue;
         };
         let pos_priors = priors.and_then(|p| p.get(pos));
-        let form_priors = pos_priors.and_then(|p| p.get("forms")).and_then(|v| v.as_object());
-        let lemma_priors = pos_priors.and_then(|p| p.get("lemmas")).and_then(|v| v.as_object());
+        let form_priors = pos_priors
+            .and_then(|p| p.get("forms"))
+            .and_then(|v| v.as_object());
+        let lemma_priors = pos_priors
+            .and_then(|p| p.get("lemmas"))
+            .and_then(|v| v.as_object());
         let count = |table: Option<&serde_json::Map<String, serde_json::Value>>, key: &str| {
             table
                 .and_then(|t| t.get(key))
@@ -188,6 +192,7 @@ mod tests {
         let mut buf = Vec::new();
         let (n, _) = build_table(&json, Some(&priors), &mut buf).unwrap();
         assert_eq!(n, 6); // PROPN entry excluded
+
         // round-trip through a temp file to exercise load(). The filename must be unique per
         // call: tests run in parallel within one process (same PID), so a PID-only name lets
         // two callers share — and delete — the same file, a flaky "No such file" on load.

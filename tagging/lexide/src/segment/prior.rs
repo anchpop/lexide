@@ -215,7 +215,11 @@ impl Wordbank {
                     None => {
                         let span = i - j;
                         let t = types[j];
-                        let limit = if self.group_unknown { t.unk_max_len() } else { 1 };
+                        let limit = if self.group_unknown {
+                            t.unk_max_len()
+                        } else {
+                            1
+                        };
                         if span <= limit && types[j..i].iter().all(|&x| x == t) {
                             // one unknown word, not one per character
                             self.unk + self.unk_len_penalty * (span - 1) as f64
@@ -267,7 +271,11 @@ pub fn segment_constrained(p: &dyn Proposer, chars: &[char]) -> Vec<(usize, usiz
         while j < n && !chars[j].is_whitespace() {
             j += 1;
         }
-        spans.extend(p.segment_run(&chars[i..j]).into_iter().map(|(a, b)| (i + a, i + b)));
+        spans.extend(
+            p.segment_run(&chars[i..j])
+                .into_iter()
+                .map(|(a, b)| (i + a, i + b)),
+        );
         i = j;
     }
     spans
@@ -390,7 +398,10 @@ mod tests {
         }
         // every char class `of` can return must be in ALL
         for ch in ['ア', 'あ', '漢', 'ก', '7', 'x', '。'] {
-            assert!(CharType::ALL.contains(&CharType::of(ch)), "{ch} missing from ALL");
+            assert!(
+                CharType::ALL.contains(&CharType::of(ch)),
+                "{ch} missing from ALL"
+            );
         }
     }
 
@@ -416,7 +427,10 @@ mod tests {
         let wb = bank(&[("나", 100), ("는", 100), ("밥", 50), ("을", 100)], true);
         let chars: Vec<char> = "나는 밥을".chars().collect();
         // the eojeol boundary comes from whitespace, the split inside it from the bank
-        assert_eq!(segment_constrained(&wb, &chars), vec![(0, 1), (1, 2), (3, 4), (4, 5)]);
+        assert_eq!(
+            segment_constrained(&wb, &chars),
+            vec![(0, 1), (1, 2), (3, 4), (4, 5)]
+        );
     }
 
     #[test]
@@ -425,11 +439,17 @@ mod tests {
         let chars: Vec<char> = "ブロックチェーンが好き".chars().collect();
         let spans = segment_constrained(&wb, &chars);
         // the unseen katakana loanword stays whole rather than shattering
-        assert_eq!(chars[spans[0].0..spans[0].1].iter().collect::<String>(), "ブロックチェーン");
+        assert_eq!(
+            chars[spans[0].0..spans[0].1].iter().collect::<String>(),
+            "ブロックチェーン"
+        );
 
         let shattered = bank(&[("が", 100), ("好き", 50)], false);
         let spans = segment_constrained(&shattered, &chars);
-        assert_eq!(chars[spans[0].0..spans[0].1].iter().collect::<String>(), "ブ");
+        assert_eq!(
+            chars[spans[0].0..spans[0].1].iter().collect::<String>(),
+            "ブ"
+        );
     }
 
     #[test]
@@ -611,10 +631,16 @@ mod priorset_tests {
             let ids = empty.ids(text, Some(lang), 512);
             assert!(ids.iter().all(|&p| p == PRIOR_NONE), "{lang}: got {ids:?}");
             // inferred from script too, with no language supplied
-            assert!(empty.ids(text, None, 512).iter().all(|&p| p == PRIOR_NONE), "{lang} inferred");
+            assert!(
+                empty.ids(text, None, 512).iter().all(|&p| p == PRIOR_NONE),
+                "{lang} inferred"
+            );
         }
         // spaced languages still get their exact, free proposal
         let deu = empty.ids("Ein Haus", Some("deu"), 512);
-        assert!(deu.contains(&PRIOR_B) && deu.contains(&PRIOR_O), "got {deu:?}");
+        assert!(
+            deu.contains(&PRIOR_B) && deu.contains(&PRIOR_O),
+            "got {deu:?}"
+        );
     }
 }

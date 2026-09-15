@@ -65,7 +65,10 @@ impl SentenceSegmenter {
 
     /// Convenience: just the sentence strings, in order.
     pub fn sentences(&self, text: &str, lang: Option<&str>) -> Vec<String> {
-        self.segment(text, lang).into_iter().map(|s| s.text).collect()
+        self.segment(text, lang)
+            .into_iter()
+            .map(|s| s.text)
+            .collect()
     }
 }
 
@@ -103,7 +106,12 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|s| (s[0].as_u64().unwrap() as usize, s[1].as_u64().unwrap() as usize))
+                .map(|s| {
+                    (
+                        s[0].as_u64().unwrap() as usize,
+                        s[1].as_u64().unwrap() as usize,
+                    )
+                })
                 .collect();
             let want_sentences: Vec<String> = fx["sentences"]
                 .as_array()
@@ -115,7 +123,11 @@ mod tests {
             let logits = seg.logits(text, lang);
             let labels: Vec<u8> = logits.iter().map(argmax3).collect();
             assert_eq!(labels, want_labels, "byte labels diverge for {text:?}");
-            assert_eq!(seg.spans(text, lang), want_spans, "spans diverge for {text:?}");
+            assert_eq!(
+                seg.spans(text, lang),
+                want_spans,
+                "spans diverge for {text:?}"
+            );
             assert_eq!(
                 seg.sentences(text, lang),
                 want_sentences,

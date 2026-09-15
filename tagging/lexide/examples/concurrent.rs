@@ -1,8 +1,8 @@
 use anyhow::Result;
 use futures::StreamExt as _;
-use lexide::{Language, Lexide};
 #[cfg(feature = "local")]
 use lexide::LocalConfig;
+use lexide::{Language, Lexide};
 
 #[tokio::main]
 async fn main() -> Result<()> {

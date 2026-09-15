@@ -1,7 +1,7 @@
 use anyhow::Result;
-use lexide::{Language, Lexide};
 #[cfg(feature = "local")]
 use lexide::LocalConfig;
+use lexide::{Language, Lexide};
 
 #[tokio::main]
 async fn main() -> Result<()> {

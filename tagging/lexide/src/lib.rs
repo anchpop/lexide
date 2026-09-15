@@ -9,12 +9,12 @@ pub mod pronunciation;
 
 #[cfg(feature = "local")]
 mod local;
-#[cfg(feature = "segment")]
-pub mod segment;
 #[cfg(any(feature = "local", feature = "remote"))]
 mod raw;
 #[cfg(feature = "remote")]
 mod remote;
+#[cfg(feature = "segment")]
+pub mod segment;
 
 pub use crate::dep::DependencyRelation;
 pub use crate::language::Language;
@@ -25,10 +25,10 @@ use std::fmt;
 
 #[cfg(feature = "local")]
 pub use local::{build_table, LemmaTable, LocalConfig, LocalLexide};
-#[cfg(feature = "segment")]
-pub use segment::{Segmenter, Sentence};
 #[cfg(feature = "remote")]
 pub use remote::{RemoteClient, RemoteConfig, ResponseFormat};
+#[cfg(feature = "segment")]
+pub use segment::{Segmenter, Sentence};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Text {

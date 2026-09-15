@@ -19,7 +19,6 @@ mod lemma;
 mod script;
 mod tagger;
 
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -62,7 +61,9 @@ impl Default for LocalConfig {
 }
 
 /// The languages with published lemma tables (jpn isn't served; see OVERVIEW.md).
-const TABLE_LANGS: [&str; 9] = ["deu", "eng", "fra", "hin", "ita", "kor", "por", "rus", "spa"];
+const TABLE_LANGS: [&str; 9] = [
+    "deu", "eng", "fra", "hin", "ita", "kor", "por", "rus", "spa",
+];
 
 /// The languages that ship a corpus wordbank as their boundary prior — the whitespace-free
 /// ones with no bundled dictionary. `PriorSet::load` still discovers banks by scanning the
@@ -230,6 +231,4 @@ impl LocalLexide {
             .collect();
         Ok(tokens_from_raw(&rtoks, sentence))
     }
-
 }
-

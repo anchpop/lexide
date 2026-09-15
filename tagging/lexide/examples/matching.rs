@@ -48,9 +48,8 @@ async fn main() -> Result<()> {
     println!("Lemma matches: {:?}", lemma_matches);
 
     // Quick existence check
-    let contains_cat =
-        LemmaMatcher::new(&[("cat".to_string(), vec![("cat", PartOfSpeech::Noun)])])
-            .contains(&tokenization);
+    let contains_cat = LemmaMatcher::new(&[("cat".to_string(), vec![("cat", PartOfSpeech::Noun)])])
+        .contains(&tokenization);
     println!("Contains 'cat': {}", contains_cat);
 
     println!("\n=== Dependency Tree Matching ===\n");

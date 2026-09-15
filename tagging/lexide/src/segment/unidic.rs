@@ -135,7 +135,14 @@ impl UniDic {
                 unk_entries.push(entry_at(&raw, p + k * ENTRY_BYTES));
             }
             p += count * ENTRY_BYTES;
-            by_name.push((name, Category { group_len, first, count }));
+            by_name.push((
+                name,
+                Category {
+                    group_len,
+                    first,
+                    count,
+                },
+            ));
         }
         let matrix = p;
         if raw.len() < matrix + lsize * rsize * 2 {
@@ -146,12 +153,22 @@ impl UniDic {
             by_name
                 .iter()
                 .find(|(n, _)| n == want)
-                .map(|(_, c)| Category { group_len: c.group_len, first: c.first, count: c.count })
+                .map(|(_, c)| Category {
+                    group_len: c.group_len,
+                    first: c.first,
+                    count: c.count,
+                })
         };
         // Indexed by `CharType as usize` in `category`, so it must be built from
         // CharType::ALL rather than a hand-written list that can drift from the enum.
-        debug_assert!(CharType::ALL.iter().enumerate().all(|(i, &t)| t as usize == i));
-        let cats = CharType::ALL.iter().map(|&t| take(category_name(t))).collect();
+        debug_assert!(CharType::ALL
+            .iter()
+            .enumerate()
+            .all(|(i, &t)| t as usize == i));
+        let cats = CharType::ALL
+            .iter()
+            .map(|&t| take(category_name(t)))
+            .collect();
 
         Ok(Self {
             raw,
@@ -238,7 +255,12 @@ impl Proposer for UniDic {
 
         // BOS is context id 0
         let mut best: Vec<Vec<Node>> = vec![Vec::new(); n + 1];
-        best[0].push(Node { right: 0, cost: 0, back_pos: usize::MAX, back_right: 0 });
+        best[0].push(Node {
+            right: 0,
+            cost: 0,
+            back_pos: usize::MAX,
+            back_right: 0,
+        });
 
         let mut cands: Vec<Entry> = Vec::new();
         for i in 1..=n {
@@ -254,13 +276,14 @@ impl Proposer for UniDic {
                         // only up to that class's grouping length (char.def's idea — a run
                         // of one script is usually one word)
                         let t = types[j];
-                        let Some(cat) = self.category(t) else { continue };
+                        let Some(cat) = self.category(t) else {
+                            continue;
+                        };
                         if i - j > cat.group_len || !types[j..i].iter().all(|&x| x == t) {
                             continue;
                         }
-                        cands.extend_from_slice(
-                            &self.unk_entries[cat.first..cat.first + cat.count],
-                        );
+                        cands
+                            .extend_from_slice(&self.unk_entries[cat.first..cat.first + cat.count]);
                     }
                 }
 
@@ -273,7 +296,9 @@ impl Proposer for UniDic {
                             pick = Some((c, p.right));
                         }
                     }
-                    let Some((cost, back_right)) = pick else { continue };
+                    let Some((cost, back_right)) = pick else {
+                        continue;
+                    };
                     match best[i].iter_mut().find(|m| m.right == e.right) {
                         Some(m) if cost < m.cost => {
                             m.cost = cost;
@@ -344,12 +369,18 @@ mod tests {
         // know these are words at all.
         assert_eq!(seg(&dict, "これはペンです"), "これ|は|ペン|です");
         // A known compound splits into its known parts — UniDic has both halves.
-        assert_eq!(seg(&dict, "ブロックチェーンが好き"), "ブロック|チェーン|が|好き");
+        assert_eq!(
+            seg(&dict, "ブロックチェーンが好き"),
+            "ブロック|チェーン|が|好き"
+        );
         // A genuinely out-of-dictionary katakana loanword stays whole instead of
         // shattering, because char.def groups a run of one script. This is the case a
         // per-character unknown cost gets wrong, and unseen words are where Japanese
         // errors actually live.
-        assert_eq!(seg(&dict, "ヴォンゴレビアンコが食べたい"), "ヴォンゴレビアンコ|が|食べ|たい");
+        assert_eq!(
+            seg(&dict, "ヴォンゴレビアンコが食べたい"),
+            "ヴォンゴレビアンコ|が|食べ|たい"
+        );
         // Whitespace stays a hard boundary even here.
         assert_eq!(seg(&dict, "本 です"), "本|です");
     }

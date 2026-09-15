@@ -88,7 +88,10 @@ mod tests {
     fn segment_uses_shared_span_recovery() {
         // "ab cd": B I O B I -> [(0,2),(3,5)] (guards the wrapper wiring, not the model).
         let labels = [0u8, 1, 2, 0, 1, 2, 0];
-        assert_eq!(spans_from_byte_labels("ab cd", &labels), vec![(0, 2), (3, 5)]);
+        assert_eq!(
+            spans_from_byte_labels("ab cd", &labels),
+            vec![(0, 2), (3, 5)]
+        );
     }
 
     /// Bit-for-bit parity with the Python CharBoundaryTagger on multilingual fixtures
@@ -120,7 +123,12 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|s| (s[0].as_u64().unwrap() as usize, s[1].as_u64().unwrap() as usize))
+                .map(|s| {
+                    (
+                        s[0].as_u64().unwrap() as usize,
+                        s[1].as_u64().unwrap() as usize,
+                    )
+                })
                 .collect();
 
             // Every checkpoint we ship carries a prior, so the fixture must record one.

@@ -81,7 +81,11 @@ fn main() -> Result<()> {
             "{lang}: {n} entries, {:.1} MB json -> {:.1} MB fst{}",
             in_bytes as f64 / 1e6,
             bytes as f64 / 1e6,
-            if priors.is_some() { " (with priors)" } else { "" }
+            if priors.is_some() {
+                " (with priors)"
+            } else {
+                ""
+            }
         );
         built += 1;
     }
