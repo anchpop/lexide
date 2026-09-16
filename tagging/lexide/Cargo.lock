@@ -1067,6 +1067,7 @@ dependencies = [
  "futures",
  "half",
  "hf-hub",
+ "http",
  "ort",
  "regex",
  "reqwest 0.13.5",

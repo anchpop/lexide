@@ -26,6 +26,16 @@ fn with_status_response<F: Future<Output = ()>>(
     response: Value,
     test: impl FnOnce(PhonemizerClient) -> F,
 ) {
+    with_literal_response(path, expected_request, status, response.to_string(), test)
+}
+
+fn with_literal_response<F: Future<Output = ()>>(
+    path: &'static str,
+    expected_request: Value,
+    status: u16,
+    body: String,
+    test: impl FnOnce(PhonemizerClient) -> F,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
@@ -60,13 +70,12 @@ fn with_status_response<F: Future<Output = ()>>(
             custom_client,
             "with_http_client must use the supplied client"
         );
-        let mut body = vec![0; length.unwrap()];
-        reader.read_exact(&mut body).unwrap();
+        let mut request_body = vec![0; length.unwrap()];
+        reader.read_exact(&mut request_body).unwrap();
         assert_eq!(
-            serde_json::from_slice::<Value>(&body).unwrap(),
+            serde_json::from_slice::<Value>(&request_body).unwrap(),
             expected_request
         );
-        let body = response.to_string();
         write!(stream, "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
     });
     let mut headers = reqwest::header::HeaderMap::new();
@@ -190,4 +199,274 @@ fn error_status_reports_the_body_and_preserves_the_status() {
             assert_eq!(status, Some(reqwest::StatusCode::UNPROCESSABLE_ENTITY));
         },
     );
+}
+
+#[test]
+fn prediction_preserves_raw_bytes_and_parses_extensions() {
+    let body = " \n{\"phonemes\":[{\"phoneme\":\"\\u0061\",\"confidence\":1.250e-2}],\"future\": { \"value\": 3.00 }}\t\n";
+    for raw in [false, true] {
+        let request = PredictRequest::default();
+        with_literal_response(
+            "/predict",
+            json!(request),
+            200,
+            body.to_owned(),
+            |client| async move {
+                let typed = if raw {
+                    let bytes = client.predict_raw(&request).await.unwrap();
+                    assert_eq!(bytes, body.as_bytes());
+                    serde_json::from_slice::<lexide::pronunciation::PredictResponse>(&bytes)
+                        .unwrap()
+                } else {
+                    client.predict(&request).await.unwrap()
+                };
+                assert_eq!(typed.phonemes[0].phoneme, "a");
+                assert_eq!(typed.phonemes[0].confidence, 0.0125);
+                assert!(typed.model_id.is_none());
+            },
+        );
+    }
+}
+
+#[test]
+fn batch_preserves_extensions_and_per_clip_envelope_without_siblings() {
+    let first = r#"{ "phonemes":[], "future_matrix":"AAA\u0041", "score":1.250e-2 }"#;
+    let second = r#"{"error":{"type":"ValueError","message":"bad\nclip"},"future":true}"#;
+    let body = format!(
+        " \n{{\"model_\\u0069d\":\"m\\u006fdel\",\"model_revision\":\"r\",\"results\" : [ \n {first} ,\t {second}\n ], \"future_envelope\":{{\"n\":2.00}},\"deploy_marker\":\"d\\u0065ploy\"}}\t\n"
+    );
+    for raw in [false, true] {
+        let body = body.clone();
+        let requests = vec![PredictRequest::default(); 2];
+        with_literal_response(
+            "/batch",
+            json!({"requests": requests}),
+            200,
+            body.clone(),
+            |client| async move {
+                if !raw {
+                    use lexide::pronunciation::BatchResult;
+                    let typed = client.predict_batch(&requests).await.unwrap();
+                    assert_eq!(typed.model_id.as_deref(), Some("model"));
+                    assert_eq!(typed.model_revision.as_deref(), Some("r"));
+                    assert_eq!(typed.deploy_marker.as_deref(), Some("deploy"));
+                    assert!(typed.decoder_version.is_none());
+                    assert_eq!(typed.results.len(), 2);
+                    assert!(
+                        matches!(&typed.results[0], BatchResult::Prediction(prediction) if prediction.phonemes.is_empty())
+                    );
+                    assert!(
+                        matches!(&typed.results[1], BatchResult::Error { error } if error.message == "bad\nclip")
+                    );
+                    return;
+                }
+                let raw = client.predict_batch_raw(&requests).await.unwrap();
+                assert_eq!(raw.batch.results[0].get(), first);
+                assert_eq!(raw.batch.results[1].get(), second);
+                assert_eq!(raw.batch.model_id.as_deref(), Some("model"));
+                assert_eq!(raw.batch.model_revision.as_deref(), Some("r"));
+                assert_eq!(raw.batch.deploy_marker.as_deref(), Some("deploy"));
+                assert!(raw.batch.decoder_version.is_none());
+                assert!(!raw.envelope.contains_key("results"));
+                assert!(!raw.envelope.contains_key("decoder_version"));
+                assert_eq!(raw.envelope["future_envelope"].get(), r#"{"n":2.00}"#);
+                let identity: ModelIdentity = serde_json::from_slice(body.as_bytes()).unwrap();
+                for item in &raw.batch.results {
+                    let cached = serde_json::to_vec(&(&raw.envelope, item)).unwrap();
+                    let (envelope, result): (
+                        std::collections::BTreeMap<String, Box<serde_json::value::RawValue>>,
+                        Box<serde_json::value::RawValue>,
+                    ) = serde_json::from_slice(&cached).unwrap();
+                    assert_eq!(result.get(), item.get());
+                    assert_eq!(envelope.len(), raw.envelope.len());
+                    for (key, value) in &raw.envelope {
+                        assert_eq!(envelope[key].get(), value.get());
+                    }
+                    assert_eq!(
+                        serde_json::from_slice::<ModelIdentity>(
+                            &serde_json::to_vec(&envelope).unwrap()
+                        )
+                        .unwrap(),
+                        identity
+                    );
+                    let cached_text = std::str::from_utf8(&cached).unwrap();
+                    let sibling = if item.get() == first { second } else { first };
+                    assert!(!cached_text.contains(sibling));
+                }
+            },
+        );
+    }
+}
+
+#[test]
+fn batch_bounds_are_checked_before_sending() {
+    let client = PhonemizerClient::with_endpoints(
+        reqwest::Client::new(),
+        "http://127.0.0.1:1/predict",
+        "http://127.0.0.1:1/batch",
+    )
+    .unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for count in [0, 65] {
+                let requests = vec![PredictRequest::default(); count];
+                for error in [
+                    client.predict_batch_raw(&requests).await.unwrap_err(),
+                    client.predict_batch(&requests).await.unwrap_err(),
+                ] {
+                    assert_eq!(
+                        error.to_string(),
+                        "requests must contain between 1 and 64 items"
+                    );
+                }
+            }
+        });
+}
+
+#[test]
+fn raw_and_typed_batch_failures_preserve_decoding_before_cardinality() {
+    for raw in [false, true] {
+        for body in [
+            r#"{"results":[]}"#,
+            r#"{"results":[{},{}]}"#,
+            r#"{"results":[{},{}],"model_id":42}"#,
+            r#"{"model_id":42,"results":[]}"#,
+            r#"{"results":null}"#,
+            r#"{"results":[],"results":[]}"#,
+            r#"{"results": ["#,
+        ] {
+            let request = PredictRequest::default();
+            with_literal_response(
+                "/batch",
+                json!({"requests":[request]}),
+                200,
+                body.to_owned(),
+                |client| async move {
+                    let error = if raw {
+                        client.predict_batch_raw(&[request]).await.unwrap_err()
+                    } else {
+                        client.predict_batch(&[request]).await.unwrap_err()
+                    };
+                    if body == r#"{"results":[]}"# {
+                        assert_eq!(error.to_string(), "batch returned 0 results for 1 clips");
+                    } else {
+                        assert_eq!(error.to_string(), "invalid batch response");
+                        let expected =
+                            serde_json::from_str::<lexide::pronunciation::BatchResponse>(body)
+                                .unwrap_err();
+                        let actual = error
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<serde_json::Error>())
+                            .unwrap();
+                        assert_eq!(actual.to_string(), expected.to_string());
+                        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_decode());
+                        assert!(error.chain().any(|cause| cause.is::<serde_json::Error>()));
+                    }
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn raw_keeps_future_items_while_typed_predictors_reject_malformed_fields() {
+    let request = PredictRequest::default();
+    with_literal_response(
+        "/batch",
+        json!({"requests":[request]}),
+        200,
+        r#"{"results":[{"future_prediction":true}]}"#.to_owned(),
+        |client| async move {
+            assert!(client.predict_batch_raw(&[request]).await.is_ok());
+        },
+    );
+    for batch in [false, true] {
+        let request = PredictRequest::default();
+        let (path, expected, body, context) = if batch {
+            (
+                "/batch",
+                json!({"requests":[request]}),
+                r#"{"results":[{}]}"#,
+                "invalid batch response",
+            )
+        } else {
+            (
+                "/predict",
+                json!(request),
+                "{}",
+                "invalid prediction response",
+            )
+        };
+        with_literal_response(path, expected, 200, body.to_owned(), |client| async move {
+            let error = if batch {
+                client.predict_batch(&[request]).await.unwrap_err()
+            } else {
+                client.predict(&request).await.unwrap_err()
+            };
+            assert_eq!(error.to_string(), context);
+            assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_decode());
+            assert!(error.chain().any(|cause| cause.is::<serde_json::Error>()));
+        });
+    }
+}
+
+#[test]
+fn raw_predictors_preserve_http_errors() {
+    for batch in [false, true] {
+        let request = PredictRequest::default();
+        let (path, expected) = if batch {
+            ("/batch", json!({"requests": [request]}))
+        } else {
+            ("/predict", json!(request))
+        };
+        with_status_response(
+            path,
+            expected,
+            422,
+            json!({"detail":"rejected clip"}),
+            |client| async move {
+                let error = if batch {
+                    client.predict_batch_raw(&[request]).await.unwrap_err()
+                } else {
+                    client.predict_raw(&request).await.unwrap_err()
+                };
+                assert!(error.to_string().contains("rejected clip"));
+                assert_eq!(
+                    error.downcast_ref::<reqwest::Error>().unwrap().status(),
+                    Some(reqwest::StatusCode::UNPROCESSABLE_ENTITY)
+                );
+            },
+        );
+    }
+}
+
+#[test]
+fn batch_accepts_the_upper_bound_and_optional_identity() {
+    use lexide::pronunciation::BatchResult;
+    for raw in [false, true] {
+        let requests = vec![PredictRequest::default(); 64];
+        let mut results = vec![json!({"phonemes":[]}); 64];
+        results[63] = json!({"error":{"type":"ValueError","message":"bad clip"}});
+        with_response(
+            "/batch",
+            json!({"requests":requests}),
+            json!({"results":results}),
+            |client| async move {
+                if raw {
+                    let response = client.predict_batch_raw(&requests).await.unwrap();
+                    assert_eq!(response.batch.results.len(), 64);
+                    assert!(response.batch.model_id.is_none());
+                    assert!(response.envelope.is_empty());
+                } else {
+                    let response = client.predict_batch(&requests).await.unwrap();
+                    assert_eq!(response.results.len(), 64);
+                    assert!(response.model_id.is_none());
+                    assert!(matches!(response.results[63], BatchResult::Error { .. }));
+                }
+            },
+        );
+    }
 }

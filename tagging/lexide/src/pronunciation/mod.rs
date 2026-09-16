@@ -211,16 +211,28 @@ pub enum BatchResult {
 
 /// Ordered batch results. The marker is stamped on the envelope, not each item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchResponse {
+pub struct BatchResponse<T = BatchResult> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoder_version: Option<String>,
-    pub results: Vec<BatchResult>,
+    pub results: Vec<T>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_marker: Option<String>,
+}
+
+/// Parsed metadata and independently cacheable raw items and envelope fields.
+/// Store `(&response.envelope, &response.batch.results[index])` per clip:
+/// the envelope contains every top-level field except `results`, including
+/// unknown identity fields, and never contains sibling result matrices.
+/// Raw values preserve unknown fields and number/string representations;
+/// envelope key order, key escaping and whitespace between fields may change.
+#[derive(Debug)]
+pub struct RawBatchResponse {
+    pub batch: BatchResponse<Box<serde_json::value::RawValue>>,
+    pub envelope: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>>,
 }
 
 #[cfg(feature = "pronunciation-remote")]

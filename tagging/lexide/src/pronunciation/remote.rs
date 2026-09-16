@@ -2,9 +2,9 @@
 //! No caching, retries, runtime creation, or implicit deploy-marker checks.
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 
-use super::{BatchResponse, ModelIdentity, PredictRequest, PredictResponse};
+use super::{BatchResponse, ModelIdentity, PredictRequest, PredictResponse, RawBatchResponse};
 
 #[derive(Debug, Clone)]
 pub struct PhonemizerClient {
@@ -83,21 +83,67 @@ impl PhonemizerClient {
     }
 
     pub async fn predict(&self, request: &PredictRequest) -> Result<PredictResponse> {
+        parse_response(self.predict_raw(request).await?)
+            .await
+            .context("invalid prediction response")
+    }
+
+    /// Return the exact response body, including unknown fields and whitespace.
+    /// Checks HTTP status, not JSON or prediction validity. Callers must parse
+    /// and validate the response and its identity before using or caching it.
+    pub async fn predict_raw(&self, request: &PredictRequest) -> Result<Vec<u8>> {
         let response = self
             .http
             .post(&self.predict_url)
             .json(request)
             .send()
             .await?;
-        checked(response)
+        Ok(checked(response)
             .await?
-            .json()
+            .bytes()
             .await
-            .context("invalid prediction response")
+            .context("invalid prediction response")?
+            .to_vec())
     }
 
     /// Send 1–64 clips, preserving per-item errors and the envelope marker.
     pub async fn predict_batch(&self, requests: &[PredictRequest]) -> Result<BatchResponse> {
+        let batch: BatchResponse = parse_response(self.batch_body(requests).await?)
+            .await
+            .context("invalid batch response")?;
+        check_count(&batch, requests.len())?;
+        Ok(batch)
+    }
+
+    /// Preserve all envelope and item fields for per-clip caching.
+    /// Enforces request bounds, metadata types and result count. Individual
+    /// results are not type-checked on success; callers must validate them and
+    /// the envelope identity before use or caching.
+    pub async fn predict_batch_raw(&self, requests: &[PredictRequest]) -> Result<RawBatchResponse> {
+        let body = self.batch_body(requests).await?;
+        let batch: reqwest::Result<BatchResponse<Box<serde_json::value::RawValue>>> =
+            parse_response(body.clone()).await;
+        if !batch
+            .as_ref()
+            .is_ok_and(|batch| batch.results.len() == requests.len())
+        {
+            // Full typed parsing wins over metadata/count failures, just as it
+            // did before raw access. Avoid decoding matrices on the happy path.
+            let typed: BatchResponse = parse_response(body.clone())
+                .await
+                .context("invalid batch response")?;
+            check_count(&typed, requests.len())?;
+        }
+        let batch = batch.context("invalid batch response")?;
+        let mut envelope: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+            parse_response(body)
+                .await
+                .context("invalid batch response")?;
+        envelope.remove("results");
+        Ok(RawBatchResponse { batch, envelope })
+    }
+
+    async fn batch_body(&self, requests: &[PredictRequest]) -> Result<Vec<u8>> {
         if !(1..=64).contains(&requests.len()) {
             bail!("requests must contain between 1 and 64 items");
         }
@@ -111,20 +157,32 @@ impl PhonemizerClient {
             .json(&BatchRequest { requests })
             .send()
             .await?;
-        let batch: BatchResponse = checked(response)
+        Ok(checked(response)
             .await?
-            .json()
+            .bytes()
             .await
-            .context("invalid batch response")?;
-        if batch.results.len() != requests.len() {
-            bail!(
-                "batch returned {} results for {} clips",
-                batch.results.len(),
-                requests.len()
-            );
-        }
-        Ok(batch)
+            .context("invalid batch response")?
+            .to_vec())
     }
+}
+
+fn check_count<T>(batch: &BatchResponse<T>, expected: usize) -> Result<()> {
+    if batch.results.len() != expected {
+        bail!(
+            "batch returned {} results for {} clips",
+            batch.results.len(),
+            expected
+        );
+    }
+    Ok(())
+}
+
+// Keep reqwest's decode-error wrapper in the chain, just as Response::json did
+// before raw access was exposed. This only parses memory; it performs no I/O.
+async fn parse_response<T: DeserializeOwned>(body: Vec<u8>) -> reqwest::Result<T> {
+    reqwest::Response::from(http::Response::new(body))
+        .json()
+        .await
 }
 
 fn parse_identity(probe: serde_json::Value) -> Result<ModelIdentity> {

@@ -64,6 +64,7 @@ hf-hub = { version = "0.4", optional = true, default-features = false, features 
 
 # HTTP shared by the remote text and pronunciation clients.
 reqwest = { version = "0.13", features = ["json"], optional = true }
+http = { version = "1", optional = true }
 
 # Offline pronunciation wire-format dependencies.
 half = { version = "2", optional = true }
@@ -81,9 +82,9 @@ local = ["segment", "dep:ort", "dep:tokenizers", "dep:fst", "dep:tokio"]
 segment = ["dep:safetensors", "dep:hf-hub"]
 remote = ["dep:reqwest", "dep:tokio"]
 # Pure CPU frame decoding/scoring; no inference runtime or HTTP client.
-pronunciation = ["dep:half", "dep:flate2", "dep:base64"]
+pronunciation = ["dep:half", "dep:flate2", "dep:base64", "serde_json/raw_value"]
 # Async HTTP only; the caller supplies its runtime.
-pronunciation-remote = ["pronunciation", "dep:reqwest"]
+pronunciation-remote = ["pronunciation", "dep:reqwest", "dep:http"]
 
 [[example]]
 name = "verify_frame_matrix"
