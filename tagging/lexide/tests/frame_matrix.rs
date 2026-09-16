@@ -69,6 +69,51 @@ fn retains_all_v1_metadata_and_values() {
 }
 
 #[test]
+fn label_source_requires_an_exact_match() {
+    let raw = fixture();
+    let expected = raw["trained_against_g2p"].as_str().unwrap();
+    let matrix = decode(raw.clone()).unwrap();
+    assert!(matrix.check_labels_from(expected).is_ok());
+    for actual in [
+        "g2p/other".to_owned(),
+        format!("{expected} "),
+        expected.to_uppercase(),
+    ] {
+        let error = matrix.check_labels_from(&actual).unwrap_err().to_string();
+        assert!(error.contains(&format!("expected {expected:?}")), "{error}");
+        assert!(error.contains(&format!("actual {actual:?}")), "{error}");
+    }
+}
+
+#[test]
+fn unknown_label_source_is_not_compatible_but_still_scores() {
+    let mut raw = fixture();
+    raw["trained_against_g2p"] = Value::Null;
+    let matrix = decode(raw).unwrap();
+    let target = ["a".into()];
+    let before = matrix.score_target(&target);
+    let error = matrix
+        .check_labels_from("g2p/fixture")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown"), "{error}");
+    assert!(before.logp_target.is_some());
+    assert_eq!(before, matrix.score_target(&target));
+}
+
+#[test]
+fn empty_label_source_is_never_a_match() {
+    let mut matrix = decode(fixture()).unwrap();
+    assert!(matrix.check_labels_from("").is_err());
+    // Public provenance can be modified after decoding, so validate both sides.
+    matrix.trained_against_g2p = Some(String::new());
+    assert!(matrix.check_labels_from("").is_err());
+    assert!(matrix.check_labels_from("g2p/fixture").is_err());
+    matrix.trained_against_g2p = None;
+    assert!(matrix.check_labels_from("").is_err());
+}
+
+#[test]
 fn legacy_has_no_fabricated_provenance_or_timebase() {
     let raw = fixture();
     let phone = &raw["heads"]["phone"];
@@ -76,6 +121,7 @@ fn legacy_has_no_fabricated_provenance_or_timebase() {
         "dtype":phone["dtype"],"encoding":phone["encoding"],"data":phone["data"]});
     let m = decode(legacy.clone()).unwrap();
     assert!(m.schema_version.is_none() && m.producer.is_none() && m.trained_against_g2p.is_none());
+    assert!(m.check_labels_from("g2p/fixture").is_err());
     assert!(m.sample_rate.is_none() && m.frame_rate_ms.is_none() && m.heads.is_empty());
     assert_eq!(
         m.score_target(&["a".into()]),

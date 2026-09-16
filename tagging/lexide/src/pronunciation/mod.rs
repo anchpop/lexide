@@ -745,6 +745,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn raw_matrix_has_unknown_label_source() {
+        let raw = matrix(&["<pad>", "a"], 0, &[&[0.5_f32.ln(), 0.5_f32.ln()]]);
+        let error = raw
+            .check_labels_from("g2p/fixture")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown"), "{error}");
+    }
+
     fn lp(p: &[f32]) -> Vec<f32> {
         p.iter().map(|x| x.ln()).collect()
     }
