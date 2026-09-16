@@ -32,8 +32,8 @@ export class AudioExplorer {
       if (spectrum.hasPointerCapture(event.pointerId)) spectrum.releasePointerCapture(event.pointerId);
     };
     spectrum.onkeydown = event => {
-      // UI-only navigation step before inference, not a matrix timebase fallback.
-      const step = event.shiftKey ? .1 : (this.frameSeconds ?? .02);
+      if (!this.frameSeconds) return;
+      const step = event.shiftKey ? .1 : this.frameSeconds;
       const time = { ArrowLeft: this.audio.currentTime - step, ArrowDown: this.audio.currentTime - step,
         ArrowRight: this.audio.currentTime + step, ArrowUp: this.audio.currentTime + step,
         Home: 0, End: this.duration }[event.key];
@@ -79,7 +79,7 @@ export class AudioExplorer {
     this.$("spectrogram").setAttribute("aria-valuemax", this.duration);
     // Off the UI thread: a long clip must not block recording or playback controls.
     try {
-      this.worker = new Worker(new URL("./spectrogram-worker.js", import.meta.url), { type: "module" });
+      this.worker = new Worker(new URL("./spectrogram-worker.0ea77c477369445f.js", import.meta.url), { type: "module" });
       const worker = this.worker;
       this.worker.onmessage = ({ data }) => {
         if (this.worker !== worker) return;
@@ -202,7 +202,7 @@ export class AudioExplorer {
     this.$("spectrogram").setAttribute("aria-valuenow", time.toFixed(2));
     this.$("spectrogram").setAttribute("aria-valuetext", `${time.toFixed(2)} seconds of ${this.duration.toFixed(2)}`);
     this.$("explorer-play").textContent = this.audio.paused ? "Play" : "Pause";
-    const frame = this.frameSeconds ? Math.floor((time + 1e-6) / this.frameSeconds) : -1;
+    const frame = Math.floor((time + 1e-6) / this.frameSeconds);
     const index = this.phones.findIndex(phone => frame >= phone.startFrame && frame < phone.endFrame);
     if (index !== this.active) {
       this.active = index;

@@ -1,5 +1,5 @@
-import { AudioExplorer } from "./audio-explorer.js";
-import { unpackMatrix, decodePath, matrixMetadata } from "./pronunciation-decoder.mjs";
+import { AudioExplorer } from "./audio-explorer.6a3a3e9ffe259e31.js";
+import { unpackMatrix, decodePath, matrixMetadata } from "./pronunciation-decoder.de966b137c8e07fa.mjs";
 
 // Existing production Lexide model, also used by Yap. No credentials in the page.
 const ENDPOINT = "https://anchpop--wav2vec2-phoneme-wav2vec2phoneme-predict.modal.run";
