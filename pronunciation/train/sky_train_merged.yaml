@@ -15,6 +15,8 @@ workdir: .
 
 file_mounts:
   ~/.netrc: ~/.netrc
+  # workdir stages pronunciation/ only; mount the Rust-owned label contract too.
+  ~/sky_workdir/train/scripts/training_labels.json: ../tagging/lexide/data/training_labels.json
   # One-tarball dataset staging: ~450k loose wavs choke rsync, and the Hub's
   # 256-commits/hour ceiling makes a loose-file dataset repo a multi-day
   # upload. Rebuild after any data or label change with:

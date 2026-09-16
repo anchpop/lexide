@@ -162,180 +162,49 @@ IPA_VOWELS = set("iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaɶɑɒɚɝᵻ")
 # keep espeak's per-word stress.
 OVERRIDE_LANGS = {"fra"}
 
-# Borrowed tokenizer that defines our IPA vocabulary. Training code loads the
-# same name (see train_unified.py and articulatory.py). Phonemes we emit must
-# match this vocab or appear in TOKEN_BLACKLIST — otherwise they'd silently
-# become <unk> at training time and degrade the labels.
-TOKENIZER_NAME = "facebook/wav2vec2-xlsr-53-espeak-cv-ft"
+
+def _load_training_labels() -> dict:
+    """Read the definition embedded by lexide's Rust pronunciation API.
+
+    Sky stages only pronunciation/, with an explicit file_mount of the canonical
+    artifact beside this script. A full checkout reads it from the Rust crate.
+    """
+    script = Path(__file__).resolve()
+    path = script.parents[3] / "tagging/lexide/data/training_labels.json"
+    if not path.is_file():
+        path = script.with_name("training_labels.json")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-# Tokens to fix BEFORE the vocab check. Each entry is a deliberate remap from
-# something espeak emits to its correct/intended IPA form. Currently used only
-# for known encoding bugs in espeak voices.
-TOKEN_REMAP: dict[str, str] = {
-    # Danish voice emits Greek epsilon U+03B5 in some contexts where it means
-    # IPA epsilon U+025B (open-mid front unrounded vowel). Definitely a bug
-    # in the espeak data — they're different Unicode codepoints but the same
-    # glyph. Remap to the IPA codepoint so it matches the rest of the vocab.
-    "ε": "ɛ",
-}
-
-
-# Per-language phoneme remaps applied BEFORE the vocab check (like TOKEN_REMAP
-# but conditioned on the dataset language, because the SAME espeak symbol is
-# legitimate in one language and a frontend artifact in another). The 4-source
-# audit confirmed these across tatoeba/TTS/FLEURS/Pimsleur: espeak's French
-# voice leaks English/length-marked vowels (loanwords, letter-names) and its
-# Italian voice emits lax high vowels Italian doesn't have. Neither language has
-# phonemic vowel length or (for Italian) lax /ɪ ʊ/, so we map each to the
-# nearest real vowel — the audio nativises, so this is faithful, not smoothing.
-LANG_PHONEME_REMAP: dict[str, dict[str, str]] = {
-    "eng": {
-        # Preprocess-time label canon, not a change to raw g2p output:
-        # eSpeak assigns ɐ/ᵻ lexically without a reliable acoustic distinction;
-        # ᵻ means "ɪ or ə", not a recoverable third vowel quality.
-        # Merge only these exact reduced-vowel tokens into schwa. Preserve
-        # genuine /ɪ/ (KIT), and do not rewrite diacritic-bearing variants.
-        "ɐ": "ə", "ᵻ": "ə",
-    },
-    "fra": {
-        # length-marked vowels -> short (French has no phonemic length)
-        "uː": "u", "ɔː": "ɔ", "ɑː": "a", "oː": "o", "aː": "a",
-        "iː": "i", "yː": "y", "eː": "e", "ɜː": "œ",
-        # lax / English-only qualities -> nearest French vowel
-        "ɪ": "i", "ʊ": "u", "ʌ": "a", "ɒ": "ɔ", "ɐ": "a",
-    },
-    "ita": {
-        # Italian has no lax high vowels. Since fork commit 4dd31042 the it
-        # voice emits i/u directly (ipa labels on the reduced I/U phonemes),
-        # so for pure-Italian text this is a no-op — but it must STAY:
-        # English (en)…(it) code-switch spans still emit genuine ɪ/ʊ, and the
-        # corpus was generated with those normalized to i/u.
-        "ɪ": "i", "ʊ": "u",
-    },
-}
-
-
-# Phonemes we add to the borrowed vocab so they're treated as real output
-# classes by training. The xls-r-2b backbone has no pretrained phoneme
-# representations (it was trained on raw audio only), so extending the vocab
-# is free — the CTC head's output dim grows by len(VOCAB_EXTENSIONS) and the
-# new logits are learned from scratch alongside everything else.
-#
-# Every entry is a phoneme the patched espeak (master-232+ relative to
-# 1.52.0) emits that the original xlsr-53-espeak-cv-ft vocab didn't have, and
-# that we want the model to learn rather than collapse into a near-neighbor.
-# Panphon validates all of these with clean feature vectors so the
-# articulatory aux head also gets proper targets.
-VOCAB_EXTENSIONS: set[str] = {
-    # German: patched espeak (commit 9cbfd389 "fr/de/ru: pronunciation fixes
-    # toward modal surface realization") correctly distinguishes short ü
-    # (ʏ, near-close near-front rounded) from long ü (y, close front rounded).
-    # 1.52.0 conflated both as y. ~2k occurrences/lang in deu, only in deu.
-    "ʏ",
-    # Danish: real long ʌ, only 8 occurrences but trivially small to add.
-    "ʌː",
-    # Danish: non-syllabic ɐ — the offglide of falling diphthongs ("air",
-    # "fjord"). ~500 occurrences. Note this combined form is produced by the
-    # parser folding the ̯ U+032F mark into the ɐ.
-    "ɐ̯",
-    # Arabic: long ʒ, only 1 occurrence but treated symmetrically.
-    "ʒː",
-    # Italian geminate consonants (real phonological distinction — pasta/pasta
-    # vs cassa "cash register" / casa "house" minimal pairs). Patched espeak
-    # emits these; 1.52.0 wouldn't have. ~700/600/300 occurrences in ita.
-    "sː",
-    "zː",
-    "ʃː",
-    # Italian dental d (combines with vocab's existing t̪ etc.).
-    "d̪",
-    # Italian dental n (rare in dataset but symmetrical with t̪/d̪).
-    "n̪",
-    # Portuguese nasal vowels — phonemic in Portuguese (e.g. mãe "mother",
-    # bom "good"). 5,642 + 1,606 occurrences in por; the vocab already has
-    # `ɔ̃` but not these two.
-    "ʊ̃",
-    "ɪ̃",
-    # Russian soft (palatalized) consonants produced by folding ʲ onto the
-    # consonant (see VOWEL_CONTINUATIONS). Most Cʲ are already vocab tokens;
-    # these two frequent ones are not: soft л /lʲ/ (espeak writes ɫʲ, ~746
-    # occ) and щ (espeak writes ʃʲ, ~554 occ). Palatalization is phonemic in
-    # Russian (/t/ vs /tʲ/), so these must be learnable, not collapsed.
-    "ɫʲ",
-    "ʃʲ",
-    # g2p 0.4.0 emits diphthongs, r-coloured vowels and affricates as single
-    # tokens (the split halves were brief offglides the CTC head kept losing
-    # to blank — anchpop/lexide#1). Most merged tokens (aɪ oʊ eɪ tʃ dʒ ts …)
-    # already exist in the base vocab as previously-dead rows; these four do
-    # not: Italian /dz/ (zio), Portuguese nasal diphthongs põe/muito, and
-    # mãe's ɐ̃j (decomposed spellings, exactly as g2p writes them).
-    "dz",
-    "o\u0303\u026a\u0303",  # õɪ̃ (decomposed, as g2p writes it)
-    "u\u0303\u026a\u0303",  # ũɪ̃
-    "ɐ̃j",
-    # Stage-3 coarticulatory-nasalization narrowing (espeak_audit/narrow.py): an
-    # oral vowel before a CODA nasal surfaces nasalized in every non-French
-    # language (population-confirmed in the espeak audit — A1-P0 depressed vs the
-    # speaker's oral vowels in deu/eng/ita/spa/rus/por). The narrowed training
-    # labels (phonemes_narrowed.jsonl) carry these; espeak/preprocess itself
-    # never emits them (the broad phonemes.jsonl stays as-is). Decomposed form
-    # (base [+ ː length] + U+0303), matching the tokenizer's existing nasal
-    # vowels (ã ɔ̃ ɛ̃ …). panphon featurizes all cleanly. Freq 40–49k in-corpus.
-    "ə̃", "ʌ̃", "æ̃", "ɨ̃", "ɯ̃", "ɒ̃", "ø̃",
-    "aː̃", "eː̃", "iː̃", "oː̃", "uː̃", "yː̃", "øː̃", "ɛː̃", "ɔː̃", "ɑː̃",
-    # Thai TLTK/Vachana inventory. These are phonemic aspiration, length, and
-    # vowel-quality distinctions; tone is kept in a separate aligned field.
-    "tɕʰ", "uə", "ɯə", "əː", "ɯː",
-    # Mainland Mandarin g2pM + pinyin-to-IPA inventory. Falling diphthongs and
-    # syllabic apicals remain single CTC units, matching the backend's phones;
-    # citation tone letters are removed into the aligned `tone` field.
-    "ɤ", "ʈʂ", "ʈʂʰ", "ɻ̩", "ɹ̩", "tsʰ", "ɥ",
-    "ei̯", "au̯", "ou̯", "ai̯",
-    # Japanese OpenJTalk surface phones: devoiced high vowels, palatalized /r/,
-    # and geminates derived from its moraic closure (`cl`) label.
-    "ɯ̥ᵝ", "i̥", "ɾʲ", "ɕː", "pʲː", "tɕː", "kʲː", "ɸː", "hː", "dʑː", "ɾː",
-    # Hindi schwa-classifier inventory. Aspiration, breathy voice,
-    # retroflexion, and dental place are contrastive and must not be split or
-    # discarded. Stress is supplied separately by the surface-weight rules.
-    "ɦ", "d͡ʒ", "t͡ʃ", "t̪ʰ", "bʱ", "d̪ʱ", "t͡ʃʰ", "ɡʱ",
-    "ɽʱ", "d͡ʒʱ", "ɖʱ",
-    # Korean tense (fortis) obstruents from the g2p crate's g2pk2 chain
-    # (`src/korean`). The lenis/aspirated/tense three-way contrast is
-    # phonemic (달/탈/딸); lenis and aspirated are already vocab tokens.
-    "k͈", "t͈", "p͈", "tɕ͈", "s͈",
-}
-
-
-# Tokens that aren't in the (extended) vocab and that we explicitly choose to
-# drop. Every entry is a deliberate decision; anything not in this set AND not
-# in vocab raises a hard error at preprocess time so the choice has to be made
-# rather than silently lost.
-TOKEN_BLACKLIST: set[str] = {
-    # Punctuation leaking from source text into espeak's output. Stray
-    # characters espeak passes through when the input contained them.
-    "(",
-    ")",
-    '"',
-    "^",
-    "?",        # patched espeak's da voice leaks question marks through.
-    # Syllable separators espeak emits in some voices (Arabic). Our vocab is
-    # phoneme-level, not syllable-level; we don't track syllable boundaries.
-    ".",
-    ".ː",       # malformed period-before-length artefact.
-    # Palatalized /h/ from the ʲ-fold (see phonemize). Not a phoneme of any of
-    # our languages — the single occurrence is a malformed mixed-language
-    # Pimsleur clip (Korean text + "Listen and repeat" read by the en-us
-    # voice). Deliberate drop rather than fabricate a hʲ vocab class.
-    "hʲ",
-}
+# The JSON preserves the table rationale and the exact borrowed get_vocab()
+# inventory (including specials and the tokenizer-added |), not just vocab.json.
+# This is only deterministic remap/filter: acoustic narrowing, French rhythmic
+# stress sidecars and prosody supervision masks remain separate pipeline steps.
+_TRAINING_LABELS = _load_training_labels()
+TOKENIZER_NAME = _TRAINING_LABELS["provenance"]["tokenizer_name"]
+TOKEN_REMAP: dict[str, str] = _TRAINING_LABELS["token_remap"]
+LANG_PHONEME_REMAP: dict[str, dict[str, str]] = _TRAINING_LABELS["lang_phoneme_remap"]
+VOCAB_EXTENSIONS: set[str] = set(_TRAINING_LABELS["vocab_extensions"])
+TOKEN_BLACKLIST: set[str] = set(_TRAINING_LABELS["token_blacklist"])
 
 
 @cache
 def _tokenizer_vocab() -> set[str]:
-    """Load the borrowed tokenizer's vocab once. Cached for the whole run."""
-    from transformers import Wav2Vec2CTCTokenizer
-    tok = Wav2Vec2CTCTokenizer.from_pretrained(TOKENIZER_NAME)
-    return set(tok.get_vocab().keys())
+    """Frozen base accepted set; independent of network/tokenizer revisions."""
+    return set(_TRAINING_LABELS["base_vocab"])
+
+
+def check_training_label_vocab(model_name: str, vocab: set[str]) -> None:
+    """Reject default tokenizer drift; custom processor sources stay independent."""
+    if model_name != TOKENIZER_NAME:
+        return
+    expected = _tokenizer_vocab()
+    if vocab != expected:
+        raise ValueError(
+            f"Training-label vocabulary drift for {model_name}: "
+            f"missing={sorted(expected - vocab)}, unexpected={sorted(vocab - expected)}. "
+            "Review the shared training_labels.json contract before training."
+        )
 
 
 def validate_phonemes(

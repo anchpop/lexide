@@ -29,6 +29,8 @@ use std::collections::HashMap;
 pub const DECODER_VERSION: &str = "nonblank_v1";
 mod frame_matrix;
 pub use frame_matrix::*;
+mod training_labels;
+pub use training_labels::{training_labels, TrainingLabels};
 
 /// Identity reported by the serving container's `marker_only` probe.
 /// Model fields are required: missing identity must never produce a cache key.

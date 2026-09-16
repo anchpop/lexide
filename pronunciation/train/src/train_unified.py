@@ -161,7 +161,8 @@ def load_processor(model_name: str):
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "scripts"))
-    from preprocess import VOCAB_EXTENSIONS
+    from preprocess import VOCAB_EXTENSIONS, check_training_label_vocab
+    check_training_label_vocab(model_name, set(tokenizer.get_vocab()))
     added = tokenizer.add_tokens(sorted(VOCAB_EXTENSIONS))
     if added:
         print(f"Tokenizer vocab extended with {added} new tokens: "
