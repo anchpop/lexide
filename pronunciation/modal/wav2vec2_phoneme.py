@@ -41,11 +41,20 @@ app = modal.App(APP_NAME)
 # same three-minute window to reduce idle GPU costs.
 _SCALEDOWN_WINDOW = 180
 
-# Production champion (mel-sidechannel + MLP heads, degrade-augmented).
-# Renamed on HF from lexide-pronunciation-vad-clean-sidechannel-degrade; the
-# commit SHA below is preserved across the rename. WAV2VEC2_MODEL_ID points a
-# run at a different HF repo (the eval harness compares repos this way).
-MODEL_ID = os.environ.get("WAV2VEC2_MODEL_ID", "anchpop/lexide-pronunciation")
+# Production champion: the first checkpoint trained on the g2p 0.4.0 merged
+# labels, and the first that has ever seen Korean. Promoted 2026-09-16 from
+# anchpop/lexide-pronunciation-merged, which sky_train_merged.yaml deliberately
+# keeps as a separate repo ("promote by hand") because its vocab differs from
+# the previous champion's: 470 tokens vs 461, with 64 shared tokens at new
+# indices. The pin is what promotes it; no weights are copied.
+#
+# The predecessor was anchpop/lexide-pronunciation @ edcbbbf43a7f (mel-
+# sidechannel + MLP heads, degrade-augmented, renamed on HF from
+# lexide-pronunciation-vad-clean-sidechannel-degrade). It never saw Korean.
+#
+# WAV2VEC2_MODEL_ID points a run at a different HF repo (the eval harness
+# compares repos this way).
+MODEL_ID = os.environ.get("WAV2VEC2_MODEL_ID", "anchpop/lexide-pronunciation-merged")
 # Frozen to an exact commit SHA so a force-push to the HF repo can't silently
 # change the weights production serves. The SHA also feeds the image
 # weights-version and the verifier cache key, so a re-pin forces a clean
@@ -53,7 +62,7 @@ MODEL_ID = os.environ.get("WAV2VEC2_MODEL_ID", "anchpop/lexide-pronunciation")
 # checkpoint (the eval harness does this per-run); never point it at a branch
 # name — an exact SHA is what makes the pin a pin.
 MODEL_REVISION = os.environ.get(
-    "WAV2VEC2_MODEL_REVISION", "edcbbbf43a7ff337f43d233a9d89566509715e63"
+    "WAV2VEC2_MODEL_REVISION", "95f4b185676627ffe566e8760349ebb42cc55dde"
 )
 # Training-label provenance is an assertion about a checkpoint, not something
 # recoverable from its weights. MUST update this declaration with each revision.
