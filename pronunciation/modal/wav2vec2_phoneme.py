@@ -348,7 +348,15 @@ def _build_sidechannel(ckpt):
 @app.cls(
     gpu=GPU,
     image=image,
-    max_containers=int(os.environ["WAV2VEC2_MAX_CONTAINERS"]) if "WAV2VEC2_MAX_CONTAINERS" in os.environ else None,
+    # Default to ONE container. Unbounded fan-out is a cost trap, not a
+    # throughput win: every container pays its own cold start (~8.6 GB
+    # checkpoint) plus a full `scaledown_window` of billed idle, so N
+    # containers serving sporadic traffic cost ~N x the GPU-seconds of actual
+    # inference. Measured 2026-09-16: a saturated single container does 64-clip
+    # batches at ~78 ms/clip, so one container is ~7 GPU-hours for the whole
+    # 318k-clip corpus. Raise WAV2VEC2_MAX_CONTAINERS deliberately when wall
+    # clock genuinely matters and you accept the per-container overhead.
+    max_containers=int(os.environ.get("WAV2VEC2_MAX_CONTAINERS", "1")),
     # Idle-container teardown, set per app above (_SCALEDOWN_WINDOW). Both eval
     # and production keep a multi-minute window so a long sequential run (eval)
     # or a sporadic user request (prod) doesn't cold-start the ~2GB backbone
