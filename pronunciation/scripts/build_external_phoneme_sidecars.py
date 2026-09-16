@@ -534,8 +534,8 @@ CONFIG = {
     # OpenJTalk via jpreprocess inside the g2p crate (`pyopenjtalk` stays in
     # PROVIDERS; 99.2% of rows identical, see _g2p_jpn).
     "jpn": ("g2p-jpn", partial(g2p_labels, spec=JAPANESE_SPEC)),
-    # g2pk2 + mecab-ko inside the g2p crate (see _g2p_kor). No Korean audio
-    # has been collected yet; this is the label chain for when it is.
+    # g2pk2 + mecab-ko inside the g2p crate (see _g2p_kor). Korean audio landed
+    # 2026-09-11; these labels trained anchpop/lexide-pronunciation-merged.
     "kor": ("g2p-kor", partial(g2p_labels, spec=TONE_SPEC)),
 }
 

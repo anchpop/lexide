@@ -4,7 +4,8 @@ Default: offline goldens. LEXIDE_G2P_LIVE_SHADOW=1 replays the pinned binary;
 LEXIDE_G2P_FULL_SHADOW=1 freshly labels every manifest with audio (slow).
 LEXIDE_G2P_CACHED_SHADOW=1 compares converters over existing full audits, whose
 build identities may predate the pinned binary. All writes are under tmp_path.
-Korean has no audio: only text fixtures and synthetic adapter cases are covered.
+Korean is covered by text fixtures and synthetic adapter cases only. Korean audio
+has existed since 2026-09-11, so this is now a coverage gap, not a constraint.
 """
 
 import copy

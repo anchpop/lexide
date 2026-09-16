@@ -119,7 +119,7 @@ These are hard-won and override generic ML instincts. Violating them has burned 
     **private** HF repo (it's the distillation teacher), as is the tiny on-device student
     `distill-distilhubert`. All the other old pronunciation experiment repos were deleted.
 - **Languages**: 7 established core (deu eng fra ita por rus spa), plus configured
-  expansion targets (hin jpn tha zho-hans), with FLEURS+Tatoeba+TTS+Pimsleur;
+  expansion targets (hin jpn kor tha zho-hans), with FLEURS+Tatoeba+TTS+Pimsleur;
   several Pimsleur-only langs (ara ces dan fas …) ride along.
 - **Labels**: espeak-ng (the maintainer's **fork**, see gotchas) → `phonemes.jsonl`
   (broad) → optional `phonemes_narrowed.jsonl` (narrowed; see `espeak_audit/`).

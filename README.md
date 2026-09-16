@@ -167,13 +167,14 @@ against a native target, sound by sound.
 
 ### Overview
 
-Training data is speech paired with phoneme labels in 11 languages (English,
-French, German, Spanish, Italian, Portuguese, Russian, Hindi, Japanese, Thai,
-Mandarin), drawn from FLEURS, Tatoeba, TTS, Pimsleur audio, and film clips whose
+Training data is speech paired with phoneme labels in 12 languages (English,
+French, German, Spanish, Italian, Portuguese, Russian, Hindi, Japanese, Korean,
+Thai, Mandarin), drawn from FLEURS, Tatoeba, TTS, Pimsleur audio, and film clips whose
 subtitles were verified verbatim against an independent transcript. Labels come
 from a patched espeak-ng for the European languages and from real G2P backends
-where espeak isn't good enough (Open JTalk for Japanese, g2pM for Mandarin, TLTK
-for Thai, a schwa-deletion classifier for Hindi). A set of audits filters out
+where espeak isn't good enough (Open JTalk for Japanese, g2pM for Mandarin,
+vachana-thai for Thai, g2pk2 + mecab-ko for Korean, a schwa-deletion classifier
+for Hindi). A set of audits filters out
 clips whose audio and label don't match (Whisper re-transcription, an LLM
 language filter, acoustic measurement), and an "acoustic narrowing" pass moves
 labels from dictionary form toward what the speaker really produced (e.g.
