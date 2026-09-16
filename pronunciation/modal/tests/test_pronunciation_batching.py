@@ -30,6 +30,9 @@ def worker():
     obj._pool_number = 0
     obj._label_cache = {}
     obj.blank_id = 0
+    obj.sample_rate = 16000
+    obj.frame_rate_ms = 20.0
+    obj.language_head_specs = {"tha_tone": {"lang": "tha", "target": "tone", "num_labels": 6}}
     obj.masked_slots = [0]
     obj.backbone = SimpleNamespace(
         config=SimpleNamespace(feat_extract_norm="layer"),
@@ -45,7 +48,7 @@ def worker():
         b, t = len(items), max(lengths)
         lp = torch.tensor([.1, .8, .1]).log().expand(b, t, 3).clone()
         stress = torch.tensor([1., 0., 0.]).expand(b, t, 3)
-        aux = [{"tone": torch.ones(t, dtype=torch.long)} if req.get("language") == "tha"
+        aux = [{"tha_tone": torch.tensor([0., 1., 0., 0., 0., 0.]).expand(t, 6)} if req.get("language") == "tha"
                else {} for _, req, _ in items]
         return lp, stress, torch.full((b, t), .9), aux, lengths
 
@@ -86,7 +89,7 @@ def test_matrix_bytes_match_old_encoder_for_trimmed_tensor(worker):
     values[1, 2, 0] = float("-inf")
     trimmed = values[1:2, :5]
     expected = trimmed[0].half().contiguous()
-    matrix = worker._frame_matrix(trimmed)
+    matrix = worker._frame_matrix(trimmed, torch.zeros(1, 5, 3), torch.ones(1, 5), {})["heads"]["phone"]
     assert matrix["shape"] == [5, 3]
     assert base64.b64decode(matrix["data"]) == zlib.compress(bytes(expected.untyped_storage()), 6)
 
@@ -135,8 +138,8 @@ def test_order_trimming_language_and_options(worker):
     for request, result in zip(requests, results):
         n = worker.backbone._get_feat_extract_output_lengths(len(request["audio"]))
         assert len(result["frames"]) == n
-        assert result["frame_matrix"]["shape"] == [n, 3]
-        assert len(zlib.decompress(base64.b64decode(result["frame_matrix"]["data"]))) == n * 3 * 2
+        assert result["frame_matrix"]["heads"]["phone"]["shape"] == [n, 3]
+        assert len(zlib.decompress(base64.b64decode(result["frame_matrix"]["heads"]["phone"]["data"]))) == n * 3 * 2
         assert len(result["frames"][0]["top_k"]) == min(request["top_k"], 2)
         assert ("tone" in result["frames"][0]) == (request["language"] == "tha")
     assert set(batch_method(worker, [clip(1600)])[0]) == {"phonemes"}
@@ -218,8 +221,8 @@ def test_mixed_languages_select_distinct_heads_once(worker):
         "japanese": {"lang": "jpn", "target": "pitch_accent"},
     }
     _, _, _, aux = worker._forward(torch.zeros(5, 6), language=["tha", "zho-hans", "jpn", "tha", None])
-    assert [dict((key, value.unique().item()) for key, value in item.items()) for item in aux] == [
-        {"tone": 1}, {"tone": 2}, {"pitch_accent": 3}, {"tone": 1}, {}]
+    assert [dict((key, value.argmax(dim=-1).unique().item()) for key, value in item.items()) for item in aux] == [
+        {"thai": 1}, {"mandarin": 2}, {"japanese": 3}, {"thai": 1}, {}]
     assert all(head.calls == 1 for head in worker.language_heads.values())
 
 
@@ -245,7 +248,9 @@ def headed_worker(worker):
         worker.language_heads = {"thai": lambda h: torch.nn.functional.one_hot(
             torch.tensor([tone if tone is not None else [0] * t]), 4).float()}
         worker.language_head_specs = {"thai": {"lang": "tha", "target": "tone"}}
-        return worker._forward(torch.zeros(1, t), language="tha")
+        lp, stress_logits, p_nb, aux = worker._forward(torch.zeros(1, t), language="tha")
+        worker._test_aux_logits = aux
+        return lp, stress_logits, p_nb, worker._aux_ids(aux, "tha")
 
     return worker, forward
 
@@ -292,9 +297,9 @@ def test_collapse_onset_labels_and_free_reference(headed_worker):
     assert other["ratio"] == pytest.approx(other["logp_target"] - expected)
 
     # Exercise the actual response builder to catch missing p_nonblank plumbing.
-    worker._forward_requests = lambda items: (lp, stress, nb, [aux], [5])
+    worker._forward_requests = lambda items: (lp, stress, nb, [worker._test_aux_logits], [5])
     _, response = next(worker._process_microbatch(
-        [(0, {"target_phonemes": ["a", "a"]}, torch.zeros(1680))], 1, 1))
+        [(0, {"target_phonemes": ["a", "a"], "language": "tha"}, torch.zeros(1680))], 1, 1))
     assert response["phonemes"] == result
     assert response["target_score"] == score
 
@@ -380,7 +385,7 @@ def test_prediction_envelopes_identify_model_and_decoder(worker, http_client, ro
     result = envelope["results"][0] if route == "/batch" else envelope
     assert bool(result["phonemes"]) is not empty
     assert result["frames"]
-    assert result["frame_matrix"]["shape"] == [4, 3]
+    assert result["frame_matrix"]["heads"]["phone"]["shape"] == [4, 3]
 
 
 def test_marker_only_identifies_decoder_without_inference(worker, http_client):
@@ -459,3 +464,118 @@ def test_forward_failure_envelopes_identify_model_and_decoder(worker, http_clien
         assert item["error"] == {"type": error_type.__name__, "message": "simulated forward failure"}
     else:
         assert envelope["detail"] == "simulated forward failure"
+
+
+def unpack_head(head):
+    import numpy as np
+    return np.frombuffer(zlib.decompress(base64.b64decode(head["data"])), dtype="<f2").reshape(head["shape"])
+
+
+def test_self_describing_matrix_contract(worker, monkeypatch):
+    provenance = "g2p/test espeak-ng/test thai/test korean/test"
+    monkeypatch.setattr(service, "TRAINED_AGAINST_G2P", provenance)
+    request = compact(clip(1800, language="tha", return_frame_matrix=True))
+    result = batch_method(worker, [request])[0]
+    matrix = result["frame_matrix"]
+    assert matrix["schema_version"] == 1
+    assert matrix["producer"] == service._response_identity()
+    assert matrix["trained_against_g2p"] == provenance
+    assert (matrix["sample_rate"], matrix["frame_rate_ms"]) == (16000, 20.0)
+    heads = matrix["heads"]
+    assert set(heads) == {"phone", "nonblank", "stress", "tha_tone"}
+    assert heads["phone"]["labels"] == ["<pad>", "a", "b"]  # not decode's <blank>
+    assert heads["phone"]["blank_id"] == 0
+    assert heads["phone"]["value_semantics"] == "joint_log_probability"
+    assert heads["nonblank"]["shape"] == [5]
+    assert heads["nonblank"]["labels"] == ["nonblank"]
+    assert heads["nonblank"]["value_semantics"] == "sigmoid_probability"
+    assert heads["stress"]["shape"] == [5, 3]
+    assert heads["stress"]["labels"] == ["none", "primary", "secondary"]
+    assert heads["tha_tone"]["labels"] == ["not_bearer", "mid", "low", "falling", "high", "rising"]
+    assert (heads["tha_tone"]["language"], heads["tha_tone"]["target"]) == ("tha", "tone")
+    for head in heads.values():
+        assert (head["dtype"], head["encoding"]) == ("float16", "zlib+base64")
+        assert unpack_head(head).shape == tuple(head["shape"])
+    assert unpack_head(heads["stress"])[0].tolist() == torch.tensor([1., 0., 0.]).softmax(-1).half().tolist()
+    assert set(batch_method(worker, [compact(clip(1800, return_frame_matrix=True))])[0]["frame_matrix"]["heads"]) == {"phone", "stress", "nonblank"}
+
+
+def test_full_inventory_keeps_distinct_distributions_and_language_decode(worker):
+    worker.regularized = worker.mel_sidechannel = False
+    worker.backbone = lambda values, **kwargs: SimpleNamespace(last_hidden_state=values.unsqueeze(-1))
+    worker.nonblank_head = lambda h: torch.full((*h.shape[:2], 1), 2.)
+    worker.phoneme_head = lambda h: torch.tensor([0., 2., 1.]).expand(*h.shape[:2], 3)
+    worker.stress_head = lambda h: torch.zeros(*h.shape[:2], 3)
+    worker.language_head_specs = {
+        "tha_tone": {"lang": "tha", "target": "tone", "num_labels": 6},
+        "zho_hans_tone": {"lang": "zho-hans", "target": "tone", "num_labels": 6},
+        "jpn_pitch_accent": {"lang": "jpn", "target": "pitch_accent", "num_labels": 3},
+    }
+    logits = {"tha_tone": [0., 1., 2., 3., 4., 5.],
+              "zho_hans_tone": [5., 4., 3., 2., 1., 0.], "jpn_pitch_accent": [0., 2., 1.]}
+    worker.language_heads = {name: (lambda h, values=values: torch.tensor(values).expand(*h.shape[:2], len(values)))
+                             for name, values in logits.items()}
+    lp, stress, nb, aux = worker._forward(torch.zeros(3, 6), language=["tha", "jpn", None],
+                                        return_all_heads=[True, False, True])
+    assert set(aux[0]) == set(aux[2]) == set(logits)
+    assert set(aux[1]) == {"jpn_pitch_accent"}
+    for name, distribution in aux[0].items():
+        torch.testing.assert_close(distribution, torch.tensor(logits[name]).expand(6, -1))
+    worker._forward_requests = lambda items: (lp, stress, nb, aux, [6] * 3)
+    requests = [(i, {"language": lang, "return_frame_matrix": True, "return_frames": True}, torch.zeros(2000))
+                for i, lang in enumerate(["tha", "jpn", None])]
+    results = [result for _, result in worker._process_microbatch(requests, 3, 1)]
+    assert results[0]["frames"][0]["tone"] == 5  # not Mandarin's zero
+    assert "tone" not in results[1]["frames"][0]
+    assert results[1]["frames"][0]["pitch_accent"] == 1
+    assert "tone" not in results[2]["frames"][0] and "pitch_accent" not in results[2]["frames"][0]
+    assert set(results[0]["frame_matrix"]["heads"]) == {"phone", "stress", "nonblank", *logits}
+    assert unpack_head(results[0]["frame_matrix"]["heads"]["tha_tone"])[0].tolist() == torch.tensor(logits["tha_tone"]).softmax(-1).half().tolist()
+
+
+def test_resampling_uses_processor_sample_rate(worker):
+    worker.sample_rate = 8000
+    worker.frame_rate_ms = 40.0
+    worker.processor.sampling_rate = 8000
+    samples = worker._prepare_audio(clip(3200, sample_rate=16000))
+    assert len(samples) == 1600
+
+
+@pytest.mark.parametrize("model,revision,override,known", [
+    ("anchpop/lexide-pronunciation-merged", "95f4b185676627ffe566e8760349ebb42cc55dde", None, True),
+    ("anchpop/lexide-pronunciation-merged", "other", None, False),
+    ("other", "95f4b185676627ffe566e8760349ebb42cc55dde", None, False),
+    ("anchpop/lexide-pronunciation", "edcbbbf43a7ff337f43d233a9d89566509715e63", None, False),
+    ("other", "other", "g2p/declared", True),
+])
+def test_provenance_is_bound_to_checkpoint(monkeypatch, model, revision, override, known):
+    import ast
+    import os
+    if override is None:
+        monkeypatch.delenv("WAV2VEC2_TRAINED_AGAINST_G2P", raising=False)
+    else:
+        monkeypatch.setenv("WAV2VEC2_TRAINED_AGAINST_G2P", override)
+    tree = ast.parse(Path(service.__file__).read_text())
+    node = next(node for node in tree.body if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "TRAINED_AGAINST_G2P" for target in node.targets))
+    value = eval(compile(ast.Expression(node.value), service.__file__, "eval"),
+                 dict(os=os, MODEL_ID=model, MODEL_REVISION=revision))
+    assert (value is not None) == known
+    if known:
+        assert value == (override or "g2p/0.4.0 espeak-ng/aa907af78d5665d8 thai/ad66331eca29d4ea korean/9e4bc6b854f6a903")
+
+
+def test_single_and_singleton_batch_matrix_bytes_match(worker):
+    worker.transcribe_batch = SimpleNamespace(local=lambda requests: batch_method(worker, requests))
+    request = compact(clip(1800, language="tha", return_frame_matrix=True))
+    single = Service.predict._get_raw_f()(worker, request)
+    batch = batch_endpoint(worker, {"requests": [request]})
+    assert single["frame_matrix"] == batch["results"][0]["frame_matrix"]
+    assert single["phonemes"] == batch["results"][0]["phonemes"]
+
+
+def test_auxiliary_decode_preserves_raw_logit_near_ties(worker):
+    worker.language_head_specs = {"jpn_pitch_accent": {"lang": "jpn", "target": "pitch_accent"}}
+    logits = torch.tensor([[0., 1e-8, -100.]])
+    assert logits.softmax(-1).argmax(-1).item() == 0  # rounded tie
+    assert worker._aux_ids({"jpn_pitch_accent": logits}, "jpn")["pitch_accent"].item() == 1

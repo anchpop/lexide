@@ -7,6 +7,7 @@ export class AudioExplorer {
     this.$ = id => document.getElementById(id);
     this.duration = 0;
     this.phones = [];
+    this.frameSeconds = null;
     this.animation = 0;
     this.$("explorer-play").onclick = () => {
       if (!audio.paused) audio.pause();
@@ -31,7 +32,8 @@ export class AudioExplorer {
       if (spectrum.hasPointerCapture(event.pointerId)) spectrum.releasePointerCapture(event.pointerId);
     };
     spectrum.onkeydown = event => {
-      const step = event.shiftKey ? .1 : .02;
+      // UI-only navigation step before inference, not a matrix timebase fallback.
+      const step = event.shiftKey ? .1 : (this.frameSeconds ?? .02);
       const time = { ArrowLeft: this.audio.currentTime - step, ArrowDown: this.audio.currentTime - step,
         ArrowRight: this.audio.currentTime + step, ArrowUp: this.audio.currentTime + step,
         Home: 0, End: this.duration }[event.key];
@@ -59,6 +61,7 @@ export class AudioExplorer {
     cancelAnimationFrame(this.animation);
     this.duration = 0;
     this.phones = [];
+    this.frameSeconds = null;
     this.image = null;
     this.active = -1;
     this.selected = -1;
@@ -108,7 +111,9 @@ export class AudioExplorer {
     }
   }
 
-  show(phones) {
+  show(phones, frameSeconds) {
+    if (!Number.isFinite(frameSeconds) || frameSeconds <= 0) throw new Error("Invalid frame interval.");
+    this.frameSeconds = frameSeconds;
     this.phones = phones;
     this.active = -1;
     const track = this.$("phoneme-track");
@@ -117,7 +122,7 @@ export class AudioExplorer {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = phone.phoneme;
-      button.title = `${phone.phoneme} · ${(phone.startFrame * .02).toFixed(2)}–${(phone.endFrame * .02).toFixed(2)}s (approximate)`;
+      button.title = `${phone.phoneme} · ${(phone.startFrame * this.frameSeconds).toFixed(2)}–${(phone.endFrame * this.frameSeconds).toFixed(2)}s (approximate)`;
       button.setAttribute("aria-label", button.title);
       button.tabIndex = -1; // The full IPA row below provides keyboard sound selection.
       button.onclick = () => this.onPhone(index, true);
@@ -142,8 +147,8 @@ export class AudioExplorer {
     if (this.image) context.drawImage(this.image, 0, 0, canvas.width, canvas.height);
     for (const [index, button] of Array.from(this.$("phoneme-track").children).entries()) {
       const phone = this.phones[index];
-      const width = (phone.endFrame - phone.startFrame) * .02 / this.duration * this.width;
-      button.style.left = `${phone.startFrame * .02 / this.duration * this.width}px`;
+      const width = (phone.endFrame - phone.startFrame) * this.frameSeconds / this.duration * this.width;
+      button.style.left = `${phone.startFrame * this.frameSeconds / this.duration * this.width}px`;
       button.style.width = `${Math.max(2, width)}px`;
       button.classList.toggle("narrow", width < 15);
     }
@@ -163,7 +168,7 @@ export class AudioExplorer {
   select(index, follow = false) {
     this.selected = index;
     this.markSelection();
-    if (follow) this.ensureVisible(this.phones[index].startFrame * .02);
+    if (follow) this.ensureVisible(this.phones[index].startFrame * this.frameSeconds);
   }
 
   markSelection() {
@@ -171,8 +176,8 @@ export class AudioExplorer {
     const region = this.$("selected-region");
     region.hidden = !phone;
     if (!phone || !this.width) return;
-    region.style.left = `${phone.startFrame * .02 / this.duration * this.width}px`;
-    region.style.width = `${Math.max(2, (phone.endFrame - phone.startFrame) * .02 / this.duration * this.width)}px`;
+    region.style.left = `${phone.startFrame * this.frameSeconds / this.duration * this.width}px`;
+    region.style.width = `${Math.max(2, (phone.endFrame - phone.startFrame) * this.frameSeconds / this.duration * this.width)}px`;
     for (const [i, button] of Array.from(this.$("phoneme-track").children).entries()) button.classList.toggle("selected", i === this.selected);
   }
 
@@ -197,7 +202,7 @@ export class AudioExplorer {
     this.$("spectrogram").setAttribute("aria-valuenow", time.toFixed(2));
     this.$("spectrogram").setAttribute("aria-valuetext", `${time.toFixed(2)} seconds of ${this.duration.toFixed(2)}`);
     this.$("explorer-play").textContent = this.audio.paused ? "Play" : "Pause";
-    const frame = Math.floor((time + 1e-6) / .02);
+    const frame = this.frameSeconds ? Math.floor((time + 1e-6) / this.frameSeconds) : -1;
     const index = this.phones.findIndex(phone => frame >= phone.startFrame && frame < phone.endFrame);
     if (index !== this.active) {
       this.active = index;

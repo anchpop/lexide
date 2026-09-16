@@ -24,10 +24,11 @@ use anyhow::{bail, Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Read;
 
 /// Cache-key decoder revision. Any change to decoding must bump this version.
 pub const DECODER_VERSION: &str = "nonblank_v1";
+mod frame_matrix;
+pub use frame_matrix::*;
 
 /// Identity reported by the serving container's `marker_only` probe.
 /// Model fields are required: missing identity must never produce a cache key.
@@ -66,8 +67,15 @@ pub struct PredictRequest {
     pub target_phonemes: Option<Vec<String>>,
     #[serde(default)]
     pub return_frame_matrix: bool,
+    /// Include all checkpoint auxiliary heads in the matrix, regardless of language.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub return_all_heads: bool,
     #[serde(default)]
     pub return_frames: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn default_sample_rate() -> u32 {
@@ -101,6 +109,7 @@ impl Default for PredictRequest {
             language: None,
             target_phonemes: None,
             return_frame_matrix: false,
+            return_all_heads: false,
             return_frames: false,
         }
     }
@@ -334,7 +343,7 @@ fn decode_path_with(
 /// The frame matrix exactly as the endpoint ships it: compressed, so a cache
 /// entry stays ~24 KB per audio-second.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FrameMatrixPayload {
+pub struct LegacyFrameMatrixPayload {
     /// `[T, V]`.
     pub shape: Vec<usize>,
     pub dtype: String,
@@ -350,6 +359,14 @@ pub struct FrameMatrixPayload {
 /// Decoded per-frame log-probabilities.
 #[derive(Debug, Clone)]
 pub struct FrameMatrix {
+    /// None for legacy artifacts; no provenance or timing is fabricated.
+    pub schema_version: Option<u32>,
+    pub producer: Option<FrameMatrixProducer>,
+    pub trained_against_g2p: Option<String>,
+    pub frame_rate_ms: Option<f64>,
+    pub sample_rate: Option<u32>,
+    /// Empty for legacy artifacts. Scoring still uses the original phone matrix.
+    pub heads: HashMap<String, FrameHead>,
     pub frames: usize,
     pub vocab: Vec<String>,
     pub blank_id: usize,
@@ -359,7 +376,7 @@ pub struct FrameMatrix {
 }
 
 impl FrameMatrix {
-    pub fn decode(payload: &FrameMatrixPayload) -> Result<Self> {
+    fn decode_legacy(payload: &LegacyFrameMatrixPayload) -> Result<Self> {
         if payload.dtype != "float16" || payload.encoding != "zlib+base64" {
             bail!(
                 "unsupported frame matrix format {}/{}",
@@ -376,35 +393,13 @@ impl FrameMatrix {
                 payload.vocab.len()
             );
         }
-        let expected = matrix_len(frames, width, payload.blank_id)?
-            .checked_mul(2)
-            .context("frame matrix byte length overflows")?;
-        let limit = u64::try_from(expected)
-            .ok()
-            .and_then(|n| n.checked_add(1))
-            .context("frame matrix decompression limit overflows")?;
-        let compressed = base64::engine::general_purpose::STANDARD
-            .decode(&payload.data)
-            .context("frame matrix base64")?;
-        // Never reserve from untrusted dimensions, and stop oversized output
-        // after one extra byte rather than expanding an entire zlib bomb.
-        let mut raw = Vec::new();
-        flate2::read::ZlibDecoder::new(compressed.as_slice())
-            .take(limit)
-            .read_to_end(&mut raw)
-            .context("frame matrix zlib")?;
-        if raw.len() != expected {
-            bail!(
-                "frame matrix holds {} bytes, expected {}×{}×2",
-                raw.len(),
-                frames,
-                width
-            );
-        }
-        let log_probs: Vec<f32> = raw
-            .chunks_exact(2)
-            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-            .collect();
+        matrix_len(frames, width, payload.blank_id)?;
+        let log_probs = frame_matrix::decode_values(
+            &payload.shape,
+            &payload.dtype,
+            &payload.encoding,
+            &payload.data,
+        )?;
         let index: HashMap<String, usize> = payload
             .vocab
             .iter()
@@ -415,6 +410,12 @@ impl FrameMatrix {
             bail!("frame matrix vocab contains duplicate labels");
         }
         let matrix = Self {
+            schema_version: None,
+            producer: None,
+            trained_against_g2p: None,
+            frame_rate_ms: None,
+            sample_rate: None,
+            heads: HashMap::new(),
             frames,
             vocab: payload.vocab.clone(),
             blank_id: payload.blank_id,
@@ -724,6 +725,12 @@ mod tests {
             log_probs.extend_from_slice(row);
         }
         FrameMatrix {
+            schema_version: None,
+            producer: None,
+            trained_against_g2p: None,
+            frame_rate_ms: None,
+            sample_rate: None,
+            heads: HashMap::new(),
             frames: rows.len(),
             vocab: vocab.iter().map(|s| s.to_string()).collect(),
             blank_id,
@@ -850,7 +857,7 @@ mod tests {
         assert_eq!(empty.score_target(&[]).ratio, None);
     }
 
-    fn payload(rows: &[f32], frames: usize, vocab: &[&str]) -> FrameMatrixPayload {
+    fn payload(rows: &[f32], frames: usize, vocab: &[&str]) -> LegacyFrameMatrixPayload {
         use std::io::Write;
         let bytes: Vec<u8> = rows
             .iter()
@@ -858,7 +865,7 @@ mod tests {
             .collect();
         let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(&bytes).unwrap();
-        FrameMatrixPayload {
+        LegacyFrameMatrixPayload {
             shape: vec![frames, vocab.len()],
             dtype: "float16".into(),
             encoding: "zlib+base64".into(),
@@ -871,15 +878,15 @@ mod tests {
     #[test]
     fn validates_wire_payloads() {
         let good = payload(&lp(&[0.4, 0.6, 0.0]), 1, &["<pad>", "a", "<unk>"]);
-        let decoded = FrameMatrix::decode(&good).unwrap();
+        let decoded = FrameMatrix::decode(&FrameMatrixPayload::Legacy(good.clone())).unwrap();
         assert_eq!(decoded.greedy_ids(), [1]);
         assert_eq!(decoded.log_probs()[2], f32::NEG_INFINITY);
         let mut bad = good.clone();
         bad.dtype = "float32".into();
-        assert!(FrameMatrix::decode(&bad).is_err());
+        assert!(FrameMatrix::decode(&FrameMatrixPayload::Legacy(bad)).is_err());
         let mut bad = good.clone();
         bad.encoding = "base64".into();
-        assert!(FrameMatrix::decode(&bad).is_err());
+        assert!(FrameMatrix::decode(&FrameMatrixPayload::Legacy(bad)).is_err());
         for shape in [
             vec![],
             vec![3],
@@ -890,20 +897,20 @@ mod tests {
         ] {
             let mut bad = good.clone();
             bad.shape = shape;
-            assert!(FrameMatrix::decode(&bad).is_err());
+            assert!(FrameMatrix::decode(&FrameMatrixPayload::Legacy(bad)).is_err());
         }
         let mut bad = good.clone();
         bad.blank_id = 3;
-        assert!(FrameMatrix::decode(&bad).is_err());
+        assert!(FrameMatrix::decode(&FrameMatrixPayload::Legacy(bad)).is_err());
         let mut bad = good.clone();
         bad.vocab[2] = "a".into();
-        assert!(FrameMatrix::decode(&bad).is_err());
+        assert!(FrameMatrix::decode(&FrameMatrixPayload::Legacy(bad)).is_err());
         let mut bad = good.clone();
         bad.data = "!invalid base64!".into();
-        assert!(FrameMatrix::decode(&bad).is_err());
+        assert!(FrameMatrix::decode(&FrameMatrixPayload::Legacy(bad)).is_err());
         let mut bad = good;
         bad.data = base64::engine::general_purpose::STANDARD.encode(b"not zlib");
-        assert!(FrameMatrix::decode(&bad).is_err());
+        assert!(FrameMatrix::decode(&FrameMatrixPayload::Legacy(bad)).is_err());
         for rows in [
             vec![f32::NAN, -1.0],
             vec![f32::INFINITY, -1.0],
@@ -912,13 +919,17 @@ mod tests {
             vec![f32::NEG_INFINITY; 2],
             vec![-1.0; 3],
         ] {
-            assert!(FrameMatrix::decode(&payload(&rows, 1, &["<pad>", "a"])).is_err());
+            assert!(FrameMatrix::decode_legacy(&payload(&rows, 1, &["<pad>", "a"])).is_err());
         }
-        assert!(FrameMatrix::decode(&payload(&[-1.0, -0.5], 1, &["<pad>", "<unk>"])).is_err());
-        assert!(FrameMatrix::decode(&payload(&[], 0, &["<pad>", "a"]))
-            .unwrap()
-            .greedy_ids()
-            .is_empty());
+        assert!(
+            FrameMatrix::decode_legacy(&payload(&[-1.0, -0.5], 1, &["<pad>", "<unk>"])).is_err()
+        );
+        assert!(
+            FrameMatrix::decode_legacy(&payload(&[], 0, &["<pad>", "a"]))
+                .unwrap()
+                .greedy_ids()
+                .is_empty()
+        );
     }
 
     /// Two frames, vocab {blank, a}. P("a") = every path whose collapse is
@@ -993,7 +1004,7 @@ mod tests {
         }
         let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(&bytes).unwrap();
-        let payload = FrameMatrixPayload {
+        let payload = LegacyFrameMatrixPayload {
             shape: vec![2, 3],
             dtype: "float16".into(),
             encoding: "zlib+base64".into(),
@@ -1001,7 +1012,7 @@ mod tests {
             vocab: vec!["<pad>".into(), "a".into(), "b".into()],
             data: base64::engine::general_purpose::STANDARD.encode(enc.finish().unwrap()),
         };
-        let m = FrameMatrix::decode(&payload).unwrap();
+        let m = FrameMatrix::decode(&FrameMatrixPayload::Legacy(payload)).unwrap();
         assert_eq!(m.frames, 2);
         assert!((m.lp(1, 2) - -2.0).abs() < 1e-3);
         assert!(m.greedy_ids().is_empty()); // blank wins both frames

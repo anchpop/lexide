@@ -84,3 +84,7 @@ remote = ["dep:reqwest", "dep:tokio"]
 pronunciation = ["dep:half", "dep:flate2", "dep:base64"]
 # Async HTTP only; the caller supplies its runtime.
 pronunciation-remote = ["pronunciation", "dep:reqwest"]
+
+[[example]]
+name = "verify_frame_matrix"
+required-features = ["pronunciation"]

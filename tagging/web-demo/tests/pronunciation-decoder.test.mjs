@@ -127,3 +127,54 @@ test("0.4 nonblank mass emits blank regardless of phone argmax", async () => {
   assert.equal(result.path[0].blank, true);
   assert.deepEqual(result.phones, []);
 });
+
+function versioned(legacy, frame_rate_ms = 20) {
+  const t = legacy.shape[0];
+  const probability = (shape, labels, bits, value_semantics = "probability") => ({
+    shape, labels, dtype: "float16", encoding: "zlib+base64", value_semantics,
+    data: wire(bits).data,
+  });
+  return {schema_version: 1, producer: {model_id: "test", model_revision: "test", deploy_marker: "test", decoder_version: "nonblank_v1"},
+    trained_against_g2p: null, frame_rate_ms, sample_rate: 16000, heads: {
+      phone: {shape: legacy.shape, labels: legacy.vocab, blank_id: legacy.blank_id, dtype: legacy.dtype,
+        encoding: legacy.encoding, data: legacy.data, value_semantics: "joint_log_probability"},
+      nonblank: probability([t], ["nonblank"], Array(t).fill(0x3c00), "sigmoid_probability"),
+      stress: probability([t, 3], ["none", "primary", "secondary"], Array(t).fill([0x3c00, 0, 0]).flat()),
+    }};
+}
+
+import { matrixMetadata } from "../www/pronunciation-decoder.mjs";
+
+test("actual WASM accepts both schemas and exposes declared 40 ms timing to the UI", async () => {
+  const legacy = fixture([0, 1, 1, 0, 2]);
+  const modern = versioned(legacy, 40);
+  const old = decodePath(await unpack(legacy), frames(5));
+  const current = decodePath(await unpack(modern), frames(5));
+  assert.deepEqual(current, old);
+  assert.deepEqual(matrixMetadata(legacy), {frameSeconds: .02, blankId: 0});
+  assert.deepEqual(matrixMetadata(modern), {frameSeconds: .04, blankId: 0});
+  assert.equal(current.phones[0].startFrame * matrixMetadata(modern).frameSeconds, .04);
+  assert.equal(current.phones[0].endFrame * matrixMetadata(modern).frameSeconds, .12);
+  for (const change of [{schema_version: 2}, {schema_version: null}, {frame_rate_ms: undefined}, {frame_rate_ms: 0}, {frame_rate_ms: "40"}]) {
+    assert.throws(() => matrixMetadata({...modern, ...change}), /Invalid/);
+    await assert.rejects(unpack({...modern, ...change}), /invalid frame matrix/);
+  }
+});
+
+// Optional live artifacts from the authorized eval, through the actual WASM path.
+import { readFileSync, readdirSync } from "node:fs";
+if (process.env.FRAME_MATRIX_ARTIFACTS) {
+  for (const name of readdirSync(process.env.FRAME_MATRIX_ARTIFACTS).filter(name => name.endsWith("-score.json"))) {
+    test(`live new and legacy artifact through WASM: ${name}`, async () => {
+      const artifact = JSON.parse(readFileSync(`${process.env.FRAME_MATRIX_ARTIFACTS}/${name}`));
+      const modern = artifact.response.frame_matrix;
+      const phone = modern.heads.phone;
+      const legacy = {shape: phone.shape, vocab: phone.labels, blank_id: phone.blank_id,
+        dtype: phone.dtype, encoding: phone.encoding, data: phone.data};
+      const current = decodePath(await unpack(modern), frames(phone.shape[0]));
+      const old = decodePath(await unpack(legacy), frames(phone.shape[0]));
+      assert.deepEqual(current, old);
+      assert.equal(matrixMetadata(modern).frameSeconds, .02);
+    });
+  }
+}

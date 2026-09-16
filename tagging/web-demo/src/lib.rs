@@ -65,7 +65,8 @@ impl Parsley {
     /// Install the Japanese boundary dictionary (`onnx/jpn-unidic.bin`, ~87MB) fetched by
     /// the page. Optional and only affects Japanese; everything else is already exact.
     pub fn load_japanese_dictionary(&mut self, bytes: Vec<u8>) -> Result<(), JsError> {
-        self.priors.set_unidic(UniDic::from_bytes(bytes).map_err(js_err)?);
+        self.priors
+            .set_unidic(UniDic::from_bytes(bytes).map_err(js_err)?);
         Ok(())
     }
 
@@ -110,12 +111,36 @@ impl PronunciationMatrix {
     pub fn new(payload: &str) -> Result<PronunciationMatrix, JsError> {
         let decode = || -> anyhow::Result<_> {
             let payload: pronunciation::FrameMatrixPayload = serde_json::from_str(payload)?;
+            let (shape, elements) = match &payload {
+                pronunciation::FrameMatrixPayload::Legacy(matrix) => (
+                    &matrix.shape,
+                    matrix
+                        .shape
+                        .iter()
+                        .try_fold(1usize, |n, d| n.checked_mul(*d)),
+                ),
+                pronunciation::FrameMatrixPayload::V1(matrix) => {
+                    let phone = matrix
+                        .heads
+                        .get("phone")
+                        .ok_or_else(|| anyhow::anyhow!("missing phone head"))?;
+                    let elements = matrix.heads.values().try_fold(0usize, |total, head| {
+                        let size = head
+                            .shape
+                            .iter()
+                            .try_fold(1usize, |n, d| n.checked_mul(*d))?;
+                        total.checked_add(size)
+                    });
+                    (&phone.shape, elements)
+                }
+            };
             anyhow::ensure!(
-                payload.shape.len() == 2
-                    && payload.shape[0] > 0
-                    && payload.shape[0] <= 2000
-                    && payload.shape[1] >= 2
-                    && payload.shape[1] <= 4096,
+                elements.is_some_and(|n| n <= 2000 * 4096)
+                    && shape.len() == 2
+                    && shape[0] > 0
+                    && shape[0] <= 2000
+                    && shape[1] >= 2
+                    && shape[1] <= 4096,
                 "matrix dimensions exceed demo limits"
             );
             Ok(Self {

@@ -55,6 +55,15 @@ MODEL_ID = os.environ.get("WAV2VEC2_MODEL_ID", "anchpop/lexide-pronunciation")
 MODEL_REVISION = os.environ.get(
     "WAV2VEC2_MODEL_REVISION", "edcbbbf43a7ff337f43d233a9d89566509715e63"
 )
+# Training-label provenance is an assertion about a checkpoint, not something
+# recoverable from its weights. MUST update this declaration with each revision.
+# The old production checkpoint predates this declaration: unknown, not merged.
+# Source-label evidence only: excludes TOKEN_REMAP, LANG_PHONEME_REMAP,
+# narrowing selection, French stress overrides, and accent supervision masks.
+TRAINED_AGAINST_G2P = os.environ.get("WAV2VEC2_TRAINED_AGAINST_G2P") or {
+    ("anchpop/lexide-pronunciation-merged", "95f4b185676627ffe566e8760349ebb42cc55dde"):
+        "g2p/0.4.0 espeak-ng/aa907af78d5665d8 thai/ad66331eca29d4ea korean/9e4bc6b854f6a903",
+}.get((MODEL_ID, MODEL_REVISION))
 
 # Unique per-deploy identifier, echoed back by /predict so a caller can assert
 # it's talking to the container it just deployed rather than a stale warm one —
@@ -108,11 +117,15 @@ image = (
             "WAV2VEC2_MODEL_ID": MODEL_ID,
             "WAV2VEC2_MODEL_REVISION": MODEL_REVISION,
             "WAV2VEC2_DEPLOY_MARKER": DEPLOY_MARKER,
+            "WAV2VEC2_TRAINED_AGAINST_G2P": TRAINED_AGAINST_G2P or "",
             "WAV2VEC2_GPU": GPU,
             "WAV2VEC2_BATCH_SIZE": str(BATCH_SIZE),
             "WAV2VEC2_MAX_PADDED_SECONDS": str(MAX_PADDED_SECONDS),
             "WAV2VEC2_MAX_LENGTH_RATIO": str(MAX_LENGTH_RATIO),
             "WAV2VEC2_BATCH_DIAGNOSTICS": "1" if BATCH_DIAGNOSTICS else "0",
+            # Preserve an explicit download workaround without changing defaults.
+            **({"HF_HUB_DISABLE_XET": os.environ["HF_HUB_DISABLE_XET"]}
+               if "HF_HUB_DISABLE_XET" in os.environ else {}),
         }
     )
     .run_commands(
@@ -380,6 +393,8 @@ class Wav2Vec2Phoneme:
         ).to("cuda")
         self.backbone.eval()
         backbone_hidden = self.backbone.config.hidden_size
+        self.sample_rate = int(self.processor.feature_extractor.sampling_rate)
+        self.frame_rate_ms = 1000 * math.prod(self.backbone.config.conv_stride) / self.sample_rate
 
         ckpt_path = hf_hub_download(MODEL_ID, "factorized_heads.pt", revision=MODEL_REVISION)
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -394,6 +409,15 @@ class Wav2Vec2Phoneme:
         # shared base). Orthogonal to `regularized`. See
         # pronunciation/train/src/factorized_ctc.py (`AcousticSidechannel`).
         self.mel_sidechannel = bool(ckpt.get("mel_sidechannel", False))
+        # These trained acoustic banks have fixed 16 kHz / 320-hop geometry.
+        # Fail rather than claim a different backbone is compatible.
+        if self.mel_sidechannel or self.regularized:
+            receptive_field, stride = 1, 1
+            for kernel, step in zip(self.backbone.config.conv_kernel, self.backbone.config.conv_stride):
+                receptive_field += (kernel - 1) * stride
+                stride *= step
+            if (self.sample_rate, stride, receptive_field) != (16000, W2V2_STRIDE, W2V2_RECEPTIVE_FIELD):
+                raise ValueError("acoustic sidechannel requires 16 kHz, stride 320, receptive field 400")
 
         if self.mel_sidechannel:
             # --- mel-sidechannel variant: heads run on
@@ -474,7 +498,7 @@ class Wav2Vec2Phoneme:
         # Warmup forward pass so JIT/CUDA initialization is captured in the
         # snapshot (covers both backbone and head paths).
         dummy = self.processor(
-            [0.0] * 16000, sampling_rate=16000, return_tensors="pt", padding=True
+            [0.0] * self.sample_rate, sampling_rate=self.sample_rate, return_tensors="pt", padding=True
         )
         with torch.no_grad():
             self._forward(dummy.input_values.to("cuda").to(torch.float16))
@@ -523,25 +547,27 @@ class Wav2Vec2Phoneme:
         acoustic = self.sidechannel(input_values, hidden.shape[1], hidden.dtype)
         return torch.cat([hidden, acoustic], dim=-1)  # (1, T, H + out_dim)
 
-    def _aux_heads_for(self, language: str | None) -> dict:
-        """The aux heads that apply to `language`, keyed by their spec target
-        ("tone", "pitch_accent"). Empty when the caller names no language or the
-        checkpoint has no head for it, which is what keeps the response shape
-        unchanged for the languages that never had tone supervision.
-        """
-        if not language:
-            return {}
+    def _aux_heads_for(self, language: str | None, return_all_heads=False) -> dict:
+        """Unique checkpoint head names, never colliding logical tone targets."""
         return {
-            spec["target"]: self.language_heads[name]
+            name: self.language_heads[name]
             for name, spec in self.language_head_specs.items()
-            if spec.get("lang") == language and name in self.language_heads
+            if name in self.language_heads and
+            (return_all_heads or (language and spec.get("lang") == language))
         }
 
-    def _forward(self, input_values, language: str | list | None = None, attention_mask=None):
-        """Return (combined_log_probs, stress_logits, p_nonblank, aux_ids).
+    def _aux_ids(self, aux_logits, language):
+        """Only language-applicable labels enter legacy emissions/frames."""
+        return {self.language_head_specs[name]["target"]: values.argmax(dim=-1)
+                for name, values in aux_logits.items()
+                if language and self.language_head_specs[name]["lang"] == language}
+
+    def _forward(self, input_values, language: str | list | None = None, attention_mask=None,
+                 return_all_heads: bool | list = False):
+        """Return (combined_log_probs, stress_logits, p_nonblank, aux_logits).
 
         The first three are (B, T, *). A scalar language returns a dict of
-        auxiliary target -> (T,) ids; a per-item language list returns one
+        unique checkpoint head name -> (T, C) logits; a language list returns one
         such dict per batch item. The encoder remains language-independent.
 
         Branches on the head-input variant:
@@ -581,18 +607,19 @@ class Wav2Vec2Phoneme:
         # One backbone pass can serve different languages. Compute each
         # requested auxiliary head once, then select labels per request.
         languages = language if isinstance(language, list) else [language]
-        selected = [self._aux_heads_for(lang) for lang in languages]
+        all_flags = return_all_heads if isinstance(return_all_heads, list) else [return_all_heads] * len(languages)
+        selected = [self._aux_heads_for(lang, all_heads) for lang, all_heads in zip(languages, all_flags)]
         head_values = {}
         for heads in selected:
             for head in heads.values():
                 if head not in head_values:
-                    head_values[head] = head(h).argmax(dim=-1)
-        per_item_aux = [{target: head_values[head][i] for target, head in heads.items()}
+                    head_values[head] = head(h)
+        per_item_aux = [{name: head_values[head][i] for name, head in heads.items()}
                         for i, heads in enumerate(selected)]
-        aux_ids = per_item_aux if isinstance(language, list) else per_item_aux[0]
-        return log_probs, stress_logits, p_nonblank, aux_ids
+        aux_logits = per_item_aux if isinstance(language, list) else per_item_aux[0]
+        return log_probs, stress_logits, p_nonblank, aux_logits
 
-    def _frame_matrix(self, log_probs) -> dict:
+    def _frame_matrix(self, log_probs, stress_logits, p_nonblank, aux_logits) -> dict:
         """The full per-frame log-prob matrix, losslessly enough to rescore
         *any* phoneme sequence later without touching a GPU.
 
@@ -608,14 +635,18 @@ class Wav2Vec2Phoneme:
         sum-exp, and fp16's ~3 decimal digits are far below the model's own
         uncertainty. Shipped zlib-compressed because a log-prob matrix is
         mostly near-identical very-negative values and compresses ~10x.
-        `vocab` is included so the row order can never be misread later.
+        Ordered labels and semantics accompany every head.
         """
         import base64, zlib
 
-        # Copy the contiguous matrix in bulk; bytes(untyped_storage()) reads
-        # individual bytes through Python and dominates inference latency.
-        mat = log_probs[0].detach().to("cpu").half().contiguous()
-        payload = zlib.compress(mat.numpy().tobytes(), 6)
+        def tensor(values, labels, semantics, **metadata):
+            # Copy the contiguous matrix in bulk; bytes(untyped_storage()) reads
+            # individual bytes through Python and dominates inference latency.
+            mat = values.detach().to("cpu").half().contiguous()
+            payload = zlib.compress(mat.numpy().astype("<f2", copy=False).tobytes(), 6)
+            return {"shape": list(mat.shape), "labels": labels, "dtype": "float16",
+                    "encoding": "zlib+base64", "value_semantics": semantics,
+                    "data": base64.b64encode(payload).decode(), **metadata}
         # Row labels come from the tokenizer's own vocab, NOT `_label`
         # (`decode`). The two disagree on 78 of 461 entries — decode renders
         # `<pad>` as `<blank>` and collapses some doubled forms — so labeling
@@ -624,14 +655,35 @@ class Wav2Vec2Phoneme:
         # rescoring offline would then silently index the wrong rows.
         vocab = self.processor.tokenizer.get_vocab()
         by_id = {i: tok for tok, i in vocab.items()}
-        return {
-            "shape": list(mat.shape),                       # (T, V)
-            "dtype": "float16",
-            "encoding": "zlib+base64",
-            "blank_id": self.blank_id,
-            "vocab": [by_id.get(i, self._label(i)) for i in range(mat.shape[1])],
-            "data": base64.b64encode(payload).decode(),
+        heads = {
+            "phone": tensor(log_probs[0], [by_id[i] for i in range(log_probs.shape[-1])],
+                            "joint_log_probability", blank_id=self.blank_id),
+            "nonblank": tensor(p_nonblank[0], ["nonblank"], "sigmoid_probability"),
+            "stress": tensor(stress_logits[0].softmax(dim=-1),
+                             ["none", "primary", "secondary"], "probability"),
         }
+        for name, values in aux_logits.items():
+            spec = self.language_head_specs[name]
+            labels = self._aux_labels(name)
+            if values.shape[-1] != len(labels):
+                raise ValueError(f"head {name} has no matching label declaration")
+            heads[name] = tensor(values.softmax(dim=-1), labels, "probability", language=spec["lang"], target=spec["target"])
+        return {"schema_version": 1, "producer": _response_identity(),
+                "trained_against_g2p": TRAINED_AGAINST_G2P,
+                "sample_rate": self.sample_rate, "frame_rate_ms": self.frame_rate_ms,
+                "heads": heads}
+
+    def _aux_labels(self, name):
+        # Class IDs match training-side factor labels. Future checkpoints may
+        # supply explicit labels rather than extending the known declarations.
+        spec = self.language_head_specs[name]
+        if "labels" in spec:
+            return spec["labels"]
+        return {
+            "tha_tone": ["not_bearer", "mid", "low", "falling", "high", "rising"],
+            "zho_hans_tone": ["not_bearer", "high_level", "rising", "dipping", "falling", "neutral"],
+            "jpn_pitch_accent": ["not_bearer", "low", "high"],
+        }[name]
 
     def _phone_frames(self, log_probs, p_nonblank):
         """Return nonblank-first ids, conditional phone probabilities, and vocab ids."""
@@ -880,14 +932,14 @@ class Wav2Vec2Phoneme:
         samples = torch.as_tensor(audio, dtype=torch.float32)
         if samples.ndim != 1 or samples.numel() == 0 or not torch.isfinite(samples).all():
             raise ValueError("audio must be a nonempty, finite mono waveform")
-        if sr != 16000:
+        if sr != self.sample_rate:
             import torchaudio.functional as F
-            samples = F.resample(samples.unsqueeze(0), sr, 16000).squeeze(0)
+            samples = F.resample(samples.unsqueeze(0), sr, self.sample_rate).squeeze(0)
         if self.backbone._get_feat_extract_output_lengths(samples.numel()) <= 0:
             raise ValueError("audio is too short for the feature extractor")
         # Preserve this service's preprocessing. Normalize each clip before
         # padding; normalization over the padded batch would change the audio.
-        inputs = self.processor(samples.numpy(), sampling_rate=16000,
+        inputs = self.processor(samples.numpy(), sampling_rate=self.sample_rate,
                                 return_tensors="pt", padding=False)
         return inputs.input_values[0]
 
@@ -908,7 +960,7 @@ class Wav2Vec2Phoneme:
         # GroupNorm includes time in its normalization before masking, so
         # unvalidated group-normalized checkpoints retain singleton execution.
         size = 1 if self.backbone.config.feat_extract_norm == "group" else BATCH_SIZE
-        batches = list(length_batches(lengths, size, int(MAX_PADDED_SECONDS * 16000),
+        batches = list(length_batches(lengths, size, int(MAX_PADDED_SECONDS * self.sample_rate),
                                       MAX_LENGTH_RATIO))
         print(json.dumps({"pronunciation_pool": pool_number, "requests": len(requests),
                           "microbatches": [len(batch) for batch in batches],
@@ -929,6 +981,7 @@ class Wav2Vec2Phoneme:
             lp, stress, nb, aux = self._forward(
                 values.to("cuda", dtype=torch.float16),
                 language=[item[1].get("language") for item in items], attention_mask=mask,
+                return_all_heads=[bool(item[1].get("return_all_heads")) for item in items],
             )
             # Bulk transfers also keep every per-frame .item() in the existing
             # response builders off the GPU. No concurrent model forwards.
@@ -961,13 +1014,14 @@ class Wav2Vec2Phoneme:
             try:
                 n = frame_lengths[i]
                 log_probs, stress_logits, p_nonblank = lp[i:i+1,:n], stress[i:i+1,:n], nb[i:i+1,:n]
-                labels = {key: value[:n] for key,value in aux[i].items()}
+                aux_logits = {key: value[:n] for key,value in aux[i].items()}
+                labels = self._aux_ids(aux_logits, request.get("language"))
                 top_k = min(max(int(request.get("top_k",3)),1),100)
                 result = {"phonemes": self._decode_with_confidence(log_probs, stress_logits, p_nonblank, labels, top_k)}
                 if request.get("target_phonemes"):
                     result["target_score"] = self._score_target(log_probs, p_nonblank, request["target_phonemes"])
                 if request.get("return_frame_matrix"):
-                    result["frame_matrix"] = self._frame_matrix(log_probs)
+                    result["frame_matrix"] = self._frame_matrix(log_probs, stress_logits, p_nonblank, aux_logits)
                 if request.get("return_frames"):
                     result["frames"] = self._frames_topk(log_probs, stress_logits, p_nonblank, labels, top_k)
                 if BATCH_DIAGNOSTICS:
@@ -983,10 +1037,12 @@ class Wav2Vec2Phoneme:
         self, audio_samples: list[float], sample_rate: int = 16000, top_k: int = 3,
         return_frames: bool = False, language: str | None = None,
         target_phonemes: list | None = None, return_frame_matrix: bool = False,
+        return_all_heads: bool = False,
     ) -> dict:
         result = self._transcribe_requests([{"audio": audio_samples, "sample_rate": sample_rate,
             "top_k": top_k, "return_frames": return_frames, "language": language,
-            "target_phonemes": target_phonemes, "return_frame_matrix": return_frame_matrix}])[0]
+            "target_phonemes": target_phonemes, "return_frame_matrix": return_frame_matrix,
+            "return_all_heads": return_all_heads}])[0]
         if isinstance(result, Exception):
             raise result
         return result

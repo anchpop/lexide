@@ -1,5 +1,5 @@
 import { AudioExplorer } from "./audio-explorer.js";
-import { unpackMatrix, decodePath } from "./pronunciation-decoder.mjs";
+import { unpackMatrix, decodePath, matrixMetadata } from "./pronunciation-decoder.mjs";
 
 // Existing production Lexide model, also used by Yap. No credentials in the page.
 const ENDPOINT = "https://anchpop--wav2vec2-phoneme-wav2vec2phoneme-predict.modal.run";
@@ -18,12 +18,13 @@ let preparing = false;
 let modelOutput = null;
 let decoded = null;
 let copyTimer = null;
-const FRAME_SECONDS = 0.02;
+let frameSeconds = null;
+let blankId = null;
 const explorer = new AudioExplorer({
   audio: $("playback"),
   onPhone: (index, seek) => selectPhone(index, seek),
   onFrame: time => {
-    if (decoded) inspectFrame(Math.min(decoded.path.length - 1, Math.floor((time + 1e-6) / FRAME_SECONDS)));
+    if (decoded) inspectFrame(Math.min(decoded.path.length - 1, Math.floor((time + 1e-6) / frameSeconds)));
   },
 });
 
@@ -220,6 +221,7 @@ $("record").onclick = async () => {
 };
 
 function renderResult(result, output) {
+  ({ frameSeconds, blankId } = matrixMetadata(output.frame_matrix));
   decoded = result;
   modelOutput = output;
   $("ipa").append("[");
@@ -252,7 +254,7 @@ function renderResult(result, output) {
   $("result").hidden = false;
   $("drop-zone").classList.add("has-result");
   paintFrames();
-  explorer.show(result.phones);
+  explorer.show(result.phones, frameSeconds);
   inspectFrame(0);
   if (result.phones.length) selectPhone(0);
 }
@@ -267,20 +269,20 @@ function selectPhone(index, seek = false) {
   $("phones").hidden = false;
   $("selected-symbol").textContent = phone.phoneme;
   $("selected-position").textContent = `${index + 1} / ${decoded.phones.length}`;
-  $("selected-time").textContent = `${(phone.startFrame * FRAME_SECONDS).toFixed(2)}–${(phone.endFrame * FRAME_SECONDS).toFixed(2)} sec · approximate`;
+  $("selected-time").textContent = `${(phone.startFrame * frameSeconds).toFixed(2)}–${(phone.endFrame * frameSeconds).toFixed(2)} sec · approximate`;
   $("selected-confidence").textContent = `${Math.round(phone.confidence * 100)}% confidence`;
   $("alternatives").replaceChildren();
   for (const alternative of phone.top_k) {
     const chip = document.createElement("span");
     chip.className = "alternative";
-    chip.append(alternative.id === modelOutput.frame_matrix.blank_id ? "Blank" : alternative.phoneme);
+    chip.append(alternative.id === blankId ? "Blank" : alternative.phoneme);
     const percent = document.createElement("small");
     percent.textContent = `${(alternative.probability * 100).toFixed(1)}%`;
     chip.append(percent);
     $("alternatives").append(chip);
   }
   explorer.select(index, seek);
-  if (seek) explorer.seek(phone.startFrame * FRAME_SECONDS);
+  if (seek) explorer.seek(phone.startFrame * frameSeconds);
 }
 
 $("copy-ipa").onclick = async () => {
@@ -315,7 +317,7 @@ function inspectFrame(index) {
   if (!decoded) return;
   const frame = decoded.path[index];
   $("frame-cursor").value = index;
-  const text = `Frame ${index} · ${(index * FRAME_SECONDS).toFixed(2)}s · ${frame.phoneme} · ${(frame.probability * 100).toFixed(1)}%`;
+  const text = `Frame ${index} · ${(index * frameSeconds).toFixed(2)}s · ${frame.phoneme} · ${(frame.probability * 100).toFixed(1)}%`;
   $("frame-detail").textContent = text;
   $("frame-cursor").setAttribute("aria-valuetext", text);
   for (const symbol of $("ipa").querySelectorAll("button")) {
@@ -326,17 +328,17 @@ function inspectFrame(index) {
 $("frame-cursor").oninput = () => {
   const index = +$("frame-cursor").value;
   inspectFrame(index);
-  $("playback").currentTime = index * FRAME_SECONDS;
+  $("playback").currentTime = index * frameSeconds;
 };
 $("playback").addEventListener("timeupdate", () => {
-  if (decoded) inspectFrame(Math.min(decoded.path.length - 1, Math.floor(($("playback").currentTime + 1e-6) / FRAME_SECONDS)));
+  if (decoded) inspectFrame(Math.min(decoded.path.length - 1, Math.floor(($("playback").currentTime + 1e-6) / frameSeconds)));
 });
 window.addEventListener("resize", paintFrames);
 $("download-frames").onclick = () => {
   if (!modelOutput) return;
   const url = URL.createObjectURL(new Blob([JSON.stringify({
     ...modelOutput,
-    demo_metadata: { sample_rate: SAMPLE_RATE, frame_stride_seconds: FRAME_SECONDS,
+    demo_metadata: { sample_rate: SAMPLE_RATE, frame_stride_seconds: frameSeconds,
       decoder: "nonblank-first CTC over float16 phoneme matrix", phones: decoded.phones },
   })], { type: "application/json" }));
   const link = document.createElement("a");
