@@ -1,8 +1,7 @@
 //! Rust owns stage ordering and pronunciation; Python supplies corpus/audio helpers.
-use anyhow::{Context, Result, bail, ensure};
-use clap::Parser;
+use anyhow::{Context, Result, ensure};
+use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     fs::{self, File},
@@ -11,9 +10,54 @@ use std::{
     process::{Command, Stdio},
 };
 
+mod audio;
+mod audit;
+mod corpus;
+mod french_stress;
+mod language_filter;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Stage {
+    Run,
+    Audit,
+    Stress,
+    Filter,
+    Labels,
+    Vad,
+    Speakers,
+    Measure,
+    Narrow,
+    Pack,
+    Upload,
+    DeployAligner,
+}
+
 #[derive(Parser)]
 #[command(about = "Prepare pronunciation training data using g2p directly from Rust")]
 struct Args {
+    /// Run the whole preparation/upload pipeline or a single stage.
+    #[arg(value_enum)]
+    stage: Stage,
+    /// Show the selected stages without API calls or output writes.
+    #[arg(long)]
+    dry_run: bool,
+    /// Load only this env file instead of the repository defaults.
+    #[arg(long)]
+    env_file: Option<PathBuf>,
+    #[arg(long, default_value_os_t = root().join("train"))]
+    train_dir: PathBuf,
+    #[command(flatten)]
+    audit: audit::Options,
+    #[arg(long)]
+    skip_audit: bool,
+    #[arg(long)]
+    skip_stress: bool,
+    #[arg(long)]
+    skip_filter: bool,
+    #[arg(long)]
+    skip_upload: bool,
+    #[arg(long, default_value = "anchpop/lexide-pronunciation-audio")]
+    hf_repo: String,
     #[arg(long, default_value_os_t = root().join("data/audio"))]
     data_dir: PathBuf,
     /// Restrict language directories; packing still includes the whole data directory.
@@ -35,13 +79,11 @@ struct Args {
     skip_speaker_cluster: bool,
     #[arg(long)]
     allow_noncommercial: bool,
-    /// Skip shared exclusions and dataset packing, useful for local label checks.
+    /// Skip packing during a full run.
     #[arg(long)]
     no_pack: bool,
     #[arg(long, default_value_os_t = root().join(".work/pron_audio.tar"))]
     output_tar: PathBuf,
-    #[arg(long, default_value_os_t = root().join("train/mixed_script_exclusions.jsonl"))]
-    exclusions_output: PathBuf,
 }
 
 fn root() -> PathBuf {
@@ -70,11 +112,13 @@ impl Args {
             .arg(root().join("train/scripts/preprocess_support.py"))
             .arg(stage)
             .arg("--data-dir")
-            .arg(&self.data_dir);
+            .arg(&self.data_dir)
+            .arg("--train-dir")
+            .arg(&self.train_dir);
         command
     }
 
-    fn language(&self, lang: &str, vad: Option<&Path>, identity: &str) -> Result<()> {
+    fn labels(&self, lang: &str, identity: &str) -> Result<()> {
         let log = if self.jobs > 1 {
             let dir = root().join(".work/preprocess_parallel");
             fs::create_dir_all(&dir)?;
@@ -100,11 +144,10 @@ impl Args {
 
         let mut output = BufWriter::new(File::create(&labels)?);
         for line in BufReader::new(File::open(&prepared)?).lines() {
-            let input: Prepared = serde_json::from_str(&line?)?;
-            let sentence = input.record["sentence"]
-                .as_str()
-                .context("missing sentence")?;
-            let labels = match g2p::phonemize(input.language, sentence) {
+            let record: Value = serde_json::from_str(&line?)?;
+            let language = corpus::language(&record, lang)?;
+            let sentence = record["sentence"].as_str().context("missing sentence")?;
+            let labels = match g2p::phonemize(language, sentence) {
                 Ok(target) => {
                     // Training stores stress as 0/1/2, rather than Rust enum names.
                     let mut value = serde_json::to_value(&target)?;
@@ -114,13 +157,13 @@ impl Args {
                 }
                 Err(g2p::Error::Unlabelable(reason)) => json!({"exclude_reason": reason}),
                 Err(error) => {
-                    return Err(error).with_context(|| format!("{lang}: {}", input.record["file"]));
+                    return Err(error).with_context(|| format!("{lang}: {}", record["file"]));
                 }
             };
             serde_json::to_writer(
                 &mut output,
                 &json!({
-                    "record": input.record, "language": input.language, "labels": labels,
+                    "record": record, "language": language, "labels": labels,
                 }),
             )?;
             writeln!(output)?;
@@ -136,128 +179,195 @@ impl Args {
                 .arg(identity),
             log.as_ref(),
         )?;
-        if !self.skip_narrowing {
-            run(self.helper("narrow").arg("--lang").arg(lang), log.as_ref())?;
-        }
-        if let Some(vad) = vad {
-            let dir = self.data_dir.join(lang);
-            run(
-                Command::new(vad)
-                    .arg(dir.join("phonemes.jsonl"))
-                    .arg(&dir)
-                    .arg(dir.join("vad.jsonl")),
-                log.as_ref(),
-            )?;
-        }
-        if !self.skip_speaker_cluster {
-            run(
-                self.helper("speakers").arg("--lang").arg(lang),
-                log.as_ref(),
-            )?;
-        }
         eprintln!("{lang}: complete");
         Ok(())
     }
 }
 
-#[derive(Deserialize)]
-struct Prepared {
-    record: Value,
-    language: g2p::Language,
-}
-
-/// Resolve Cargo's actual artifact path, including user-configured target directories.
-fn build_vad() -> Result<PathBuf> {
-    let output = Command::new("cargo")
-        .current_dir(root().join("vad_compare"))
-        .args([
-            "build",
-            "--release",
-            "--bin",
-            "vad_compute",
-            "--message-format=json",
-        ])
-        .stderr(Stdio::inherit())
-        .output()
-        .context("building vad_compute")?;
-    ensure!(output.status.success(), "vad_compute build failed");
-    for line in output.stdout.split(|b| *b == b'\n') {
-        if let Ok(value) = serde_json::from_slice::<Value>(line)
-            && value["reason"] == "compiler-artifact"
-            && value["target"]["name"] == "vad_compute"
-            && let Some(path) = value["executable"].as_str()
-        {
-            return Ok(PathBuf::from(path));
+impl Args {
+    fn stages(&self) -> Vec<Stage> {
+        if self.stage != Stage::Run {
+            return vec![self.stage];
         }
-    }
-    bail!("Cargo did not report a vad_compute executable")
-}
-
-fn main() -> Result<()> {
-    let mut args = Args::parse();
-    args.data_dir = args
-        .data_dir
-        .canonicalize()
-        .context("opening data directory")?;
-    let mut languages = Vec::new();
-    for entry in fs::read_dir(&args.data_dir)? {
-        let entry = entry?;
-        let lang = entry.file_name().to_string_lossy().into_owned();
-        if lang != ".cache"
-            && entry.path().is_dir()
-            && entry.path().join("manifest.jsonl").is_file()
-            && (args.langs.is_empty() || args.langs.contains(&lang))
-        {
-            languages.push(lang);
+        let mut stages = vec![];
+        if !self.skip_audit {
+            stages.push(Stage::Audit);
         }
+        if !self.skip_stress {
+            stages.push(Stage::Stress);
+        }
+        if !self.skip_filter {
+            stages.push(Stage::Filter);
+        }
+        stages.push(Stage::Labels);
+        if !self.skip_vad {
+            stages.push(Stage::Vad);
+        }
+        if !self.skip_speaker_cluster {
+            stages.push(Stage::Speakers);
+        }
+        if !self.skip_narrowing {
+            stages.extend([Stage::Measure, Stage::Narrow]);
+        }
+        if !self.no_pack {
+            stages.push(Stage::Pack);
+        }
+        if !self.skip_upload {
+            stages.push(Stage::Upload);
+        }
+        stages
     }
-    languages.sort();
-    for lang in &args.langs {
-        ensure!(
-            languages.contains(lang),
-            "no manifest.jsonl for requested language {lang}"
-        );
-    }
-    ensure!(!languages.is_empty(), "no language manifests found");
-    let vad = if args.skip_vad {
-        None
-    } else {
-        Some(build_vad()?)
-    };
-    let identity = g2p::identity();
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(args.jobs.into())
-        .build()?;
-    let failures: Vec<_> = pool.install(|| {
-        languages
-            .par_iter()
-            .filter_map(
-                |lang| match args.language(lang, vad.as_deref(), &identity) {
+
+    fn parallel(&self, langs: &[String], job: impl Fn(&str) -> Result<()> + Sync) -> Result<()> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.jobs.into())
+            .build()?;
+        let failures: Vec<_> = pool.install(|| {
+            langs
+                .par_iter()
+                .filter_map(|lang| match job(lang) {
                     Ok(()) => None,
                     Err(error) => {
                         eprintln!("{lang}: FAILED: {error:#}");
                         Some(lang.clone())
                     }
-                },
-            )
-            .collect()
-    });
-    ensure!(
-        failures.is_empty(),
-        "preprocessing failed for {}; dataset was not packed",
-        failures.join(", ")
-    );
-    if !args.no_pack {
-        run(
-            args.helper("exclusions")
-                .arg("--output")
-                .arg(&args.exclusions_output),
-            None,
-        )?;
-        run(
-            args.helper("pack").arg("--output").arg(&args.output_tar),
-            None,
-        )?;
+                })
+                .collect()
+        });
+        ensure!(
+            failures.is_empty(),
+            "stage failed for {}; later stages will not run",
+            failures.join(", ")
+        );
+        Ok(())
     }
-    Ok(())
+
+    async fn execute(&self, langs: &[String], stages: &[Stage]) -> Result<()> {
+        for stage in stages {
+            eprintln!("=== {stage:?} ===");
+            match stage {
+                Stage::Run => unreachable!(),
+                Stage::Audit => {
+                    audit::run(&self.data_dir, &self.train_dir, langs, &self.audit).await?
+                }
+                Stage::Stress => {
+                    if langs.iter().any(|l| l == "fra") {
+                        french_stress::run(&self.data_dir).await?;
+                    }
+                }
+                Stage::Filter => {
+                    language_filter::run(&self.data_dir, &self.train_dir, langs).await?
+                }
+                Stage::Labels => {
+                    let identity = g2p::identity();
+                    self.parallel(langs, |lang| self.labels(lang, &identity))?;
+                }
+                Stage::Vad => self.parallel(langs, |lang| audio::vad(&self.data_dir, lang))?,
+                Stage::Speakers => {
+                    for lang in langs {
+                        run(self.helper("speakers").arg("--lang").arg(lang), None)?;
+                    }
+                }
+                Stage::Measure | Stage::Narrow => {
+                    // Refuse incompatible labels before importing clients or spending on alignment.
+                    for lang in langs {
+                        run(self.helper("guard").arg("--lang").arg(lang), None)?;
+                    }
+                    let name = if *stage == Stage::Measure {
+                        "measure"
+                    } else {
+                        "narrow"
+                    };
+                    for lang in langs {
+                        run(self.helper(name).arg("--lang").arg(lang), None)?;
+                    }
+                }
+                Stage::Pack => {
+                    run(
+                        self.helper("exclusions")
+                            .arg("--output")
+                            .arg(self.train_dir.join("mixed_script_exclusions.jsonl")),
+                        None,
+                    )?;
+                    run(
+                        self.helper("pack").arg("--output").arg(&self.output_tar),
+                        None,
+                    )?;
+                }
+                Stage::Upload => {
+                    run(
+                        Command::new(&self.python)
+                            .arg(root().join("scripts/upload_audio_to_hf.py"))
+                            .arg("--env-file")
+                            .arg("/dev/null")
+                            .arg("--audio-root")
+                            .arg(&self.data_dir)
+                            .arg("--repo")
+                            .arg(&self.hf_repo)
+                            .arg("--large"),
+                        None,
+                    )?;
+                }
+                Stage::DeployAligner => {
+                    run(
+                        Command::new(&self.python)
+                            .current_dir(root().join("espeak_audit"))
+                            .args(["-m", "modal", "deploy", "modal_aligner.py"]),
+                        None,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn main() -> Result<()> {
+    let mut args = Args::parse();
+    let stages = args.stages();
+    if args.dry_run {
+        for stage in &stages {
+            println!("{stage:?}");
+        }
+        return Ok(());
+    }
+    // Load before constructing worker threads; match the former shell's local override.
+    let env_files = args
+        .env_file
+        .clone()
+        .map(|p| vec![p])
+        .unwrap_or_else(|| vec![root().parent().unwrap().join(".env"), root().join(".env")]);
+    for path in env_files {
+        if args.env_file.is_some() || path.exists() {
+            dotenvy::from_path_override(&path)
+                .with_context(|| format!("loading {}", path.display()))?;
+        }
+    }
+    let mut languages = Vec::new();
+    if args.stage != Stage::DeployAligner {
+        args.data_dir = args
+            .data_dir
+            .canonicalize()
+            .context("opening data directory")?;
+        for entry in fs::read_dir(&args.data_dir)? {
+            let entry = entry?;
+            let lang = entry.file_name().to_string_lossy().into_owned();
+            if lang != ".cache"
+                && entry.path().is_dir()
+                && entry.path().join("manifest.jsonl").is_file()
+                && (args.langs.is_empty() || args.langs.contains(&lang))
+            {
+                languages.push(lang);
+            }
+        }
+        languages.sort();
+        for lang in &args.langs {
+            ensure!(
+                languages.contains(lang),
+                "no manifest.jsonl for requested language {lang}"
+            );
+        }
+        ensure!(!languages.is_empty(), "no language manifests found");
+    }
+    tokio::runtime::Runtime::new()?.block_on(args.execute(&languages, &stages))
 }

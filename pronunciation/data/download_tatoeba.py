@@ -341,7 +341,7 @@ def main():
         if failed[:5]:
             print(f"  first failures: {failed[:5]}")
 
-    print("\nAll languages done. Next: run cargo run --release --manifest-path preprocess/Cargo.toml -- --skip-narrowing "
+    print("\nAll languages done. Next: run cargo run --release --manifest-path preprocess/Cargo.toml -- labels "
           "to regenerate phonemes.jsonl from the combined manifests.")
 
 

@@ -188,8 +188,7 @@ def main():
                 print(f"  [align retry {attempt + 1}/3] {type(e).__name__}: {e}", flush=True)
                 time.sleep(3)
         if res is None:
-            print(f"  [align gave up] deferring {len(chunk)} clips to next run", flush=True)
-            return []
+            raise RuntimeError(f"alignment failed for {len(chunk)} clips after retries; cached work is retained")
         by_key = {r["key"]: r for r in res}
         # Stale-deploy guard: container echoes its weights' revision; if it differs
         # from the pinned one this cache namespace claims, fail rather than poison.
@@ -229,6 +228,8 @@ def main():
         eta = (len(todo) - done) / rate / 60 if rate else 0
         print(f"  super-chunk {si+1}/{len(super_chunks)}: cached {done}/{len(todo)} "
               f"({rate:.1f}/s, ETA {eta:.0f} min)", flush=True)
+    if done != len(todo):
+        raise RuntimeError(f"only {done}/{len(todo)} clips measured; cached work is retained for a retry")
     print(f"done: {done} clips aligned(Modal)+measured(local)+cached in {time.time()-t0:.0f}s → {CACHE}")
 
 

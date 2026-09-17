@@ -32,7 +32,7 @@ IPA_VOWELS = set("iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaɶɑɒɚɝᵻ")
 # Languages whose espeak-emitted stress is systematically wrong and gets
 # replaced from a sidecar (rhythmic-group stress for French: stress falls on
 # the final syllable of each rhythmic group, not on every word). The sidecar
-# is produced by train/relabel-french/ (LLM call). Languages not in this set
+# is produced by the Rust preprocess stress stage (LLM call). Languages not in this set
 # keep espeak's per-word stress.
 OVERRIDE_LANGS = {"fra"}
 
@@ -283,7 +283,7 @@ def load_accent_exclusions(path: Path) -> dict[str, str]:
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from corpus_labels import training_fields, language_for_record  # noqa: E402
+from corpus_labels import training_fields  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -498,18 +498,18 @@ def prepare(data_dir: Path, lang: str, output: Path, allow_noncommercial: bool) 
 
     with output.open("w") as out:
         for rec in prepared_records:
-            out.write(json.dumps({"record": rec, "language": language_for_record(rec, lang)}, ensure_ascii=False) + "\n")
+            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
     print(f"{lang}: prepared {len(prepared_records)} recordings; dropped {silent_dropped} silent and {license_excluded} noncommercial")
 
 
-def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str) -> None:
+def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str, train_dir: Path = REPO_ROOT / "train") -> None:
     lang_dir = data_dir / lang
     phonemes_path = lang_dir / "phonemes.jsonl"
     # Acoustics get the last word on the accent factor: the sidecar's
     # accent is what the dictionary says, and this file lists the clips
     # where measured F0 says otherwise.
     accent_exclusions = load_accent_exclusions(
-        Path(__file__).resolve().parents[1] / f"{lang}_pitch_accent_exclusions.jsonl"
+        train_dir / f"{lang}_pitch_accent_exclusions.jsonl"
     )
     if accent_exclusions:
         print(f"{lang}: withholding pitch accent on {len(accent_exclusions)} "
@@ -527,7 +527,7 @@ def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str) 
         else:
             print(f"{lang}: WARNING — no stress_overrides.jsonl; espeak's "
                   f"per-word stress will be used (systematically wrong for "
-                  f"this language). Run train/relabel-french/ to generate it.")
+                  f"this language). Run the Rust preprocess stress stage to generate it.")
 
     override_applied = 0
     override_align_failures = 0
@@ -662,9 +662,10 @@ def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str) 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=["prepare", "finalize", "narrow", "speakers", "exclusions", "pack"])
+    parser.add_argument("stage", choices=["prepare", "finalize", "guard", "measure", "narrow", "speakers", "exclusions", "pack"])
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--lang")
+    parser.add_argument("--train-dir", type=Path, default=REPO_ROOT / "train")
     parser.add_argument("--exchange", type=Path)
     parser.add_argument("--identity")
     parser.add_argument("--output", type=Path)
@@ -673,7 +674,15 @@ def main():
     if args.stage == "prepare":
         prepare(args.data_dir, args.lang, args.exchange, args.allow_noncommercial)
     elif args.stage == "finalize":
-        finalize(args.data_dir, args.lang, args.exchange, args.identity)
+        finalize(args.data_dir, args.lang, args.exchange, args.identity, args.train_dir)
+    elif args.stage == "guard":
+        guard_narrowing_labels(args.lang, args.data_dir, REPO_ROOT / "espeak_audit/modal_aligner.py")
+    elif args.stage == "measure":
+        if args.data_dir.resolve() != (REPO_ROOT / "data/audio").resolve():
+            raise ValueError("acoustic measurements require the canonical corpus directory")
+        if args.lang in {"eng", "deu", "ita", "spa", "rus", "por"}:
+            guard_narrowing_labels(args.lang, args.data_dir, REPO_ROOT / "espeak_audit/modal_aligner.py")
+            subprocess.run([sys.executable, str(REPO_ROOT / "espeak_audit/measure_corpus.py"), "--langs", args.lang], check=True)
     elif args.stage == "narrow":
         run_narrowing(args.lang, args.data_dir)
     elif args.stage == "speakers":

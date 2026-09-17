@@ -17,7 +17,7 @@ Two backends, both writing into the same ``data/audio/<lang>/`` layout:
 
 Because a Gemini TTS model is an LLM, it can in principle editorialize rather
 than read. Audit its output the same way the human corpora are audited
-(``scripts/audit_asr_groq.py --source tts``) before training on it.
+(``cargo run --release --manifest-path preprocess/Cargo.toml -- audit --sources tts``) before training on it.
 """
 
 import argparse

@@ -116,7 +116,7 @@ def write_tar(home, files):
 @pytest.fixture(params=["sky_train.yaml", "sky_train_merged.yaml", "sky_smoke.yaml"])
 def stage(request, tmp_path):
     yaml = (TRAIN / request.param).read_text()
-    assert "preprocess/Cargo.toml -- --skip-narrowing" in yaml
+    assert "preprocess/Cargo.toml -- pack" in yaml
     # Execute the actual YAML staging shell, stopping before any training.
     shell = textwrap.dedent(yaml.split("run: |\n", 1)[1].split('  echo "data langs:', 1)[0])
 

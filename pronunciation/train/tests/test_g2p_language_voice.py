@@ -5,20 +5,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import g2p_client
-from corpus_labels import language_for_record
-
-
-@pytest.mark.parametrize("rec, lang, expected", [
-    ({"source": "fleurs"}, "spa", "spa-419"),
-    ({"source": "tatoeba"}, "spa", "spa-ES"),
-    ({"espeak_voice": "pt"}, "por", "por-PT"),
-    ({"espeak_voice": "pt-br"}, "por", "por-BR"),
-    ({"variety": "latin_american"}, "spa", "spa-419"),
-    ({"g2p_language": "spa-419"}, "spa", "spa-419"),
-    ({}, "eng", "eng"),
-])
-def test_record_language(rec, lang, expected):
-    assert language_for_record(rec, lang) == expected
 
 
 @pytest.mark.parametrize("lang", ["spa-ES", "spa-419", "por-BR", "por-PT"])

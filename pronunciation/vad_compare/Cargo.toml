@@ -12,7 +12,3 @@ rayon = "1.10"
 [[bin]]
 name = "vad_compare"
 path = "src/bin/vad_compare.rs"
-
-[[bin]]
-name = "vad_compute"
-path = "src/bin/vad_compute.rs"

@@ -20,8 +20,7 @@ use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::path::Path;
 use tokio::fs;
 use tysm::chat_completions::ChatClient;
 
@@ -44,12 +43,6 @@ struct RhythmicGroupResponse {
     /// Include punctuation if it's attached to the word (e.g. "plage.").
     stressed_words: Vec<String>,
 }
-
-static CHAT_CLIENT: LazyLock<ChatClient> = LazyLock::new(|| {
-    ChatClient::from_env("gpt-5.4-nano")
-        .expect("OPENAI_API_KEY not set")
-        .with_cache_directory("./.cache")
-});
 
 const SYSTEM_PROMPT: &str = r#"You are a French prosody expert. Given a French sentence, identify which words end a rhythmic group (groupe rythmique).
 
@@ -114,28 +107,25 @@ Output: stressed_words = ["marais"]
 Input: "peine de mort"
 Output: stressed_words = ["mort"]"#;
 
-async fn get_stressed_words(sentence: &str) -> Result<Vec<String>> {
-    let response: RhythmicGroupResponse = CHAT_CLIENT
+async fn get_stressed_words(client: &ChatClient, sentence: &str) -> Result<Vec<String>> {
+    let response: RhythmicGroupResponse = client
         .chat_with_system_prompt(SYSTEM_PROMPT.to_string(), sentence.to_string())
         .await?;
     Ok(response.stressed_words)
 }
 
-async fn process_record(record: ManifestRecord) -> Result<StressOverride> {
-    let stressed_words = get_stressed_words(&record.sentence).await?;
+async fn process_record(client: &ChatClient, record: ManifestRecord) -> Result<StressOverride> {
+    let stressed_words = get_stressed_words(client, &record.sentence).await?;
     Ok(StressOverride {
         file: record.file,
         stressed_words,
     })
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let data_dir = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("../../data/audio"));
-
+pub async fn run(data_dir: &Path) -> Result<()> {
+    let cache = crate::root().join("train/relabel-french/.cache");
+    std::fs::create_dir_all(&cache)?;
+    let client = &ChatClient::from_env("gpt-5.4-nano")?.with_cache_directory(cache);
     let input = data_dir.join("fra/manifest.jsonl");
     let output = data_dir.join("fra/stress_overrides.jsonl");
 
@@ -158,11 +148,11 @@ async fn main() -> Result<()> {
             .unwrap(),
     );
 
-    let results: Vec<Result<StressOverride>> = stream::iter(records.into_iter())
+    let results: Vec<Result<StressOverride>> = stream::iter(records)
         .map(|rec| {
             let pb = pb.clone();
             async move {
-                let r = process_record(rec).await;
+                let r = process_record(client, rec).await;
                 pb.inc(1);
                 r
             }
@@ -172,24 +162,13 @@ async fn main() -> Result<()> {
         .await;
     pb.finish();
 
-    let mut output_text = String::new();
-    let mut ok = 0;
-    let mut errs = 0;
-    for r in results {
-        match r {
-            Ok(rec) => {
-                output_text.push_str(&serde_json::to_string(&rec)?);
-                output_text.push('\n');
-                ok += 1;
-            }
-            Err(e) => {
-                eprintln!("Error: {e:#}");
-                errs += 1;
-            }
-        }
-    }
-
-    fs::write(&output, output_text).await?;
-    println!("Wrote {ok} overrides ({errs} errors) to {}", output.display());
+    let rows = results
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::corpus::write(&output, &rows)?;
+    println!("Wrote {} overrides to {}", rows.len(), output.display());
     Ok(())
 }
