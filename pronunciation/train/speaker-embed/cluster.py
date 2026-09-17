@@ -15,7 +15,7 @@ We lean slightly over-segmented on purpose: merging two speakers corrupts
 within-speaker normalization, while splitting one is harmless.
 
 Silence handling: we cluster only clips present in the lang's phonemes.jsonl
-(the clean training set). preprocess.py drops silent/empty recordings there, so
+(the clean training set). lexide-preprocess drops silent/empty recordings there, so
 this automatically excludes them — without it, FLEURS-spa's 490 silent clips
 collapse into one degenerate "mega-cluster" (near-constant embedding).
 """

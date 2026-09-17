@@ -8,7 +8,7 @@ Tatoeba publishes:
 This script joins them, samples N sentences per language (default 10_000),
 fetches the audio from https://tatoeba.org/audio/download/<id>, converts
 each mp3 to 16 kHz mono WAV via ffmpeg, and appends entries to the
-existing per-language `manifest.jsonl`. Then `train/scripts/preprocess.py`
+existing per-language `manifest.jsonl`. Then the Rust preprocessing pipeline
 regenerates `phonemes.jsonl` from the combined manifest.
 
 File naming uses `tatoeba_<sentence_id>.wav`; that namespace doesn't
@@ -341,7 +341,7 @@ def main():
         if failed[:5]:
             print(f"  first failures: {failed[:5]}")
 
-    print("\nAll languages done. Next: re-run train/scripts/preprocess.py "
+    print("\nAll languages done. Next: run cargo run --release --manifest-path preprocess/Cargo.toml -- --skip-narrowing "
           "to regenerate phonemes.jsonl from the combined manifests.")
 
 

@@ -86,7 +86,7 @@ class StressDataset(Dataset):
             # plumbs through a CLI value.
             #
             # Pimsleur rows that lack the field are stale (preprocessed
-            # before the field was wired through preprocess.py). Drop them
+            # before the field was wired through lexide-preprocess). Drop them
             # rather than silently bypassing the filter — re-run preprocess
             # to get them back. Pimsleur is detected by either the `source`
             # field (added in this PR) OR the `pimsleur_` filename prefix

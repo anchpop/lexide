@@ -1,10 +1,5 @@
 """Corpus metadata and storage around g2p's language-independent response."""
 
-import json
-import sqlite3
-
-import g2p_client
-
 
 def _variety_for_record(rec: dict, lang: str) -> str:
     """Read dataset variety, including historical manifest voice metadata.
@@ -49,44 +44,6 @@ def language_for_record(rec: dict, lang: str) -> str:
     if variety != "default":
         raise ValueError(f"unsupported historical variety {variety!r} for {lang}")
     return lang
-
-
-class LabelCache:
-    """Cache raw labels and explicit refusals, never infrastructure failures.
-
-    Exact text, combined language and build identity bind each result to its
-    request. Recording-specific quality gates run after reading the cache.
-    """
-
-    def __init__(self, path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.build = g2p_client.identity()
-        self.db = sqlite3.connect(path)
-        self.db.execute("""CREATE TABLE IF NOT EXISTS pronunciations (
-            build TEXT, lang TEXT, text TEXT, response TEXT,
-            PRIMARY KEY (build, lang, text))""")
-        self.db.commit()
-
-    def close(self):
-        self.db.close()
-
-    def phonemize(self, text, lang):
-        key = (self.build, lang, text)
-        cached = self.db.execute(
-            "SELECT response FROM pronunciations WHERE build=? AND lang=? AND text=?",
-            key,
-        ).fetchone()
-        if cached:
-            result = json.loads(cached[0])
-        else:
-            try:
-                result = g2p_client.phonemize(text, lang)
-            except g2p_client.Unlabelable as error:
-                result = {"exclude_reason": error.reason}
-            with self.db:
-                self.db.execute("INSERT INTO pronunciations VALUES (?, ?, ?, ?)",
-                                (*key, json.dumps(result, ensure_ascii=False)))
-        return result
 
 
 def training_fields(out: dict, rec: dict) -> dict:

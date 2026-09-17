@@ -1,7 +1,7 @@
 # Phonemization through g2p
 
 Production corpus labeling uses one API for every language:
-`g2p_client.phonemize(text, language)`. g2p selects its implementation
+`g2p::phonemize(language, text)` from the Rust preprocessing driver. g2p selects its implementation
 and returns structured phonemes, stress, word spans, and any tone, pitch or
 syllable annotations. Lexide does not choose a provider or maintain a list
 of languages requiring a different labeling path.
@@ -13,12 +13,11 @@ recording's transcription-confidence gate to pitch labels. Preprocessing
 also applies acoustic accent exclusions and rhythmic-group stress overrides.
 Those gates concern recordings, not phonemization engines.
 
-## Cache and exclusions
+## Outputs and exclusions
 
-Preprocessing stores raw responses and explicit g2p refusals in each language's
-`.cache/g2p_labels.sqlite3`, keyed by exact text, combined language and g2p build
-identity. Sentence edits and build changes therefore cannot reuse stale labels.
-Infrastructure failures abort the run and are not cached as exclusions.
+Preprocessing computes labels directly on every run. It does not use a g2p
+response cache; old `.cache/g2p_labels.sqlite3` files are unused. Infrastructure
+failures fail the language and prevent dataset packing.
 
 Every recording retained by the license/silence filters is phonemized or has an
 explicit refusal. Refusals are written to `g2p_exclusions.jsonl` with the exact
@@ -27,7 +26,7 @@ sentence, combined language and build identity. Successful rows in `phonemes.jso
 not migrated until preprocessing is run. Resolved varieties are stored on
 generated label rows; preprocessing does not duplicate them back into manifests.
 
-ASR auditing calls the same API for both reference and recognized text. Pimsleur
+ASR auditing still calls g2p through its Python client for both reference and recognized text. Pimsleur
 ingestion saves audio and transcripts; labelability is decided in preprocessing
 for all languages, so an ingestion-time engine check cannot discard recordings.
 
@@ -40,5 +39,6 @@ Use `--langs` to select a corpus subset. Unsupported language requests
 fail at g2p rather than being silently skipped using a local capability table.
 The existing `--skip-narrowing` requirement for merged-token labels still applies.
 
-The Python transport still uses `g2p serve`; replacing that transport with a
-native Rust corpus pipeline is tracked separately in YAP-26.
+Run the Rust pipeline as documented in [preprocess/README.md](preprocess/README.md).
+The remaining standalone Python audits use `g2p serve`; removing that transport
+is tracked in YAP-26.

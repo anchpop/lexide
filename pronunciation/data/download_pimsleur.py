@@ -135,7 +135,7 @@ TARGET_LANGS = (
 # every language the archive has. Languages without an espeak voice are
 # included with espeak=None: audio + transcript still get saved to
 # manifest.jsonl so downstream code can decide what to do with them,
-# but they won't get a phonemes.jsonl entry (preprocess.py will skip).
+# but they won't get a phonemes.jsonl entry (lexide-preprocess will skip).
 PIMSLEUR_FOLDER_TO_LANG = {
     "Albanian": ("sqi", "sq"),
     "Arabic Eastern": ("ara", "ar"),
@@ -334,7 +334,7 @@ def process_lesson(mp3_path: Path, lesson_id: str,
 
     If espeak_lang is None, the lesson is still extracted (audio +
     Whisper text saved to manifest), but no phonemization happens.
-    preprocess.py also skips those languages.
+    lexide-preprocess also skips those languages.
     """
     try:
         audio = decode_mp3(mp3_path)
@@ -449,7 +449,7 @@ def process_lesson(mp3_path: Path, lesson_id: str,
             "sentence": text,
             "source": "pimsleur",
             # The espeak voice this clip's text was phonemized with at
-            # extraction time. Preserved per-row so preprocess.py can
+            # extraction time. Preserved per-row so lexide-preprocess can
             # match phoneme labels to dialect (e.g. Brazilian vs European
             # Portuguese, both stored under lang="por" but with different
             # espeak voices "pt-br" vs "pt"). Separate field from `voice`

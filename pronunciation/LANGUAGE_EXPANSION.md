@@ -129,41 +129,18 @@ URL even when the export's optional attribution field was empty.
 Kathbath rows likewise carry the official AI4Bharat dataset attribution. Across
 the four manifests there are no rows missing a license or attribution URL.
 
-### External backend contract
+### Production labeling
 
-`preprocess.py` accepts a repeatable argument such as:
+The Rust preprocessing driver calls g2p directly for every language, including
+Japanese, Mandarin, Korean and Thai. Engine selection and pronunciation rules
+belong to g2p. External provider sidecars and `--phoneme-backend` overrides are no
+longer preprocessing inputs. See [preprocess/README.md](preprocess/README.md) for
+commands and [PHONEME_BACKENDS.md](PHONEME_BACKENDS.md) for label adaptation.
 
-```sh
-python3 train/scripts/preprocess.py --langs jpn zho-hans \
-  --phoneme-backend jpn=/tmp/jpn-openjtalk.jsonl \
-  --phoneme-backend zho-hans=/tmp/zho-g2pw.jsonl
-```
-
-Each JSONL row is bound to one manifest record:
-
-```json
-{"file":"clip.wav","sentence_sha256":"…","phonemes":["n","i"],"stress":[0,1],"backend":"g2pw+pinyin-ipa","tone":[null,3]}
-```
-
-The sidecar must account for every non-silent manifest clip for that language.
-A row may carry an explicit `exclude_reason` instead of phonemes/stress; this
-is how known backend failures remain visible without entering training.
-Missing rows, duplicate files, stale sentence hashes, mismatched phoneme/stress
-lengths, and unknown IPA tokens are fatal. This deliberately prevents an
-unnoticed eSpeak fallback or a half-regenerated label set. eSpeak is also
-closed off at the entry point: for these four languages `preprocess.py`
-refreshes the chain itself — it runs the incremental G2P audit (free when the
-manifest is unchanged; the language's G2P tool is only imported for
-new/changed rows) and rebuilds the sidecar before labeling, so a plain
-preprocess run after new data lands is complete on its own. The
-`--phoneme-backend LANG=JSONL` flag remains only as an explicit override, and
-the `LANG_TO_ESPEAK` entries remain for audits and tooling. `tone` and
-`pitch_accent` are preserved as optional aligned metadata and consumed as
-factors of the same CTC symbol as phone and stress. Thai and Mandarin use
-distinct tone heads; Japanese uses a mora/nucleus accent head. A factor is
-omitted when the language or trustworthy label does not apply.
-Per-row licenses are propagated to `phonemes.jsonl`; CC BY-NC rows are excluded
-by default even when their labels pass every phonetic gate.
+Tone, pitch accent and stress remain aligned training factors; recording-level
+confidence and acoustic gates can withhold unreliable supervision. Explicit g2p
+refusals are written to `g2p_exclusions.jsonl`. Per-row licenses are propagated to
+`phonemes.jsonl`; CC BY-NC rows are excluded by default.
 
 ## Prosody design
 

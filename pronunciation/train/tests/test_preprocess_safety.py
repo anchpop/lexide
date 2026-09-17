@@ -18,13 +18,7 @@ import soundfile as sf
 
 TRAIN = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAIN / "scripts"))
-import preprocess
-import g2p_client
-
-
-@pytest.fixture(autouse=True)
-def label_build(monkeypatch):
-    monkeypatch.setattr(g2p_client, "identity", lambda: "test-build")
+import preprocess_support as preprocess
 
 
 @pytest.mark.parametrize("token", sorted(preprocess.MERGED_TOKEN_BASES) + ["tʃː", "tʃʲ", "dzː"])
@@ -96,15 +90,14 @@ def test_written_stress_provenance(tmp_path, monkeypatch, sentence, targets,
             "file": "a.wav", "stressed_words": targets,
         }) + "\n")
     sf.write(lang_dir / "a.wav", np.full(1600, 0.1, dtype=np.float32), 16000)
-    monkeypatch.setattr(g2p_client, "phonemize", lambda *args, **kwargs: {
-        "phonemes": ["u"], "stress": [2], "word_spans": [[0, 1]],
-    })
-    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"u"})
-    monkeypatch.setattr(sys, "argv", [
-        "preprocess.py", "--data-dir", str(tmp_path), "--skip-narrowing",
-        "--skip-vad", "--skip-speaker-cluster", "--no-pack",
-    ])
-    preprocess.main()
+    exchange = tmp_path / "labels.jsonl"
+    exchange.write_text(json.dumps({
+        "record": json.loads((lang_dir / "manifest.jsonl").read_text()),
+        "language": "fra", "labels": {
+            "phonemes": ["u"], "stress": [2], "word_spans": [[0, 1]],
+        },
+    }) + "\n")
+    preprocess.finalize(tmp_path, "fra", exchange, "test-build")
     row = json.loads((lang_dir / "phonemes.jsonl").read_text())
     assert row["stress_source"] == expected_source
     assert row["stress"] == expected_stress
@@ -123,7 +116,7 @@ def write_tar(home, files):
 @pytest.fixture(params=["sky_train.yaml", "sky_train_merged.yaml", "sky_smoke.yaml"])
 def stage(request, tmp_path):
     yaml = (TRAIN / request.param).read_text()
-    assert "preprocess.py --skip-narrowing" in yaml
+    assert "preprocess/Cargo.toml -- --skip-narrowing" in yaml
     # Execute the actual YAML staging shell, stopping before any training.
     shell = textwrap.dedent(yaml.split("run: |\n", 1)[1].split('  echo "data langs:', 1)[0])
 
@@ -210,13 +203,9 @@ def test_hindi_annotations_survive_preprocess(tmp_path, monkeypatch):
     lang_dir.mkdir()
     (lang_dir / "manifest.jsonl").write_text(json.dumps(rec) + "\n")
     sf.write(lang_dir / rec["file"], np.full(1600, 0.1, dtype=np.float32), 16000)
-    monkeypatch.setattr(g2p_client, "phonemize", lambda *args, **kwargs: response)
-    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: set(response["phonemes"]))
-    monkeypatch.setattr(sys, "argv", [
-        "preprocess.py", "--data-dir", str(tmp_path), "--skip-narrowing",
-        "--skip-vad", "--skip-speaker-cluster", "--no-pack",
-    ])
-    preprocess.main()
+    exchange = tmp_path / "labels.jsonl"
+    exchange.write_text(json.dumps({"record": rec, "language": "hin", "labels": response}) + "\n")
+    preprocess.finalize(tmp_path, "hin", exchange, "test-build")
     written = json.loads((lang_dir / "phonemes.jsonl").read_text())
     assert written["phonemes"] == response["phonemes"]
     assert written["stress"] == response["stress"]

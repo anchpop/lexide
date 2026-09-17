@@ -75,7 +75,7 @@ These are hard-won and override generic ML instincts. Violating them has burned 
 
 6. **The vocab is ours.** The xls-r-2b backbone never saw IPA; the CTC head is
    trained from scratch and the phoneme vocab is fully extensible
-   (`preprocess.VOCAB_EXTENSIONS`). Add real phonemes as real classes — don't collapse
+   (`training_vocabulary.VOCAB_EXTENSIONS`). Add real phonemes as real classes — don't collapse
    them into near-neighbors to fit an old vocab.
 
 7. **Stress is suprasegmental.** It has a separate factor head rather than inline
@@ -163,9 +163,10 @@ containers do not keep serving old code (only when a deployment is authorized):
    audit rather than trusting it — and beware that the surviving clips are a
    *selected* sample, so check for pattern bias before leaning on them. Nobody
    has measured the equivalent for Thai/Mandarin tone.
-2. **Preprocess** (`train/scripts/preprocess.py`): phonemize every sentence through g2p →
-   `phonemes.jsonl`; framewise VAD via the `vad_compute` Rust binary (`vad_compare/`).
-   Includes a silence guard, per-language phoneme remaps, and the vocab extensions.
+2. **Preprocess** (`preprocess/`, Rust): run `cargo run --release --manifest-path
+   preprocess/Cargo.toml -- --skip-narrowing` from pronunciation/. Rust calls g2p
+   directly and runs the Python audio/training-data stages, then the Rust VAD
+   binary, speaker clustering, and dataset packing. See `preprocess/README.md`.
 3. **Data-quality filters** → sidecar exclusion files the trainer reads:
    - `scripts/audit_asr_groq.py --source {fleurs,tatoeba,tts}`: Groq-Whisper transcribe +
      phoneme-PER vs the label → `train/<source>_asr_exclusions.jsonl`. Run it on
@@ -186,7 +187,7 @@ containers do not keep serving old code (only when a deployment is authorized):
    contextual-vs-acoustic nasal is an open A/B, decided by the minimal-pair eval.)
    `pitch_accent_audit.py` is the same shape for Japanese accent: `measure`
    (Modal align + local parselmouth F0) then `verdict` (thresholds → 
-   `train/jpn_pitch_accent_exclusions.jsonl`, which `preprocess.py` reads and
+   `train/jpn_pitch_accent_exclusions.jsonl`, which `lexide-preprocess` reads and
    uses to withhold the accent factor while keeping the phones).
 5. **Train** (`train/src/train_unified.py`) on SkyPilot/Modal GPUs; push to HF.
 6. **Eval**: the isolated minimal-pair set (gold standard) + held-out clips.
@@ -220,7 +221,7 @@ Pimsleur; else `voice` — Tatoeba/TTS), and only treat a clip as speaker-less i
 *both* are absent.
 
 **Speaker-embedding → clustering pipeline** (`train/speaker-embed/`; populates
-`speaker_cluster` for the `voice=null` sources). `preprocess.py` runs it
+`speaker_cluster` for the `voice=null` sources). `lexide-preprocess` runs it
 automatically per language after labels+VAD (`--skip-speaker-cluster` for
 offline runs); the standalone CLIs remain for tuning/review. Film rows'
 diarization-derived `speaker_cluster` is never touched by the rewrite:
@@ -239,7 +240,8 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
 ## Repo layout
 
 - `data/` — downloaders + `data/audio/<lang>/` (wavs, `manifest.jsonl`, `phonemes.jsonl`).
-- `train/` — `src/` (model, dataset, training), `scripts/preprocess.py`, the Rust
+- `preprocess/` — Rust pipeline driver; Python stages in `train/scripts/preprocess_support.py`.
+- `train/` — `src/` (model, dataset, training), the Rust
   `lang-filter`/`relabel-french`/`speaker-embed` crates, exclusion sidecars.
 - `espeak_audit/` — the acoustics-as-arbiter pipeline: `phonetics.py` (parselmouth
   measures), `modal_aligner.py` (Modal forced-align+measure), `measure_corpus.py`,
@@ -251,14 +253,13 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
 
 ## Conventions & gotchas
 
-- **G2P**: production labeling uses `g2p_client.phonemize(text, language)` uniformly for every language. g2p owns engine selection and
-  structured pronunciation annotations. `corpus_labels.py` handles corpus
-  metadata, response caching and training-schema adaptation; see
-  `PHONEME_BACKENDS.md`. The `g2p serve` transport remains until YAP-26.
-  Install with `cargo install --git https://github.com/anchpop/g2p --locked`
-  (cmake + C compiler), or set `G2P_BIN`. Some g2p implementations need `uv`;
-  that dependency is managed behind g2p's API, not by lexide dispatch.
-  Historical engine comparisons remain in `scripts/audit_g2p_backends.py`.
+- **G2P**: production preprocessing calls `g2p::phonemize(Language, text)` directly
+  from Rust. g2p owns engine selection and structured pronunciation annotations.
+  Python `corpus_labels.py` adapts recording metadata and training fields; there
+  is no preprocessing g2p response cache or g2p subprocess. Standalone audits
+  still use `g2p_client` and `g2p serve` pending YAP-26. Some g2p implementations
+  need `uv`; g2p manages that dependency behind its API. See `preprocess/README.md`
+  and `PHONEME_BACKENDS.md`.
   - Our patches live on branch **`french-phrase-stress-liaison`**
     (github.com/anchpop/espeak-ng): the French phrase-final stress/liaison
     work, the fr/de/ru modal-surface fixes, the Portuguese final-nasal
@@ -300,7 +301,7 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
     dropped), not by re-aligning, because the pinned aligner
     (`vad-clean@2926e06`) has the merged tokens only as untrained rows.
     **Until a model trained on the merged labels is pinned as the aligner, run
-    `preprocess.py --skip-narrowing`** and never re-run `measure_corpus.py` or
+    `lexide-preprocess --skip-narrowing`** and never re-run `measure_corpus.py` or
     acoustic narrowing on the merged tokens: `run_narrowing` is unconditional
     by default and its cache lookup keys on the exact new token sequence, so it
     would silently replace the carried-over file with an empty narrowing.

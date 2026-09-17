@@ -10,7 +10,7 @@
 //!    rhythmic-group-final words (verbatim) for each sentence
 //! 3. Writes pronunciation/data/audio/fra/stress_overrides.jsonl
 //!
-//! `train/scripts/preprocess.py` consumes the sidecar: when phonemizing
+//! The Rust preprocessing pipeline consumes the sidecar: when phonemizing
 //! French it phonemizes the whole sentence with espeak (preserving liaison),
 //! tracks word boundaries in the IPA output, then marks the last vowel of
 //! each LLM-flagged word as primary stress and zeroes everything else.
