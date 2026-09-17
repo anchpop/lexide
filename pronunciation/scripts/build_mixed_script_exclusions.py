@@ -34,10 +34,12 @@ HALLUCINATION = re.compile("ご視聴|チャンネル登録|ご清聴")
 MIXED_LANGS = ["hin", "jpn", "zho-hans"]
 
 
-def main() -> None:
+def main(data_dir: Path = REPO / "data" / "audio", output: Path = OUT) -> None:
     rows = []
     for lang in MIXED_LANGS:
-        man = REPO / "data" / "audio" / lang / "manifest.jsonl"
+        man = data_dir / lang / "manifest.jsonl"
+        if not man.exists():
+            continue
         for line in man.open():
             r = json.loads(line)
             reason = None
@@ -53,13 +55,14 @@ def main() -> None:
                     "reason": reason,
                     "expected": r["sentence"][:120],
                 })
-    with OUT.open("w") as f:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     by = {}
     for r in rows:
         by[(r["lang"], r["reason"])] = by.get((r["lang"], r["reason"]), 0) + 1
-    print(f"wrote {len(rows)} exclusions to {OUT}")
+    print(f"wrote {len(rows)} exclusions to {output}")
     for k, v in sorted(by.items()):
         print(f"  {k[0]:9} {k[1]:26} {v}")
 

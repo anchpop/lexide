@@ -31,9 +31,8 @@ LANG_CONFIG = {
     "kor": "ko_kr",
 }
 
-# FLEURS audio dialects that differ from the canonical espeak voice in
-# preprocess.LANG_TO_ESPEAK, written into each record's `espeak_voice` so
-# preprocess phonemizes with the right dialect. Spanish FLEURS is the es_419
+# Historical voice metadata identifies FLEURS dialects, so preprocessing
+# can select the matching g2p Language. Spanish FLEURS is the es_419
 # (Latin American) split — seseo/yeísmo — so the Castilian "es" voice would
 # mislabel c/z as θ. Langs not listed match the canonical voice (left as None).
 FLEURS_ESPEAK_VOICE = {

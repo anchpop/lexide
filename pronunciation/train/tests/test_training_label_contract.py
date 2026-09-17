@@ -14,7 +14,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = ROOT / "pronunciation/train/scripts"
 sys.path.insert(0, str(SCRIPTS))
-import preprocess
+import training_vocabulary as preprocess
 
 DEFINITION = ROOT / "tagging/lexide/data/training_labels.json"
 def test_cached_tokenizer_matches_contract():
@@ -92,8 +92,8 @@ def test_sky_mount_and_pronunciation_only_import(recipe, tmp_path):
     assert source == DEFINITION
     stage = tmp_path / "sky_workdir/train/scripts"
     stage.mkdir(parents=True)
-    script = stage / "preprocess.py"
-    shutil.copyfile(SCRIPTS / "preprocess.py", script)
+    script = stage / "training_vocabulary.py"
+    shutil.copyfile(SCRIPTS / "training_vocabulary.py", script)
     shutil.copyfile(source, stage / "training_labels.json")
     # No tagging tree exists in this layout, exactly as in the Sky workdir.
     module = import_staged(script)
@@ -102,9 +102,9 @@ def test_sky_mount_and_pronunciation_only_import(recipe, tmp_path):
 
 
 def test_full_checkout_prefers_canonical_over_stale_adjacent_copy(tmp_path):
-    script = tmp_path / "pronunciation/train/scripts/preprocess.py"
+    script = tmp_path / "pronunciation/train/scripts/training_vocabulary.py"
     script.parent.mkdir(parents=True)
-    shutil.copyfile(SCRIPTS / "preprocess.py", script)
+    shutil.copyfile(SCRIPTS / "training_vocabulary.py", script)
     canonical = tmp_path / "tagging/lexide/data/training_labels.json"
     canonical.parent.mkdir(parents=True)
     shutil.copyfile(DEFINITION, canonical)

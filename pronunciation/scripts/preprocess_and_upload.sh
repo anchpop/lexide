@@ -12,7 +12,7 @@
 #   4. lang-filter: flag clips whose transcript isn't entirely the target
 #      language (Pimsleur mixes in foreign example/instruction text that espeak
 #      then mislabels silently) → train/lang_exclusions.jsonl (training excludes)
-#   5. preprocess.py: per-lang phonemes.jsonl + vad.jsonl from the manifest
+#   5. lexide-preprocess: per-lang phonemes.jsonl + vad.jsonl from the manifest
 #      (phonemize via espeak-ng; framewise VAD via vad_compute Rust binary)
 #   6. narrow: measure_corpus.py (Modal align, cache-aware → no-op when phonemes
 #      unchanged) + narrow.py (acoustic nasal + English flap → phonemes_narrowed.jsonl,
@@ -91,10 +91,10 @@ echo "=== Step 4/7: Language-contamination filter (gpt-5.4-nano) ==="
 
 echo
 echo "=== Step 5/7: Phonemize + recompute VAD ==="
-# preprocess.py rebuilds vad.jsonl via vad_compute as it goes, keeping VAD
+# lexide-preprocess rebuilds vad.jsonl via vad_compute as it goes, keeping VAD
 # coverage in lockstep with phonemes. --skip-vad if you regenerated phonemes
 # for a label-only fix that didn't change which audio files are referenced.
-python3 train/scripts/preprocess.py
+cargo run --release --manifest-path preprocess/Cargo.toml --
 
 echo
 echo "=== Step 6/7: Narrow (acoustic nasal + English flap) ==="

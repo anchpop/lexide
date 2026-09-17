@@ -12,8 +12,8 @@ dialect-distinct courses with different espeak voices:
   spa: Castilian Spanish (es)        +  Latin American Spanish (es-419)
 
 Manifest rows produced by the old code don't record which voice was used
-at extraction time. preprocess.py therefore falls back to
-LANG_TO_ESPEAK[lang], which is a single voice per lang — and that
+at extraction time. lexide-preprocess therefore falls back to
+the default g2p language choice, which is a single voice per lang — and that
 silently mislabels every clip whose dialect differs from the canonical
 voice. Most acute: European Portuguese audio getting Brazilian phonemes.
 
@@ -48,7 +48,7 @@ def build_stem_to_voice(pimsleur_root: Path) -> dict[tuple[str, str], str]:
     that maps to two different espeak voices within the same lang, the
     actual dialect ambiguity case) are dropped entirely: we refuse to
     backfill when the source dialect can't be determined unambiguously,
-    so preprocess.py falls back to LANG_TO_ESPEAK[lang] for those rows
+    so lexide-preprocess falls back to the default g2p language choice for those rows
     rather than guessing.
     """
     voices_seen: dict[tuple[str, str], set[str]] = {}
@@ -74,7 +74,7 @@ def build_stem_to_voice(pimsleur_root: Path) -> dict[tuple[str, str], str]:
         print(f"WARNING: {len(ambiguous)} (lang, stem) pairs are ambiguous "
               f"(same stem mapped to >1 espeak voice within the same lang); "
               f"these rows will be left without espeak_voice and will fall "
-              f"back to LANG_TO_ESPEAK[lang] in preprocess.py.")
+              f"back to the default g2p language choice in lexide-preprocess.")
         for lang, stem, voices in ambiguous[:10]:
             print(f"  ({lang}) {stem}: {sorted(voices)}")
     return out
