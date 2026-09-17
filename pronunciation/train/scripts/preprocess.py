@@ -1,5 +1,4 @@
-"""Phonemize all sentences in the dataset with our espeak-ng fork (via the
-`g2p` binary, github.com/anchpop/g2p), keeping stress marks.
+"""Phonemize every dataset language through the shared g2p API.
 
 Writes a per-language JSONL with entries:
     {"file": "abc123.wav", "lang": "eng",
@@ -18,7 +17,6 @@ dataset.py.
 
 import argparse
 import ast
-import hashlib
 import json
 import re
 import os
@@ -27,6 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from functools import cache
 from pathlib import Path
 
@@ -34,6 +33,8 @@ import numpy as np
 import soundfile as sf
 from tqdm import tqdm
 
+# Historical voice metadata, used only by engine-comparison/replay tools.
+# Production labeling uses g2p language + variety requests.
 LANG_TO_ESPEAK = {
     # Languages we currently train on:
     "eng": "en-us",
@@ -79,9 +80,7 @@ LANG_TO_ESPEAK = {
     "urd": "ur",     # Urdu
     "vie": "vi",     # Vietnamese
     # No espeak voice (oji=Ojibwe, pus=Pashto, tgl=Tagalog, twi=Twi):
-    # preprocess.py skips these (lang not in LANG_TO_ESPEAK so the loop
-    # in main() filters them out). Audio + transcripts are still on disk
-    # in their manifest.jsonl.
+    # Audio + transcripts may still exist; g2p decides supported languages.
 }
 
 
@@ -109,38 +108,6 @@ def resolve_espeak_voice(rec: dict, lang: str) -> str:
                 return "es"
     return LANG_TO_ESPEAK[lang]
 
-
-def persist_espeak_voices(manifest_path: Path, records: list[dict],
-                          entries: list[dict]) -> int:
-    """Record voices only for successfully emitted eSpeak label rows.
-
-    Keep excluded manifest rows and all unrelated metadata intact. Called
-    after label validation/writing, never as a standalone corpus backfill:
-    changing old manifests alone would misrepresent existing labels.
-    """
-    voices = {r["file"]: r["espeak_voice"] for r in entries
-              if r.get("phoneme_backend") == "espeak"}
-    changed = 0
-    for rec in records:
-        voice = voices.get(rec["file"])
-        if voice is not None and rec.get("espeak_voice") != voice:
-            rec["espeak_voice"] = voice
-            changed += 1
-    if changed:
-        tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
-        with tmp.open("w") as out:
-            for rec in records:
-                out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        tmp.replace(manifest_path)
-    return changed
-
-
-# Languages whose training labels come from a qualified external backend
-# (LANGUAGE_EXPANSION.md; mirrors build_external_phoneme_sidecars.CONFIG).
-# Their LANG_TO_ESPEAK entries exist for audits and tooling, but main() never
-# emits phonemes.jsonl for them from eSpeak: it refreshes the G2P audit +
-# sidecar chain itself, so running preprocess is the whole label pipeline.
-BACKEND_REQUIRED_LANGS = {"tha", "zho-hans", "hin", "jpn", "kor"}
 
 STRESS_NONE = 0
 STRESS_PRIMARY = 1
@@ -357,81 +324,6 @@ def load_stress_overrides(path: Path) -> dict[str, list[str]]:
     return overrides
 
 
-def required_backend_provider(lang: str) -> str | None:
-    """The one G2P provider whose labels this language may be trained on.
-
-    `None` for languages labeled from eSpeak. For everything in
-    [`BACKEND_REQUIRED_LANGS`] this is authoritative: see
-    [`PHONEME_LABEL_SOURCES`] for why each language has one, and
-    `PHONEME_BACKENDS.md` for the full rationale.
-    """
-    if lang not in BACKEND_REQUIRED_LANGS:
-        return None
-    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
-    sys.path.insert(0, str(scripts_dir))
-    try:
-        import build_external_phoneme_sidecars as sidecars
-    finally:
-        sys.path.remove(str(scripts_dir))
-    return sidecars.CONFIG[lang][0]
-
-
-def load_phoneme_backend(path: Path, lang: str | None = None) -> dict[str, dict]:
-    """Load a complete external-transcription sidecar keyed by audio file.
-
-    Each JSONL row must contain `file` and `sentence_sha256`, plus either
-    `phonemes` and `stress`, or an explicit `exclude_reason`. Exclusions make
-    backend failures auditable while preserving the completeness invariant:
-    every manifest row has a deliberate disposition. The text hash prevents
-    a transcription generated for an older sentence from being silently
-    reused. Optional suprasegmental fields are preserved in output.
-
-    When `lang` is a backend-required language, every row's `backend` must
-    name that language's required provider. Without this check a
-    `--phoneme-backend jpn=…` override pointing at a sidecar built by some
-    *other* G2P engine trains Japanese on labels from the wrong phoneme
-    inventory, and nothing downstream can tell: the shapes are identical and
-    the hashes still match. Fail closed instead — a mislabeled corpus is
-    discovered epochs later, if at all.
-    """
-    expected_provider = required_backend_provider(lang) if lang else None
-    records: dict[str, dict] = {}
-    with open(path) as f:
-        for line_no, line in enumerate(f, 1):
-            if not line.strip():
-                continue
-            rec = json.loads(line)
-            required = {"file", "sentence_sha256"}
-            missing = required - rec.keys()
-            if missing:
-                raise ValueError(
-                    f"{path}:{line_no}: missing fields {sorted(missing)}"
-                )
-            if rec["file"] in records:
-                raise ValueError(f"{path}:{line_no}: duplicate file {rec['file']!r}")
-            excluded = bool(rec.get("exclude_reason"))
-            if excluded and ("phonemes" in rec or "stress" in rec):
-                raise ValueError(
-                    f"{path}:{line_no}: excluded row must not carry phonemes/stress"
-                )
-            if not excluded and not {"phonemes", "stress"} <= rec.keys():
-                raise ValueError(
-                    f"{path}:{line_no}: row needs phonemes/stress or exclude_reason"
-                )
-            if not excluded and len(rec["phonemes"]) != len(rec["stress"]):
-                raise ValueError(
-                    f"{path}:{line_no}: phonemes/stress length mismatch"
-                )
-            if expected_provider is not None and rec.get("backend") != expected_provider:
-                raise ValueError(
-                    f"{path}:{line_no}: {lang} must be labeled by "
-                    f"{expected_provider!r}, but this row says "
-                    f"{rec.get('backend')!r}. See PHONEME_BACKENDS.md."
-                )
-            records[rec["file"]] = rec
-    return records
-
-
 # g2p 0.4.0 compound classes (g2p/src/parse.rs vowel_unit/affricate);
 # vocabulary membership does not mean the old aligner's rows were trained.
 MERGED_TOKEN_BASES = frozenset({
@@ -544,32 +436,6 @@ def refresh_speaker_clusters(lang: str, data_dir: Path) -> None:
     cluster.cluster_language(lang, sources=SPEAKER_CLUSTERED_SOURCES, write=True)
 
 
-def ensure_backend_sidecar(lang: str, data_dir: Path) -> Path:
-    """Bring a backend-required language's label chain up to date, in place.
-
-    Runs the incremental G2P audit (free when the manifest is unchanged; the
-    language's G2P tool is only needed for new/changed rows) and rebuilds the
-    hash-bound sidecar from it. This keeps preprocess self-contained: new
-    Pimsleur/Tatoeba rows just work, with no separate steps to remember.
-    """
-    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
-    sys.path.insert(0, str(scripts_dir))
-    try:
-        import audit_g2p_backends
-        import build_external_phoneme_sidecars
-    finally:
-        sys.path.remove(str(scripts_dir))
-
-    provider, _ = build_external_phoneme_sidecars.CONFIG[lang]
-    lang_dir = data_dir / lang
-    audit_g2p_backends.run_audit(
-        lang, provider,
-        manifest=lang_dir / "manifest.jsonl",
-        output=lang_dir / f"g2p_audit_{provider}.jsonl",
-    )
-    return build_external_phoneme_sidecars.build_sidecar(lang, data_root=data_dir)
-
-
 def load_accent_exclusions(path: Path) -> dict[str, str]:
     """Clips whose measured F0 contradicts their citation pitch accent.
 
@@ -589,25 +455,8 @@ def load_accent_exclusions(path: Path) -> dict[str, str]:
     return excluded
 
 
-def parse_phoneme_backend_args(values: list[str] | None) -> dict[str, Path]:
-    """Parse repeatable LANG=JSONL command-line values."""
-    result: dict[str, Path] = {}
-    for value in values or []:
-        if "=" not in value:
-            raise ValueError(f"Expected LANG=JSONL for --phoneme-backend, got {value!r}")
-        lang, raw_path = value.split("=", 1)
-        if not lang or not raw_path:
-            raise ValueError(f"Expected LANG=JSONL for --phoneme-backend, got {value!r}")
-        if lang in result:
-            raise ValueError(f"Duplicate --phoneme-backend for {lang!r}")
-        result[lang] = Path(raw_path)
-    return result
-
-
-# All G2P (espeak languages and Hindi alike) goes through the `g2p` binary —
-# see scripts/g2p_client.py for the shared language + optional voice API.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from g2p_client import phonemize  # noqa: E402,F401  (re-exported)
+from corpus_labels import LabelCache, training_fields, variety_for_record  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -840,7 +689,7 @@ def refresh_mixed_script_exclusions() -> None:
 
 
 def _eligible_languages(
-    data_dir: Path, requested: list[str] | None, backend_paths: dict[str, Path],
+    data_dir: Path, requested: list[str] | None,
 ) -> list[str]:
     """Resolve processable language directories in deterministic order."""
     languages = []
@@ -850,8 +699,6 @@ def _eligible_languages(
         lang = lang_dir.name
         if requested and lang not in requested:
             continue
-        if lang not in LANG_TO_ESPEAK and lang not in backend_paths:
-            continue
         if not (lang_dir / "manifest.jsonl").exists():
             continue
         languages.append(lang)
@@ -859,7 +706,7 @@ def _eligible_languages(
 
 
 def _run_parallel_languages(
-    args: argparse.Namespace, languages: list[str], backend_paths: dict[str, Path],
+    args: argparse.Namespace, languages: list[str],
 ) -> None:
     """Run isolated per-language children, then pack once in the parent.
 
@@ -886,7 +733,6 @@ def _run_parallel_languages(
                 "--langs", lang,
                 "--jobs", "1",
                 "--no-pack",
-                "--espeak-batch-size", str(args.espeak_batch_size),
             ]
             if args.skip_vad:
                 cmd.append("--skip-vad")
@@ -896,10 +742,6 @@ def _run_parallel_languages(
                 cmd.append("--skip-narrowing")
             if args.allow_noncommercial:
                 cmd.append("--allow-noncommercial")
-            if lang in backend_paths:
-                cmd.extend([
-                    "--phoneme-backend", f"{lang}={backend_paths[lang]}",
-                ])
             process = subprocess.Popen(
                 cmd, stdout=log_file, stderr=subprocess.STDOUT,
             )
@@ -958,11 +800,6 @@ def main():
              "an isolated log and the parent packs the dataset exactly once.",
     )
     parser.add_argument(
-        "--espeak-batch-size", type=int, default=8,
-        help="Utterances per eSpeak --stdin invocation (default: 8; larger "
-             "batches are slower in eSpeak).",
-    )
-    parser.add_argument(
         "--no-pack", action="store_true", help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -971,24 +808,12 @@ def main():
              "remain in the auditable manifest/sidecars but are excluded from "
              "phonemes.jsonl so normal training output is commercially usable.",
     )
-    parser.add_argument(
-        "--phoneme-backend", action="append", default=None, metavar="LANG=JSONL",
-        help="Override the sidecar for LANG with a specific JSONL instead of "
-             "the auto-refreshed canonical one. Rarely needed: backend "
-             "languages regenerate their audit + sidecar automatically. Rows "
-             "must be hash-bound to the manifest sentence; missing/stale rows "
-             "fail closed.",
-    )
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
-    if args.espeak_batch_size < 1:
-        parser.error("--espeak-batch-size must be at least 1")
-    backend_paths = parse_phoneme_backend_args(args.phoneme_backend)
-
-    languages = _eligible_languages(args.data_dir, args.langs, backend_paths)
+    languages = _eligible_languages(args.data_dir, args.langs)
     if args.jobs > 1 and len(languages) > 1:
-        _run_parallel_languages(args, languages, backend_paths)
+        _run_parallel_languages(args, languages)
         if not args.no_pack:
             refresh_mixed_script_exclusions()
             build_dataset_tar(args.data_dir)
@@ -1000,9 +825,6 @@ def main():
             continue
         lang = lang_dir.name
         if args.langs and lang not in args.langs:
-            continue
-        if lang not in LANG_TO_ESPEAK and lang not in backend_paths:
-            print(f"Skipping {lang} (no espeak mapping or external backend)")
             continue
 
         manifest_path = lang_dir / "manifest.jsonl"
@@ -1019,29 +841,6 @@ def main():
         with open(manifest_path) as f:
             for line in f:
                 records.append(json.loads(line))
-
-        backend_path = backend_paths.get(lang)
-        if backend_path is None and lang in BACKEND_REQUIRED_LANGS:
-            # eSpeak is never the label source for these languages. Refresh
-            # the audit + sidecar chain right here so a preprocess run after
-            # new data lands is complete on its own.
-            backend_path = ensure_backend_sidecar(lang, args.data_dir)
-        backend_records = (
-            load_phoneme_backend(backend_path, lang) if backend_path else None
-        )
-        if backend_records is None and lang in BACKEND_REQUIRED_LANGS:
-            # Unreachable via the branch above, which always builds a sidecar.
-            # Asserted anyway: this is the invariant that keeps eSpeak's
-            # phoneme inventory out of a language it cannot represent, and it
-            # must not become false by some later refactor of that branch.
-            raise ValueError(
-                f"{lang} requires the {required_backend_provider(lang)!r} "
-                f"phoneme backend; refusing to fall back to eSpeak. "
-                f"See PHONEME_BACKENDS.md."
-            )
-        if backend_records is not None:
-            print(f"{lang}: using external phoneme backend {backend_path} "
-                  f"({len(backend_records)} rows)")
 
         # Acoustics get the last word on the accent factor: the sidecar's
         # accent is what the dictionary says, and this file lists the clips
@@ -1069,7 +868,7 @@ def main():
 
         override_applied = 0
         override_align_failures = 0
-        backend_excluded = 0
+        g2p_excluded = 0
         license_excluded = 0
         silent_dropped = 0
         prepared_records: list[dict] = []
@@ -1088,25 +887,6 @@ def main():
                     continue
                 prepared_records.append(rec)
 
-        phonemized_results: list[
-            tuple[list[str], list[int], list[tuple[int, int]]] | None
-        ]
-        if backend_records is None:
-            # One utterance per request: g2p phonemizes each row on its own,
-            # so espeak's clause-per-line output can never be misassigned
-            # across rows (the old stdin batching did exactly that on 2-6% of
-            # rows, caught 2026-08-24 by scripts/verify_espeak_build.py).
-            phonemized_results = []
-            for rec in tqdm(prepared_records, desc=f"{lang} phonemize"):
-                r = phonemize(rec["sentence"], lang,
-                              voice=resolve_espeak_voice(rec, lang))
-                phonemized_results.append(
-                    (r["phonemes"], r["stress"],
-                     [tuple(s) for s in r["word_spans"]])
-                )
-        else:
-            phonemized_results = [None] * len(prepared_records)
-
         # token -> (count, first-example sentence). Buffered per-lang so we
         # can report all unknowns and skip writing the file if any are found
         # — partial output would silently train on a vocab-mismatched corpus.
@@ -1115,30 +895,22 @@ def main():
         # check further down where these are collected.
         empty_phoneme_examples: list[str] = []
         entries: list[dict] = []
-        for rec, phonemized_result in zip(prepared_records, phonemized_results):
-            backend_rec = backend_records.get(rec["file"]) if backend_records is not None else None
-            if backend_records is not None:
-                if backend_rec is None:
-                    raise ValueError(
-                        f"{backend_path}: no transcription for {lang}/{rec['file']}"
-                    )
-                sentence_hash = hashlib.sha256(rec["sentence"].encode()).hexdigest()
-                if backend_rec["sentence_sha256"] != sentence_hash:
-                    raise ValueError(
-                        f"{backend_path}: stale transcription for {lang}/{rec['file']}"
-                    )
-                if backend_rec.get("exclude_reason"):
-                    backend_excluded += 1
-                    continue
-                phonemes = list(backend_rec["phonemes"])
-                stress = list(backend_rec["stress"])
-                word_spans = []
-            else:
-                if phonemized_result is None:
-                    raise RuntimeError("missing batched eSpeak result")
-                phonemes, stress, word_spans = phonemized_result
-            stress_source = "espeak"
-            if backend_rec is None and rec["file"] in stress_overrides:
+        dispositions = []
+        with closing(LabelCache(lang_dir / ".cache" / "g2p_labels.sqlite3")) as label_cache:
+            for rec in tqdm(prepared_records, desc=f"{lang} phonemize"):
+                variety = variety_for_record(rec, lang)
+                labels = label_cache.phonemize(rec["sentence"], lang, variety=variety)
+                dispositions.append((rec, variety, labels))
+            build_identity = label_cache.build
+        for rec, variety, labels in dispositions:
+            if labels.get("exclude_reason"):
+                g2p_excluded += 1
+                continue
+            fields = training_fields(labels, rec)
+            phonemes, stress = list(labels["phonemes"]), list(labels["stress"])
+            word_spans = [tuple(span) for span in labels["word_spans"]]
+            stress_source = fields.pop("stress_source")
+            if rec["file"] in stress_overrides:
                 new_stress = apply_stress_override(
                     phonemes, word_spans, rec["sentence"],
                     stress_overrides[rec["file"]],
@@ -1174,24 +946,15 @@ def main():
                 "stress_source": stress_source,
                 "source": rec.get("source"),
                 "license": rec.get("license"),
-                "phoneme_backend": (
-                    backend_rec.get("backend", "external")
-                    if backend_rec is not None else "espeak"
-                ),
+                "phoneme_backend": "g2p",
+                "g2p_identity": build_identity,
+                "variety": variety,
+                **fields,
             }
-            if backend_rec is None:
-                entry["espeak_voice"] = resolve_espeak_voice(rec, lang)
-            if backend_rec is not None:
-                for k in (
-                    "tone", "pitch_accent", "pitch_accent_exclude_reason",
-                    "syllables", "stress_source",
-                ):
-                    if k in backend_rec:
-                        entry[k] = backend_rec[k]
-                acoustic_reason = accent_exclusions.get(rec["file"])
-                if acoustic_reason is not None:
-                    entry.pop("pitch_accent", None)
-                    entry["pitch_accent_exclude_reason"] = acoustic_reason
+            acoustic_reason = accent_exclusions.get(rec["file"])
+            if acoustic_reason is not None:
+                entry.pop("pitch_accent", None)
+                entry["pitch_accent_exclude_reason"] = acoustic_reason
             # Propagate Whisper signal fields from the manifest. Only
             # present for Pimsleur (extracted with download_pimsleur.py).
             # FLEURS / Tatoeba rows lack these and pass them through as None.
@@ -1242,16 +1005,22 @@ def main():
             for entry in entries:
                 out.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-        voice_updates = persist_espeak_voices(manifest_path, records, entries)
-        if voice_updates:
-            print(f"{lang}: recorded {voice_updates} selected eSpeak voices in manifest")
+        exclusion_path = lang_dir / "g2p_exclusions.jsonl"
+        with exclusion_path.open("w") as out:
+            for rec, variety, labels in dispositions:
+                if labels.get("exclude_reason"):
+                    out.write(json.dumps({
+                        "file": rec["file"], "sentence": rec["sentence"],
+                        "variety": variety, "g2p_identity": build_identity,
+                        "exclude_reason": labels["exclude_reason"],
+                    }, ensure_ascii=False) + "\n")
         print(f"{lang}: wrote {len(entries)} entries to {phonemes_path}")
         if silent_dropped:
             print(f"{lang}: dropped {silent_dropped} silent/empty recording(s) "
                   f"(peak < {SILENCE_PEAK_FLOOR:g}, e.g. corrupt FLEURS source audio)")
-        if backend_excluded:
-            print(f"{lang}: external backend explicitly excluded "
-                  f"{backend_excluded} recording(s)")
+        if g2p_excluded:
+            print(f"{lang}: g2p explicitly excluded "
+                  f"{g2p_excluded} recording(s)")
         if license_excluded:
             print(f"{lang}: excluded {license_excluded} noncommercial recording(s); "
                   f"pass --allow-noncommercial only for an explicitly NC run")

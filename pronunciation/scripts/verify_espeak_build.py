@@ -43,7 +43,7 @@ for env_file in (REPO / ".env",):
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip('"'))
 
-from preprocess import LANG_TO_ESPEAK, phonemize, validate_phonemes  # noqa: E402
+from preprocess import LANG_TO_ESPEAK, validate_phonemes  # noqa: E402
 
 
 def sample(rows: list, n: int) -> list:
@@ -92,7 +92,8 @@ def main() -> int:
         for r in picked:
             voice = (r.get("espeak_voice") or voice_by_file.get(r["file"])
                      or LANG_TO_ESPEAK[lang])
-            result = phonemize(r["sentence"], lang, voice=voice)
+            from g2p_client import request
+            result = request(text=r["sentence"], lang=lang, voice=voice)
             ph, st = result["phonemes"], result["stress"]
             ph, st, _unknown = validate_phonemes(ph, st, lang)
             if ph != r["phonemes"]:

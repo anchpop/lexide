@@ -36,7 +36,9 @@ def wire(value):
 def shadow(rec, lang):
     voice = preprocess.resolve_espeak_voice(rec, lang)
     before = g2p_client.request(text=rec["sentence"], voice=voice)
-    after = g2p_client.phonemize(rec["sentence"], lang, voice=voice)
+    after = g2p_client.phonemize(
+        rec["sentence"], lang, variety=preprocess.variety_for_record(rec, lang),
+    )
     fields = ("phonemes", "stress", "word_spans")
     assert {k: after[k] for k in fields} == {k: before[k] for k in fields}
     # The old wrapper and the live preprocess loop must hand downstream
@@ -104,7 +106,7 @@ def test_real_manifest_voice_only_shadow(live_g2p, lang):
         print(f"{lang} {key}: {len(picked)}/{counts[key]} rows byte-identical")
 
 
-@pytest.mark.parametrize("kwargs", [{}, {"voice": "es-419"}, {"canon": "legacy"}])
+@pytest.mark.parametrize("kwargs", [{}, {"variety": "latin_american"}])
 def test_structured_call_forwards_all_fields(monkeypatch, kwargs):
     response = {"phonemes": [], "stress": [], "word_spans": [],
                 "tone": [None], "pitch": [], "syllables": []}
@@ -116,8 +118,7 @@ def test_structured_call_forwards_all_fields(monkeypatch, kwargs):
 
     monkeypatch.setattr(g2p_client, "request", request)
     assert g2p_client.phonemize("text", "spa", **kwargs) is response
-    assert calls == [{"text": "text", "lang": "spa", "voice": None,
-                      "canon": "current", **kwargs}]
+    assert calls == [{"text": "text", "lang": "spa", "variety": "default", **kwargs}]
 
 
 def test_refusal_propagates_unchanged(monkeypatch):
@@ -128,24 +129,5 @@ def test_refusal_propagates_unchanged(monkeypatch):
 
     monkeypatch.setattr(g2p_client, "request", request)
     with pytest.raises(g2p_client.Unlabelable) as caught:
-        g2p_client.phonemize("text", "spa", voice="es")
+        g2p_client.phonemize("text", "spa", variety="european")
     assert caught.value is error
-
-
-@pytest.mark.parametrize("voice, expected", [(None, "es"), ("", "es"), ("es-419", "es-419")])
-def test_asr_language_and_voice(monkeypatch, voice, expected):
-    def phonemize(text, lang, *, voice):
-        assert (text, lang, voice) == ("cinco", "spa", expected)
-        return {"phonemes": ["s"]}
-
-    monkeypatch.setattr(audit_asr_groq, "phonemize", phonemize)
-    assert audit_asr_groq.label_phonemes("cinco", "spa", voice) == ["s"]
-
-
-@pytest.mark.parametrize("voice", [None, ""])
-def test_asr_unmapped_language_still_empty(monkeypatch, voice):
-    def phonemize(*args, **kwargs):
-        pytest.fail("unmapped language must not reach g2p")
-
-    monkeypatch.setattr(audit_asr_groq, "phonemize", phonemize)
-    assert audit_asr_groq.label_phonemes("text", "not-a-language", voice) == []

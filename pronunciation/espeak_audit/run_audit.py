@@ -79,7 +79,8 @@ def select_clips(lang: str, voice: str, source: str, n: int,
 def prep_clip(d: dict, lang: str, vocab: dict) -> dict:
     """espeak fork -> phonemes/ids + audio samples for one clip."""
     voice = LANG_TO_VOICE[lang]
-    result = preprocess.phonemize(d["sentence"], lang, voice=voice)
+    from g2p_client import request
+    result = request(text=d["sentence"], lang=lang, voice=voice)
     phonemes, stress = result["phonemes"], result["stress"]
     word_spans = [tuple(s) for s in result["word_spans"]]
     word_of = [-1] * len(phonemes)

@@ -12,6 +12,12 @@ import soundfile as sf
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import preprocess
+import g2p_client
+
+
+@pytest.fixture(autouse=True)
+def label_build(monkeypatch):
+    monkeypatch.setattr(g2p_client, "identity", lambda: "test-build")
 
 
 @pytest.mark.parametrize("lang, expected", [
@@ -57,35 +63,8 @@ def test_dialect_resolution(rec, lang, expected):
     assert rec == before
 
 
-def test_persist_only_emitted_espeak_rows(tmp_path):
-    path = tmp_path / "manifest.jsonl"
-    rows = [
-        {"file": "a.wav", "voice": "es-US-Chirp3-HD-Kore", "speaker_cluster": "keep"},
-        {"file": "b.wav", "espeak_voice": "es"},
-        {"file": "excluded.wav", "espeak_voice": None},
-        {"file": "external.wav"},
-    ]
-    entries = [
-        {"file": "a.wav", "phoneme_backend": "espeak", "espeak_voice": "es-419"},
-        {"file": "b.wav", "phoneme_backend": "espeak", "espeak_voice": "es"},
-        {"file": "external.wav", "phoneme_backend": "external"},
-    ]
-    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    assert preprocess.persist_espeak_voices(path, rows, entries) == 1
-    written = [json.loads(s) for s in path.read_text().splitlines()]
-    assert written == rows
-    assert written[0]["espeak_voice"] == "es-419"
-    assert written[0]["speaker_cluster"] == "keep"
-    assert written[2]["espeak_voice"] is None
-    assert "espeak_voice" not in written[3]
-    mtime = path.stat().st_mtime_ns
-    assert preprocess.persist_espeak_voices(path, rows, entries) == 0
-    assert path.stat().st_mtime_ns == mtime
-    assert not path.with_suffix(".jsonl.tmp").exists()
-
-
 @pytest.mark.parametrize("valid", [True, False])
-def test_preprocess_persists_voice_only_after_valid_labels(tmp_path, monkeypatch, valid):
+def test_preprocess_records_variety_only_with_valid_labels(tmp_path, monkeypatch, valid):
     lang_dir = tmp_path / "spa"
     lang_dir.mkdir()
     manifest = lang_dir / "manifest.jsonl"
@@ -96,12 +75,12 @@ def test_preprocess_persists_voice_only_after_valid_labels(tmp_path, monkeypatch
     sf.write(lang_dir / "a.wav", np.full(1600, 0.1, dtype=np.float32), 16000)
     calls = []
 
-    def phonemize(text, lang, *, voice):
-        calls.append((text, lang, voice))
+    def phonemize(text, lang, *, variety):
+        calls.append((text, lang, variety))
         return {"phonemes": ["s"] if valid else ["INVALID"],
                 "stress": [0], "word_spans": [[0, 1]]}
 
-    monkeypatch.setattr(preprocess, "phonemize", phonemize)
+    monkeypatch.setattr(g2p_client, "phonemize", phonemize)
     monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"s"})
     monkeypatch.setattr(preprocess, "run_narrowing", lambda *args: None)
     monkeypatch.setattr(sys, "argv", ["preprocess.py", "--data-dir", str(tmp_path),
@@ -109,16 +88,16 @@ def test_preprocess_persists_voice_only_after_valid_labels(tmp_path, monkeypatch
                                      "--skip-speaker-cluster", "--no-pack"])
     if valid:
         preprocess.main()
-        assert json.loads(manifest.read_text()) == {**row, "espeak_voice": "es-419"}
+        assert manifest.read_text() == original
         label = json.loads((lang_dir / "phonemes.jsonl").read_text())
-        assert label["espeak_voice"] == "es-419"
+        assert label["variety"] == "latin_american"
         assert label["phonemes"] == ["s"]
     else:
         with pytest.raises(SystemExit, match="1"):
             preprocess.main()
         assert manifest.read_text() == original
         assert not (lang_dir / "phonemes.jsonl").exists()
-    assert calls == [("cinco", "spa", "es-419")]
+    assert calls == [("cinco", "spa", "latin_american")]
 
 
 def test_verifier_prefers_label_voice_and_keeps_legacy_fallback(tmp_path, monkeypatch):
@@ -142,13 +121,13 @@ def test_verifier_prefers_label_voice_and_keeps_legacy_fallback(tmp_path, monkey
     ]))
     voices = []
 
-    def phonemize(text, lang, *, voice):
+    def request(*, text, lang, voice):
         assert lang == "spa"
         voices.append(voice)
         return {"phonemes": ["s"], "stress": [0], "word_spans": [[0, 1]]}
 
     monkeypatch.setattr(verifier, "REPO", tmp_path)
-    monkeypatch.setattr(verifier, "phonemize", phonemize)
+    monkeypatch.setattr(g2p_client, "request", request)
     monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"s"})
     monkeypatch.setattr(sys, "argv", ["verify_espeak_build.py", "--langs", "spa"])
     assert verifier.main() == 0
@@ -166,7 +145,7 @@ def test_skip_narrowing_preserves_existing_labels(tmp_path, monkeypatch, skip):
     narrowed = lang_dir / "phonemes_narrowed.jsonl"
     narrowed.write_text("preserve existing narrowed labels\n")
     calls = []
-    monkeypatch.setattr(preprocess, "phonemize", lambda *args, **kwargs: {
+    monkeypatch.setattr(g2p_client, "phonemize", lambda *args, **kwargs: {
         "phonemes": ["h"], "stress": [0], "word_spans": [[0, 1]],
     })
     monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"h"})
@@ -202,7 +181,7 @@ def test_parallel_children_propagate_skip_narrowing(tmp_path, monkeypatch, skip)
     args = Namespace(jobs=2, data_dir=tmp_path, espeak_batch_size=8,
                      skip_vad=True, skip_speaker_cluster=True,
                      skip_narrowing=skip, allow_noncommercial=False)
-    preprocess._run_parallel_languages(args, ["eng", "deu"], {})
+    preprocess._run_parallel_languages(args, ["eng", "deu"])
     assert len(commands) == 2
     assert all(("--skip-narrowing" in command) == skip for command in commands)
     assert all("--no-pack" in command for command in commands)
