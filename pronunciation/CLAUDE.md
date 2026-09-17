@@ -270,13 +270,6 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
     installed binary (and yap's `rev`) at it — each consumer pins its own
     g2p rev, so yap can stay on the build matching the deployed model while
     this repo relabels with a newer one. `g2p identity` names the build.
-  - **Verify any new g2p/espeak build before regenerating labels.** Run
-    `scripts/py-linux.sh scripts/verify_espeak_build.py` — it re-phonemizes a
-    sample of every language's `phonemes.jsonl` through the whole path
-    (`phonemize()` then the vocab/remap step, each row's own `espeak_voice`)
-    and requires byte-identical output. Testing raw espeak output instead will
-    "find" differences that are really `LANG_PHONEME_REMAP` (ita `ɪ ʊ`→`i u`,
-    fra length marks) and the FLEURS per-clip dialect voices.
   - **The on-disk corpus labels reproduce at tag `corpus-v1-labels`
     (= `4dd31042`), NOT at the current branch tip.** To patch or reproduce
     existing labels, build the tag. The rebase (2026-08-23) pulled in

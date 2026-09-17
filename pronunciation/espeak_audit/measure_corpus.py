@@ -1,7 +1,6 @@
 """At-scale align+measure over the full corpus (parallel on Modal, model-keyed cache).
 
-Generalizes run_audit.py (a per-source sampler) into a full-corpus pass for the
-narrowing detectors:
+Runs a full-corpus pass for the narrowing detectors:
 
   - selects every clip bearing a TARGET token — an oral vowel before a coda nasal
     (nasalization detector) or intervocalic /t,d/ (flapping detector);

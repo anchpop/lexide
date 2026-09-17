@@ -124,15 +124,20 @@ compare to textbook Hz.
 3. **Allosaurus** is worth keeping as an independent nasality/segment cross-check,
    not as ground truth.
 
-## Reproduce
+## Historical reproduction
+
+The per-source sampling driver used for this report has been retired. To
+reproduce its original sampling pass, use the repository revision associated
+with this report. Current full-corpus measurements use `measure_corpus.py`
+with stored training labels; they do not reproduce this report's sample.
+
+Existing outputs in `out/` can still be analyzed:
+
 ```bash
 PY=/opt/homebrew/Caskroom/miniconda/base/bin/python3
-# Modal apps already deployed: espeak-audit-aligner (vad-clean), allosaurus
-$PY espeak_audit/run_audit.py --lang eng --voice CK --source tatoeba --n 60
 $PY espeak_audit/analyze.py --tag eng_tatoeba_CK --lang eng
 $PY espeak_audit/allosaurus_check.py eng_tatoeba_CK eng eng 25
 $PY espeak_audit/plots.py
 ```
 Files: `phonetics.py` (DSP arbiter), `modal_aligner.py` (Modal/T4 aligner),
-`run_audit.py` (espeak→align→measure driver), `analyze.py` (detectors),
-`allosaurus_check.py` (independent check), `plots.py`. Outputs in `out/`.
+`analyze.py` (detectors), `allosaurus_check.py` (independent check), `plots.py`.
