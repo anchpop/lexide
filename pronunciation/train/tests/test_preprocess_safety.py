@@ -19,6 +19,12 @@ import soundfile as sf
 TRAIN = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TRAIN / "scripts"))
 import preprocess
+import g2p_client
+
+
+@pytest.fixture(autouse=True)
+def label_build(monkeypatch):
+    monkeypatch.setattr(g2p_client, "identity", lambda: "test-build")
 
 
 @pytest.mark.parametrize("token", sorted(preprocess.MERGED_TOKEN_BASES) + ["tʃː", "tʃʲ", "dzː"])
@@ -69,13 +75,13 @@ def test_new_aligner_pin_not_blocked(tmp_path, model, revision):
 
 
 @pytest.mark.parametrize("sentence, targets, expected_source, expected_stress", [
-    ("bonjour", None, "espeak", [2]),
+    ("bonjour", None, "g2p", [2]),
     ("bonjour", ["bonjour"], "override", [1]),
-    ("bonjour ami", ["ami"], "espeak", [2]),
-    ("bonjour", ["absent"], "espeak", [2]),
-    ("bonjour", ["bonjour", "absent"], "espeak", [2]),
-    ("bonjour", ["bonjour", "bonjour"], "espeak", [2]),
-    ("bonjour", [""], "espeak", [2]),
+    ("bonjour ami", ["ami"], "g2p", [2]),
+    ("bonjour", ["absent"], "g2p", [2]),
+    ("bonjour", ["bonjour", "absent"], "g2p", [2]),
+    ("bonjour", ["bonjour", "bonjour"], "g2p", [2]),
+    ("bonjour", [""], "g2p", [2]),
     ("bonjour", [], "override", [0]),
 ])
 def test_written_stress_provenance(tmp_path, monkeypatch, sentence, targets,
@@ -90,7 +96,7 @@ def test_written_stress_provenance(tmp_path, monkeypatch, sentence, targets,
             "file": "a.wav", "stressed_words": targets,
         }) + "\n")
     sf.write(lang_dir / "a.wav", np.full(1600, 0.1, dtype=np.float32), 16000)
-    monkeypatch.setattr(preprocess, "phonemize", lambda *args, **kwargs: {
+    monkeypatch.setattr(g2p_client, "phonemize", lambda *args, **kwargs: {
         "phonemes": ["u"], "stress": [2], "word_spans": [[0, 1]],
     })
     monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"u"})
@@ -195,72 +201,27 @@ def test_short_old_pin_and_decorated_merges_refuse(tmp_path, token):
         preprocess.guard_narrowing_labels("eng", tmp_path, aligner)
 
 
-@pytest.mark.parametrize("provider_source", [None, "surface-weight-rules"])
-def test_external_backend_provenance_preserved(tmp_path, monkeypatch, provider_source):
-    lang_dir = tmp_path / "fra"
-    lang_dir.mkdir()
-    (lang_dir / "manifest.jsonl").write_text(json.dumps({
-        "file": "a.wav", "sentence": "bonjour", "source": "tts",
-    }) + "\n")
-    (lang_dir / "stress_overrides.jsonl").write_text(json.dumps({
-        "file": "a.wav", "stressed_words": ["bonjour"],
-    }) + "\n")
-    backend = tmp_path / "backend.jsonl"
-    row = {"file": "a.wav", "sentence_sha256": hashlib.sha256(b"bonjour").hexdigest(),
-           "phonemes": ["u"], "stress": [2], "backend": "external"}
-    if provider_source is not None:
-        row["stress_source"] = provider_source
-    backend.write_text(json.dumps(row) + "\n")
-    sf.write(lang_dir / "a.wav", np.full(1600, 0.1, dtype=np.float32), 16000)
-    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"u"})
-    monkeypatch.setattr(sys, "argv", [
-        "preprocess.py", "--data-dir", str(tmp_path), "--skip-narrowing",
-        "--skip-vad", "--skip-speaker-cluster", "--no-pack",
-        "--phoneme-backend", f"fra={backend}",
-    ])
-    preprocess.main()
-    written = json.loads((lang_dir / "phonemes.jsonl").read_text())
-    assert written["stress_source"] == (provider_source or "espeak")
-    assert written["stress"] == [2]
-
-
-def test_hindi_flat_sidecar_annotations_survive_preprocess(tmp_path, monkeypatch):
-    import audit_g2p_backends
-    import build_external_phoneme_sidecars
-
-    cases = build_external_phoneme_sidecars.read_jsonl(
-        TRAIN / "tests/fixtures/hindi_flat/cases.jsonl"
-    )
+def test_hindi_annotations_survive_preprocess(tmp_path, monkeypatch):
+    cases = [json.loads(line) for line in
+             (TRAIN / "tests/fixtures/hindi_flat/cases.jsonl").read_text().splitlines()]
     case = next(c for c in cases if c["record"]["file"] == "synthetic-multiword.wav")
-    rec = case["record"]
+    rec, response = case["record"], case["response"]
     lang_dir = tmp_path / "hin"
     lang_dir.mkdir()
     (lang_dir / "manifest.jsonl").write_text(json.dumps(rec) + "\n")
-    (lang_dir / "g2p_audit_g2p-hin.jsonl").write_text(json.dumps({
-        "file": rec["file"],
-        "sentence_sha256": hashlib.sha256(rec["sentence"].encode()).hexdigest(),
-        "provider_schema": audit_g2p_backends.PROVIDER_SCHEMA["g2p-hin"],
-        "output": case["response"],
-    }) + "\n")
-    backend = build_external_phoneme_sidecars.build_sidecar("hin", data_root=tmp_path)
-    expected = json.loads(backend.read_text())
     sf.write(lang_dir / rec["file"], np.full(1600, 0.1, dtype=np.float32), 16000)
-    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: set(expected["phonemes"]))
-
-    def no_espeak(*args, **kwargs):
-        raise AssertionError("Hindi must not fall back to eSpeak")
-
-    monkeypatch.setattr(preprocess, "phonemize", no_espeak)
+    monkeypatch.setattr(g2p_client, "phonemize", lambda *args, **kwargs: response)
+    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: set(response["phonemes"]))
     monkeypatch.setattr(sys, "argv", [
         "preprocess.py", "--data-dir", str(tmp_path), "--skip-narrowing",
         "--skip-vad", "--skip-speaker-cluster", "--no-pack",
-        "--phoneme-backend", f"hin={backend}",
     ])
     preprocess.main()
     written = json.loads((lang_dir / "phonemes.jsonl").read_text())
-    for key in ("phonemes", "stress", "syllables", "stress_source"):
-        assert written[key] == expected[key]
-    assert "word_spans" not in written
+    assert written["phonemes"] == response["phonemes"]
+    assert written["stress"] == response["stress"]
+    assert len(written["syllables"]) == len(response["syllables"])
+    assert written["stress_source"] == "g2p"
 
 
 def test_failed_promotion_restores_old_dataset(tmp_path, stage, monkeypatch):

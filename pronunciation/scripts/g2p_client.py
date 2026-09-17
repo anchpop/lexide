@@ -96,10 +96,6 @@ def request(**req) -> dict:
     return result
 
 
-def phonemize(text: str, lang: str, voice: str | None = None, canon: str = "current") -> dict:
-    """Phonemize one utterance in `lang`, optionally overriding the default
-    voice/dialect (espeak languages only). Returns the full structured
-    response: phonemes, stress, word_spans, plus any factors the language
-    provides (tone/pitch/syllables). `canon` only affects Hindi.
-    """
-    return request(text=text, lang=lang, voice=voice, canon=canon)
+def phonemize(text: str, lang: str, *, variety: str = "default") -> dict:
+    """Return g2p's structured labels; engine selection belongs to g2p."""
+    return request(text=text, lang=lang, variety=variety)

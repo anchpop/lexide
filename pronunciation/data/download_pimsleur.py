@@ -11,7 +11,7 @@ Pipeline per MP3:
   3. For each speech segment of reasonable duration:
      - Send to Cloudflare Workers AI Whisper (no `language` param →
        it detects).
-     - If detected_language == target, phonemize via espeak-ng, save
+     - If detected_language == target, save
        a WAV with filename `pimsleur_<lesson_id>_<seg_idx>.wav`, and
        append to manifest with source="pimsleur".
 
@@ -23,7 +23,6 @@ Requires:
   - CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN in env or .env file
     (token needs the account-scoped Workers AI permission)
   - ffmpeg on PATH
-  - espeak-ng on PATH
 """
 
 from __future__ import annotations
@@ -51,10 +50,8 @@ import soundfile as sf
 import torch
 from tqdm import tqdm
 
-# Reuse the same espeak phonemizer the training pipeline uses.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT / "train" / "scripts"))
-from preprocess import phonemize, LANG_TO_ESPEAK, BACKEND_REQUIRED_LANGS  # noqa: E402
+
 
 CF_AI_BASE = "https://api.cloudflare.com/client/v4/accounts"
 
@@ -414,17 +411,8 @@ def process_lesson(mp3_path: Path, lesson_id: str,
         text = whisper["text"]
         if not text or len(text) < 2:
             continue
-        # The espeak gate only screens for text espeak can label, so it does
-        # not apply to backend languages (eSpeak is never their label source;
-        # their G2P sidecars do their own explicit excluding). It would also
-        # wrongly drop every segment on machines without the espeak fork.
-        if espeak_lang is not None and target_lang not in BACKEND_REQUIRED_LANGS:
-            try:
-                phonemes = phonemize(text, target_lang, voice=espeak_lang)["phonemes"]
-            except Exception:
-                continue
-            if not phonemes:
-                continue
+        # Save the recording and transcript. The unified preprocessing pass
+        # obtains labels and records explicit g2p exclusions for every language.
 
         fname = f"pimsleur_{lesson_id}_{seg_idx:04d}.wav"
         dest = audio_dir / fname

@@ -163,7 +163,7 @@ containers do not keep serving old code (only when a deployment is authorized):
    audit rather than trusting it — and beware that the surviving clips are a
    *selected* sample, so check for pattern bias before leaning on them. Nobody
    has measured the equivalent for Thai/Mandarin tone.
-2. **Preprocess** (`train/scripts/preprocess.py`): espeak-phonemize every sentence →
+2. **Preprocess** (`train/scripts/preprocess.py`): phonemize every sentence through g2p →
    `phonemes.jsonl`; framewise VAD via the `vad_compute` Rust binary (`vad_compare/`).
    Includes a silence guard, per-language phoneme remaps, and the vocab extensions.
 3. **Data-quality filters** → sidecar exclusion files the trainer reads:
@@ -251,27 +251,15 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
 
 ## Conventions & gotchas
 
-- **G2P**: all phonemization goes through the **`g2p`** binary
-  (github.com/anchpop/g2p, shared with yap): our espeak-ng fork compiled in
-  as a static library with its data embedded, the model-label tokenizer
-  (`src/parse.rs` there — the former `_parse_espeak_ipa`), and the **Hindi
-  chain** (`src/hindi` — the former `schwa-stress-hin`, ported, plus the
-  2026-09-02 audit corrections; see PHONEME_BACKENDS.md). Install with
-  `cargo install --git https://github.com/anchpop/g2p --locked` (needs cmake +
-  a C compiler), or point `G2P_BIN` at a checkout's `target/release/g2p`.
-  `scripts/g2p_client.py` talks to one long-lived `g2p serve` process;
-  `preprocess.phonemize()` re-exports its espeak entry point, and the Hindi
-  sidecar provider is `g2p-hin` (reached via
-  `g2p_client.request(lang="hin", canon=...)`; `legacy` is byte-identical to
-  the Python chain, `current` has the corrections). There
-  is no espeak binary or data path to configure any more, and no
-  `ESPEAK_NG_BIN`/`ESPEAK_NG_DATA_PATH`. **Never install mainline espeak.**
-  Mandarin (`g2p-zho`, g2pM ported, identical labels), Japanese
-  (`g2p-jpn`, OpenJTalk via jpreprocess, 99.2% identical), and Thai
-  (`g2p-tha`: the crate embeds a pinned `uv` project running vachana-thai,
-  identical labels — **`uv` must be on PATH** for Thai) also come from the
-  crate; see PHONEME_BACKENDS.md. The Python originals stay in
-  `scripts/audit_g2p_backends.py` for reproduction only.
+- **G2P**: production labeling uses `g2p_client.phonemize(text, lang,
+  variety=...)` uniformly for every language. g2p owns engine selection and
+  structured pronunciation annotations. `corpus_labels.py` handles corpus
+  metadata, response caching and training-schema adaptation; see
+  `PHONEME_BACKENDS.md`. The `g2p serve` transport remains until YAP-26.
+  Install with `cargo install --git https://github.com/anchpop/g2p --locked`
+  (cmake + C compiler), or set `G2P_BIN`. Some g2p implementations need `uv`;
+  that dependency is managed behind g2p's API, not by lexide dispatch.
+  Historical engine comparisons remain in `scripts/audit_g2p_backends.py`.
   - Our patches live on branch **`french-phrase-stress-liaison`**
     (github.com/anchpop/espeak-ng): the French phrase-final stress/liaison
     work, the fr/de/ru modal-surface fixes, the Portuguese final-nasal

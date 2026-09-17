@@ -55,28 +55,13 @@ from tqdm import tqdm
 # maintaining a second language/backend mapping for the audit.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "train" / "scripts"))
-from preprocess import BACKEND_REQUIRED_LANGS, phonemize, LANG_TO_ESPEAK  # noqa: E402
-from audit_g2p_backends import PROVIDERS  # noqa: E402
-from build_external_phoneme_sidecars import CONFIG  # noqa: E402
-from g2p_client import Unlabelable  # noqa: E402
+from g2p_client import phonemize, Unlabelable  # noqa: E402
+from corpus_labels import variety_for_record  # noqa: E402
 
 
-def label_phonemes(text: str, lang: str, espeak_voice: str | None = None) -> list[str]:
-    """Use the training label chain, preserving per-clip voices for eSpeak."""
-    if lang in BACKEND_REQUIRED_LANGS:
-        # CONFIG is also required_backend_provider's authority. PROVIDERS routes
-        # tha/hin/zho-hans/jpn/kor to _g2p_tha/_g2p_hin (current canon)/
-        # _g2p_zho/_g2p_jpn/_g2p_kor; CONFIG converts their output to label tokens.
-        provider, convert = CONFIG[lang]
-        output = PROVIDERS[provider][1](text)
-        labels = convert({"sentence": text, "file": "<asr>"}, {"output": output})
-        if reason := labels.get("exclude_reason"):
-            raise Unlabelable(reason, f"{provider}: {reason}")
-        return labels["phonemes"]
-    voice = espeak_voice or LANG_TO_ESPEAK.get(lang)
-    if not voice:
-        return []
-    return phonemize(text, lang, voice=voice)["phonemes"]
+def label_phonemes(text: str, lang: str, variety: str = "default") -> list[str]:
+    """Use the same g2p contract as corpus preprocessing."""
+    return phonemize(text, lang, variety=variety)["phonemes"]
 
 GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 LANG_TO_ISO639_1 = {
@@ -162,9 +147,8 @@ def load_records(root: Path, langs: set[str] | None, source: str) -> list[dict[s
                     "lang": lang,
                     "source": source,
                     "voice": rec.get("voice"),
-                    # FLEURS dialects (e.g. spa = es-419) carry a per-clip espeak
-                    # voice; fall back to the canonical voice for the language.
-                    "espeak_voice": rec.get("espeak_voice"),
+                    # Keep dataset variety when comparing reference and ASR text.
+                    "variety": variety_for_record(rec, lang),
                     "expected": rec["sentence"],
                 })
     return records
@@ -264,7 +248,7 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
             if score_phonemes:
                 try:
                     expected_phonemes = label_phonemes(
-                        record["expected"], record["lang"], record.get("espeak_voice"),
+                        record["expected"], record["lang"], variety_for_record(record, record["lang"]),
                     )
                 except Unlabelable:
                     # No valid reference: omit PER so the loader uses CER/WER.
@@ -272,7 +256,7 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
                 else:
                     try:
                         actual_phonemes = label_phonemes(
-                            text, record["lang"], record.get("espeak_voice"),
+                            text, record["lang"], variety_for_record(record, record["lang"]),
                         )
                     except Exception:
                         # An unlabelable Whisper output against a valid reference
@@ -350,12 +334,9 @@ def rescore(path: Path, langs: set[str] | None) -> None:
     print(f"Rescoring {len(todo)} of {len(records)} records in {path}")
     changed = 0
     for rec in tqdm(todo, desc="rescore"):
-        if (rec["lang"] not in BACKEND_REQUIRED_LANGS
-                and not (rec.get("espeak_voice") or LANG_TO_ESPEAK.get(rec["lang"]))):
-            continue
         try:
             expected_phonemes = label_phonemes(
-                rec["expected"], rec["lang"], rec.get("espeak_voice"),
+                rec["expected"], rec["lang"], variety_for_record(rec, rec["lang"]),
             )
         except Unlabelable:
             changed += any(key in rec for key in ("per", "expected_phonemes", "actual_phonemes"))
@@ -364,7 +345,7 @@ def rescore(path: Path, langs: set[str] | None) -> None:
             continue
         try:
             actual_phonemes = label_phonemes(
-                rec["whisper_text"], rec["lang"], rec.get("espeak_voice"),
+                rec["whisper_text"], rec["lang"], variety_for_record(rec, rec["lang"]),
             )
         except Exception:
             actual_phonemes = []

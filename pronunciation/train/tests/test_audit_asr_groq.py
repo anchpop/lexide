@@ -10,71 +10,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import audit_asr_groq as audit
-import build_external_phoneme_sidecars as sidecars
-from preprocess import required_backend_provider
-
-
-@pytest.mark.parametrize("lang,provider", [
-    ("tha", "g2p-tha"), ("hin", "g2p-hin"), ("zho-hans", "g2p-zho"),
-    ("jpn", "g2p-jpn"), ("kor", "g2p-kor"),
-])
-def test_required_provider_and_conversion(monkeypatch, lang, provider):
-    assert audit.CONFIG is sidecars.CONFIG
-    assert required_backend_provider(lang) == provider == audit.CONFIG[lang][0]
-    assert audit.CONFIG[lang][1].func is sidecars.g2p_labels
-    assert audit.PROVIDERS[provider][0] == lang
-    generate = Mock(return_value={"native": "output"})
-    convert = Mock(return_value={"phonemes": ["production", "tokens"]})
-    monkeypatch.setitem(audit.PROVIDERS, provider, (lang, generate))
-    monkeypatch.setitem(audit.CONFIG, lang, (provider, convert))
-    monkeypatch.setattr(audit, "phonemize", Mock(side_effect=AssertionError("eSpeak")))
-    assert audit.label_phonemes("text", lang, "ignored-voice") == ["production", "tokens"]
-    generate.assert_called_once_with("text")
-    convert.assert_called_once_with(
-        {"sentence": "text", "file": "<asr>"}, {"output": {"native": "output"}},
-    )
-
-
-def test_hindi_current_canon_and_flat_labels(monkeypatch):
-    import g2p_client
-
-    request = Mock(return_value={
-        "phonemes": ["k", "ɛ", "k", "ɛ"], "stress": [0, 1, 0, 1],
-        "word_spans": [[0, 2], [2, 4]], "syllables": [
-            {"start": 0, "end": 2, "nucleus": 1, "moras": 2, "stressed": True},
-            {"start": 2, "end": 4, "nucleus": 3, "moras": 2, "stressed": True},
-        ],
-    })
-    monkeypatch.setattr(g2p_client, "request", request)
-    monkeypatch.setattr(g2p_client, "identity", lambda: "test-build")
-    assert audit.label_phonemes("कह", "hin") == ["k", "ɛ", "k", "ɛ"]
-    request.assert_called_once_with(text="कह", lang="hin", canon="current")
-
-
-@pytest.mark.parametrize("lang", sorted(audit.BACKEND_REQUIRED_LANGS))
-def test_provider_exclusions_are_unlabelable(monkeypatch, lang):
-    provider = audit.CONFIG[lang][0]
-    monkeypatch.setitem(audit.PROVIDERS, provider, (
-        lang, lambda text: {"exclude_reason": "unsupported_text"},
-    ))
-    with pytest.raises(audit.Unlabelable) as exc:
-        audit.label_phonemes("bad", lang)
-    assert exc.value.reason == "unsupported_text"
-
-
-@pytest.mark.parametrize("lang,voice,wanted", [
-    ("eng", None, "en-us"), ("eng", "", "en-us"),
-    ("spa", "es-419", "es-419"), ("por", "pt", "pt"),
-    ("unknown", "en-gb", "en-gb"), ("unknown", None, None),
-])
-def test_espeak_voice_and_unknown_language(monkeypatch, lang, voice, wanted):
-    phonemize = Mock(return_value={"phonemes": ["a"], "stress": [0], "word_spans": []})
+@pytest.mark.parametrize("lang", ["eng", "tha", "hin", "zho-hans", "jpn", "kor"])
+def test_labels_use_unified_api(monkeypatch, lang):
+    phonemize = Mock(return_value={"phonemes": ["a"]})
     monkeypatch.setattr(audit, "phonemize", phonemize)
-    assert audit.label_phonemes("text", lang, voice) == (["a"] if wanted else [])
-    if wanted:
-        phonemize.assert_called_once_with("text", lang, voice=wanted)
-    else:
-        phonemize.assert_not_called()
+    assert audit.label_phonemes("text", lang) == ["a"]
+    phonemize.assert_called_once_with("text", lang, variety="default")
 
 
 def run_live(tmp_path, monkeypatch, label, *, text_only=False, lang="hin"):
@@ -89,7 +30,7 @@ def run_live(tmp_path, monkeypatch, label, *, text_only=False, lang="hin"):
                            timeout=1, text_only=text_only)
     return audit.transcribe({
         "path": str(path), "file": path.name, "lang": lang,
-        "expected": "expected", "espeak_voice": "per-clip",
+        "expected": "expected", "variety": "default",
         "per": 99, "expected_phonemes": ["stale"], "actual_phonemes": ["stale"],
     }, args, "fake-key")
 
@@ -115,7 +56,7 @@ def test_live_passes_language_and_voice_for_both_texts(tmp_path, monkeypatch):
     result = run_live(tmp_path, monkeypatch, label, lang="eng")
     assert result["per"] == 0
     assert [call.args for call in label.call_args_list] == [
-        ("expected", "eng", "per-clip"), ("actual", "eng", "per-clip"),
+        ("expected", "eng", "default"), ("actual", "eng", "default"),
     ]
 
 
@@ -140,16 +81,6 @@ def test_rescore_dispositions_and_scope(tmp_path, monkeypatch):
     assert result[3:] == rows[3:]
     assert not path.with_suffix(".jsonl.tmp").exists()
 
-
-def test_rescore_unknown_language_is_untouched(tmp_path, monkeypatch):
-    row = dict(ok=True, lang="unknown", expected="text", whisper_text="text", per=0.5)
-    path = tmp_path / "audit.jsonl"
-    path.write_text(json.dumps(row) + "\n")
-    label = Mock(side_effect=AssertionError("must skip"))
-    monkeypatch.setattr(audit, "label_phonemes", label)
-    audit.rescore(path, None)
-    assert json.loads(path.read_text()) == row
-    label.assert_not_called()
 
 
 def test_loader_uses_cer_and_wer_only_without_per(tmp_path):
