@@ -1,8 +1,5 @@
 {
   "provenance": {
-    "preprocess_revision": "c4c8647",
-    "preprocess_sha256": "7e57434e3463e831e21581662947a3a209d5ba0d9786fa665bc6799dbc6a2566",
-    "validator_sha256": "5fa3b8d2da19ee96327635af6b7e1f06b20531a926e541e3b94261e96b3154bd",
     "tokenizer_name": "facebook/wav2vec2-xlsr-53-espeak-cv-ft",
     "tokenizer_revision": "2c733782da5604684829819a5eb744c193fe9398",
     "raw_vocab_sha256": "d732ab2456c0c017930001dc9af0b41b3b93d25b2eb9740bf9d925508d7d87d0",
@@ -13,14 +10,8 @@
     ]
   },
   "rationale": {
-    "scope": "Deterministic preprocessing only: exact language remap, then global remap, then vocabulary acceptance before blacklist dropping. No Unicode normalization. Unknowns are errors at the Python caller. This does not apply acoustic narrowing, French rhythmic stress sidecars, prosody masks, or reconstruct historical checkpoint labels.",
+    "scope": "Model vocabulary only. g2p owns pronunciation and segmentation. Acoustic narrowing, recording-specific stress and prosody supervision remain separate training steps.",
     "base_vocab": "Frozen tokenizer get_vocab(), not raw vocab.json: the tokenizer adds |. All specials remain accepted because the old validator accepted them. Unknown phones must not silently become <unk> during training.",
-    "token_remap": "Danish eSpeak sometimes emits Greek epsilon ε (U+03B5) for IPA ɛ (U+025B). Correct the encoding bug before the vocabulary check.",
-    "lang_phoneme_remap": {
-      "eng": "eSpeak assigns ɐ/ᵻ lexically without a reliable acoustic distinction; ᵻ means ɪ or ə, not a recoverable third vowel quality. Merge only these exact reduced vowels to ə; preserve KIT ɪ and diacritic-bearing variants. This is preprocessing canon, not a raw g2p change.",
-      "fra": "The four-source Tatoeba/TTS/FLEURS/Pimsleur audit found English and length-marked vowels leaking through loanwords and letter names. French has no phonemic vowel length in these labels: strip the listed lengths and map English-only qualities to their nearest French vowels, matching the nativized audio.",
-      "ita": "Italian has no lax high vowels. Fork 4dd31042 emits i/u directly for Italian, but English code-switch spans still emit genuine ɪ/ʊ. Retain their exact remap because the corpus normalized them to i/u. Do not broaden it to length-marked variants."
-    },
     "vocab_extensions": {
       "principle": "The xls-r-2b backbone was pretrained on raw audio, not IPA; new CTC rows learn from scratch. Keep real contrasts instead of collapsing them to fit the borrowed inventory.",
       "deu": "ʏ distinguishes short ü from long y; eSpeak 1.52.0 conflated them, corrected by fork 9cbfd389.",
@@ -36,8 +27,7 @@
       "jpn": "OpenJTalk surface phones include devoiced high vowels ɯ̥ᵝ/i̥, palatalized ɾʲ, and geminates derived from moraic closure cl.",
       "hin": "The schwa-classifier inventory preserves contrastive aspiration, breathy voice, retroflexion and dental place, including tied affricates. Surface-weight rules supply stress separately.",
       "kor": "g2pk2 supplies tense k͈/t͈/p͈/tɕ͈/s͈. The lenis/aspirated/tense contrast is phonemic (달/탈/딸); lenis and aspirated tokens already exist."
-    },
-    "token_blacklist": "Drop leaked punctuation (parentheses, quote, ^, Danish ?) and syllable separators . and malformed .ː, since labels are phone-level. hʲ came from a malformed mixed Korean/English Pimsleur clip, not a phoneme of our languages; drop it rather than invent a class. Anything else outside the accepted vocabulary is an error, never an implicit drop."
+    }
   },
   "base_vocab": [
     "1",
@@ -512,44 +502,5 @@
     "ʌ̃",
     "ʏ",
     "ʒː"
-  ],
-  "token_remap": {
-    "ε": "ɛ"
-  },
-  "lang_phoneme_remap": {
-    "eng": {
-      "ɐ": "ə",
-      "ᵻ": "ə"
-    },
-    "fra": {
-      "uː": "u",
-      "ɔː": "ɔ",
-      "ɑː": "a",
-      "oː": "o",
-      "aː": "a",
-      "iː": "i",
-      "yː": "y",
-      "eː": "e",
-      "ɜː": "œ",
-      "ɪ": "i",
-      "ʊ": "u",
-      "ʌ": "a",
-      "ɒ": "ɔ",
-      "ɐ": "a"
-    },
-    "ita": {
-      "ɪ": "i",
-      "ʊ": "u"
-    }
-  },
-  "token_blacklist": [
-    "\"",
-    "(",
-    ")",
-    ".",
-    ".ː",
-    "?",
-    "^",
-    "hʲ"
   ]
 }

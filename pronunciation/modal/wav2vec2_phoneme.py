@@ -67,8 +67,8 @@ MODEL_REVISION = os.environ.get(
 # Training-label provenance is an assertion about a checkpoint, not something
 # recoverable from its weights. MUST update this declaration with each revision.
 # The old production checkpoint predates this declaration: unknown, not merged.
-# Source-label evidence only: excludes TOKEN_REMAP, LANG_PHONEME_REMAP,
-# narrowing selection, French stress overrides, and accent supervision masks.
+# Source-label evidence only: older checkpoints also used downstream remaps
+# now owned by g2p. Excludes narrowing, stress overrides and supervision masks.
 TRAINED_AGAINST_G2P = os.environ.get("WAV2VEC2_TRAINED_AGAINST_G2P") or {
     ("anchpop/lexide-pronunciation-merged", "95f4b185676627ffe566e8760349ebb42cc55dde"):
         "g2p/0.4.0 espeak-ng/aa907af78d5665d8 thai/ad66331eca29d4ea korean/9e4bc6b854f6a903",

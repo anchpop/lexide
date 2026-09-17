@@ -19,24 +19,10 @@ def label_build(monkeypatch):
     monkeypatch.setattr(g2p_client, "identity", lambda: "test-build")
 
 
-@pytest.mark.parametrize("lang, expected", [
-    ("eng", ["ə", "ə", "ɪ", "ɐ̯", "ɐː", "ᵻː"]),
-    ("deu", ["ɐ", "ᵻ", "ɪ", "ɐ̯", "ɐː", "ᵻː"]),
-    (None, ["ɐ", "ᵻ", "ɪ", "ɐ̯", "ɐː", "ᵻː"]),
-])
-def test_english_remap_is_exact_and_language_scoped(monkeypatch, lang, expected):
-    phones = ["ɐ", "ᵻ", "ɪ", "ɐ̯", "ɐː", "ᵻː"]
-    stress = [0, 1, 2, 0, 1, 0]
-    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: set(phones) | {"ə"})
-    assert preprocess.validate_phonemes(phones, stress, lang) == (expected, stress, set())
-    assert phones[:3] == ["ɐ", "ᵻ", "ɪ"]
-
-
-def test_remap_precedes_vocab_check(monkeypatch):
-    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"ə", "ɪ"})
-    assert preprocess.validate_phonemes(["ɐ", "ᵻ", "ɪ"], [0, 1, 2], "eng") == (
-        ["ə", "ə", "ɪ"], [0, 1, 2], set(),
-    )
+def test_vocabulary_check_does_not_rewrite_pronunciation():
+    phones = ["ə", "ɪ", "hʲ", "."]
+    assert preprocess.unknown_phonemes(phones) == {"hʲ", "."}
+    assert phones == ["ə", "ɪ", "hʲ", "."]
 
 
 @pytest.mark.parametrize("rec, lang, expected", [

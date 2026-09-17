@@ -180,8 +180,9 @@ identity. An operator may explicitly declare `WAV2VEC2_TRAINED_AGAINST_G2P` for 
 new checkpoint. **Update this assertion whenever the checkpoint changes.**
 
 This field is source-label provenance evidence, **not a full compatibility
-guarantee**: it does not cover `TOKEN_REMAP`, per-language `LANG_PHONEME_REMAP`,
-narrowing selection, French stress overrides, or accent supervision masks.
+guarantee**: older checkpoints also used downstream pronunciation remaps
+(now owned by g2p). It does not cover narrowing selection, French stress
+overrides, or accent supervision masks.
 No compatibility/refusal policy is implemented here.
 
 Rust `FrameMatrixPayload` dispatches explicitly on version: an absent version

@@ -152,33 +152,6 @@ pub(super) fn decode_values(
 }
 
 impl FrameMatrix {
-    /// Check the target labels' source against the declared training g2p identity.
-    ///
-    /// Requires an exact, nonempty match. Missing provenance is unknown, not
-    /// compatible. This check is opt-in: legacy cached matrices still decode and
-    /// score, so consumers requiring known provenance must call it and explicitly
-    /// handle the error before scoring.
-    ///
-    /// This compares only source provenance, not the full training-label contract:
-    /// a match does not establish voice/canon, postprocessing, acoustic narrowing,
-    /// French stress sidecars, supervision masks or historical label equivalence.
-    pub fn check_labels_from(&self, g2p_identity: &str) -> Result<()> {
-        if g2p_identity.is_empty() {
-            bail!("empty supplied g2p label source identity");
-        }
-        let expected = self
-            .trained_against_g2p
-            .as_deref()
-            .context("frame matrix training-label source identity is unknown")?;
-        if expected.is_empty() {
-            bail!("empty declared training-label source identity");
-        }
-        if expected != g2p_identity {
-            bail!("training-label source mismatch: expected {expected:?}, actual {g2p_identity:?}");
-        }
-        Ok(())
-    }
-
     pub fn decode(payload: &FrameMatrixPayload) -> Result<Self> {
         let payload = match payload {
             FrameMatrixPayload::Legacy(legacy) => return Self::decode_legacy(legacy),

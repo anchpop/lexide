@@ -131,7 +131,7 @@ OVERRIDE_LANGS = {"fra"}
 
 
 def _load_training_labels() -> dict:
-    """Read the definition embedded by lexide's Rust pronunciation API.
+    """Read the model vocabulary used by the training pipeline.
 
     Sky stages only pronunciation/, with an explicit file_mount of the canonical
     artifact beside this script. A full checkout reads it from the Rust crate.
@@ -143,16 +143,10 @@ def _load_training_labels() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-# The JSON preserves the table rationale and the exact borrowed get_vocab()
-# inventory (including specials and the tokenizer-added |), not just vocab.json.
-# This is only deterministic remap/filter: acoustic narrowing, French rhythmic
-# stress sidecars and prosody supervision masks remain separate pipeline steps.
+# Frozen model vocabulary; g2p owns pronunciation and phone segmentation.
 _TRAINING_LABELS = _load_training_labels()
 TOKENIZER_NAME = _TRAINING_LABELS["provenance"]["tokenizer_name"]
-TOKEN_REMAP: dict[str, str] = _TRAINING_LABELS["token_remap"]
-LANG_PHONEME_REMAP: dict[str, dict[str, str]] = _TRAINING_LABELS["lang_phoneme_remap"]
 VOCAB_EXTENSIONS: set[str] = set(_TRAINING_LABELS["vocab_extensions"])
-TOKEN_BLACKLIST: set[str] = set(_TRAINING_LABELS["token_blacklist"])
 
 
 @cache
@@ -174,40 +168,9 @@ def check_training_label_vocab(model_name: str, vocab: set[str]) -> None:
         )
 
 
-def validate_phonemes(
-    phonemes: list[str], stress: list[int], lang: str | None = None,
-) -> tuple[list[str], list[int], set[str]]:
-    """Filter phonemes against the tokenizer vocab + TOKEN_BLACKLIST.
-
-    Returns (kept_phonemes, kept_stress, unknown_tokens).
-      - Tokens in the vocab pass through unchanged.
-      - Tokens in TOKEN_BLACKLIST are dropped (along with their stress entry).
-      - Tokens in neither are also dropped, AND collected into unknown_tokens.
-
-    Caller MUST treat a non-empty unknown_tokens as an error and surface the
-    finding (sentence + token) so a decision can be made — extend the
-    blacklist (intentional drop), extend the phonemize() parser (treat as
-    diacritic / boundary / etc.), or change the upstream text.
-    """
-    vocab = _tokenizer_vocab() | VOCAB_EXTENSIONS
-    lang_remap = LANG_PHONEME_REMAP.get(lang or "", {})
-    out_phonemes: list[str] = []
-    out_stress: list[int] = []
-    unknowns: set[str] = set()
-    for p, s in zip(phonemes, stress):
-        # Apply remaps first (language-conditional frontend fixes, then global
-        # encoding-bug fixes) — these aren't "unknown", they're known-wrong and
-        # we're correcting them before the vocab check.
-        p = lang_remap.get(p, p)
-        p = TOKEN_REMAP.get(p, p)
-        if p in vocab:
-            out_phonemes.append(p)
-            out_stress.append(s)
-        elif p in TOKEN_BLACKLIST:
-            continue
-        else:
-            unknowns.add(p)
-    return out_phonemes, out_stress, unknowns
+def unknown_phonemes(phonemes: list[str]) -> set[str]:
+    """Report unsupported model labels without rewriting g2p's output."""
+    return set(phonemes) - (_tokenizer_vocab() | VOCAB_EXTENSIONS)
 
 
 # Split text into atomic word tokens that align with espeak's IPA word spans.
@@ -921,7 +884,7 @@ def main():
                     override_applied += 1
                 else:
                     override_align_failures += 1
-            phonemes, stress, unknowns = validate_phonemes(phonemes, stress, lang)
+            unknowns = unknown_phonemes(phonemes)
             for u in unknowns:
                 if u in unknown_examples:
                     count, example = unknown_examples[u]
@@ -984,19 +947,15 @@ def main():
         if unknown_examples:
             total = sum(c for c, _ in unknown_examples.values())
             print(f"\nERROR: {lang} has {len(unknown_examples)} unknown token "
-                  f"type(s) ({total:,} occurrences) not in vocab "
-                  f"and not in TOKEN_BLACKLIST:")
+                  f"type(s) ({total:,} occurrences) outside the model vocabulary:")
             for tok, (count, example) in sorted(
                 unknown_examples.items(), key=lambda kv: -kv[1][0]
             ):
                 codepoints = " ".join(f"U+{ord(c):04X}" for c in tok)
                 print(f"  {tok!r:>10}  {count:>6,}x   {codepoints}")
                 print(f"             example sentence: {example[:100]!r}")
-            print(f"\n  Fix by either:")
-            print(f"    (a) adding the token to TOKEN_BLACKLIST (intentional drop), or")
-            print(f"    (b) extending phonemize() to fold it into the preceding phoneme")
-            print(f"        (treat as combining diacritic) or split it further, or")
-            print(f"    (c) transforming it upstream (espeak voice change, text cleaning).")
+            print("\n  Review the examples: extend the model vocabulary for valid phones,")
+            print("  fix pronunciation in g2p, or correct malformed source records.")
             print(f"  NOT writing {phonemes_path} — fix the above and re-run.")
             langs_with_unknowns.append(lang)
             continue
