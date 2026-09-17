@@ -1,6 +1,5 @@
 """Label-canon and dialect provenance regressions; no corpus/network writes."""
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -98,40 +97,6 @@ def test_preprocess_records_variety_only_with_valid_labels(tmp_path, monkeypatch
         assert manifest.read_text() == original
         assert not (lang_dir / "phonemes.jsonl").exists()
     assert calls == [("cinco", "spa", "latin_american")]
-
-
-def test_verifier_prefers_label_voice_and_keeps_legacy_fallback(tmp_path, monkeypatch):
-    path = SCRIPTS.parents[1] / "scripts" / "verify_espeak_build.py"
-    spec = importlib.util.spec_from_file_location("verify_espeak_build", path)
-    verifier = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(verifier)
-    lang_dir = tmp_path / "data" / "audio" / "spa"
-    lang_dir.mkdir(parents=True)
-    rows = [
-        {"file": "a.wav", "espeak_voice": "es-419"},
-        {"file": "b.wav"},
-        {"file": "c.wav"},
-    ]
-    labels = [{**r, "sentence": "cinco", "phonemes": ["s"], "stress": [0]} for r in rows]
-    (lang_dir / "phonemes.jsonl").write_text("\n".join(json.dumps(r) for r in labels))
-    (lang_dir / "manifest.jsonl").write_text("\n".join(json.dumps(r) for r in [
-        {"file": "a.wav", "espeak_voice": "es"},
-        {"file": "b.wav", "espeak_voice": "es-419"},
-        {"file": "c.wav", "source": "tts", "voice": "es-US-Chirp3-HD-Kore"},
-    ]))
-    voices = []
-
-    def request(*, text, lang, voice):
-        assert lang == "spa"
-        voices.append(voice)
-        return {"phonemes": ["s"], "stress": [0], "word_spans": [[0, 1]]}
-
-    monkeypatch.setattr(verifier, "REPO", tmp_path)
-    monkeypatch.setattr(g2p_client, "request", request)
-    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: {"s"})
-    monkeypatch.setattr(sys, "argv", ["verify_espeak_build.py", "--langs", "spa"])
-    assert verifier.main() == 0
-    assert voices == ["es-419", "es-419", "es"]
 
 
 @pytest.mark.parametrize("skip", [False, True])

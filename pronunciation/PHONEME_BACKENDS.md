@@ -24,7 +24,8 @@ Every recording retained by the license/silence filters is phonemized or has an
 explicit refusal. Refusals are written to `g2p_exclusions.jsonl` with the exact
 sentence, variety and build identity. Successful rows in `phonemes.jsonl` carry
 `g2p_identity`, `variety` and the generic source `g2p`. Existing corpus files are
-not migrated until preprocessing is run.
+not migrated until preprocessing is run. Resolved varieties are stored on
+generated label rows; preprocessing does not duplicate them back into manifests.
 
 ASR auditing calls the same API for both reference and recognized text. Pimsleur
 ingestion saves audio and transcripts; labelability is decided in preprocessing
