@@ -251,8 +251,7 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
 
 ## Conventions & gotchas
 
-- **G2P**: production labeling uses `g2p_client.phonemize(text, lang,
-  variety=...)` uniformly for every language. g2p owns engine selection and
+- **G2P**: production labeling uses `g2p_client.phonemize(text, language)` uniformly for every language. g2p owns engine selection and
   structured pronunciation annotations. `corpus_labels.py` handles corpus
   metadata, response caching and training-schema adaptation; see
   `PHONEME_BACKENDS.md`. The `g2p serve` transport remains until YAP-26.

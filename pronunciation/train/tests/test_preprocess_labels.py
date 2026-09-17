@@ -49,7 +49,7 @@ def test_dialect_resolution(rec, lang, expected):
 
 
 @pytest.mark.parametrize("valid", [True, False])
-def test_preprocess_records_variety_only_with_valid_labels(tmp_path, monkeypatch, valid):
+def test_preprocess_records_language_only_with_valid_labels(tmp_path, monkeypatch, valid):
     lang_dir = tmp_path / "spa"
     lang_dir.mkdir()
     manifest = lang_dir / "manifest.jsonl"
@@ -60,8 +60,8 @@ def test_preprocess_records_variety_only_with_valid_labels(tmp_path, monkeypatch
     sf.write(lang_dir / "a.wav", np.full(1600, 0.1, dtype=np.float32), 16000)
     calls = []
 
-    def phonemize(text, lang, *, variety):
-        calls.append((text, lang, variety))
+    def phonemize(text, lang):
+        calls.append((text, lang))
         return {"phonemes": ["s"] if valid else ["INVALID"],
                 "stress": [0], "word_spans": [[0, 1]]}
 
@@ -75,14 +75,14 @@ def test_preprocess_records_variety_only_with_valid_labels(tmp_path, monkeypatch
         preprocess.main()
         assert manifest.read_text() == original
         label = json.loads((lang_dir / "phonemes.jsonl").read_text())
-        assert label["variety"] == "latin_american"
+        assert label["g2p_language"] == "spa-419"
         assert label["phonemes"] == ["s"]
     else:
         with pytest.raises(SystemExit, match="1"):
             preprocess.main()
         assert manifest.read_text() == original
         assert not (lang_dir / "phonemes.jsonl").exists()
-    assert calls == [("cinco", "spa", "latin_american")]
+    assert calls == [("cinco", "spa-419")]
 
 
 @pytest.mark.parametrize("skip", [False, True])

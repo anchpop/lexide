@@ -56,12 +56,12 @@ from tqdm import tqdm
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "train" / "scripts"))
 from g2p_client import phonemize, Unlabelable  # noqa: E402
-from corpus_labels import variety_for_record  # noqa: E402
+from corpus_labels import language_for_record  # noqa: E402
 
 
-def label_phonemes(text: str, lang: str, variety: str = "default") -> list[str]:
+def label_phonemes(text: str, lang: str) -> list[str]:
     """Use the same g2p contract as corpus preprocessing."""
-    return phonemize(text, lang, variety=variety)["phonemes"]
+    return phonemize(text, lang)["phonemes"]
 
 GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 LANG_TO_ISO639_1 = {
@@ -147,8 +147,8 @@ def load_records(root: Path, langs: set[str] | None, source: str) -> list[dict[s
                     "lang": lang,
                     "source": source,
                     "voice": rec.get("voice"),
-                    # Keep dataset variety when comparing reference and ASR text.
-                    "variety": variety_for_record(rec, lang),
+                    # Keep the selected pronunciation when comparing reference and ASR text.
+                    "g2p_language": language_for_record(rec, lang),
                     "expected": rec["sentence"],
                 })
     return records
@@ -248,7 +248,7 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
             if score_phonemes:
                 try:
                     expected_phonemes = label_phonemes(
-                        record["expected"], record["lang"], variety_for_record(record, record["lang"]),
+                        record["expected"], language_for_record(record, record["lang"]),
                     )
                 except Unlabelable:
                     # No valid reference: omit PER so the loader uses CER/WER.
@@ -256,7 +256,7 @@ def transcribe(record: dict[str, Any], args: argparse.Namespace, api_key: str) -
                 else:
                     try:
                         actual_phonemes = label_phonemes(
-                            text, record["lang"], variety_for_record(record, record["lang"]),
+                            text, language_for_record(record, record["lang"]),
                         )
                     except Exception:
                         # An unlabelable Whisper output against a valid reference
@@ -336,7 +336,7 @@ def rescore(path: Path, langs: set[str] | None) -> None:
     for rec in tqdm(todo, desc="rescore"):
         try:
             expected_phonemes = label_phonemes(
-                rec["expected"], rec["lang"], variety_for_record(rec, rec["lang"]),
+                rec["expected"], language_for_record(rec, rec["lang"]),
             )
         except Unlabelable:
             changed += any(key in rec for key in ("per", "expected_phonemes", "actual_phonemes"))
@@ -345,7 +345,7 @@ def rescore(path: Path, langs: set[str] | None) -> None:
             continue
         try:
             actual_phonemes = label_phonemes(
-                rec["whisper_text"], rec["lang"], variety_for_record(rec, rec["lang"]),
+                rec["whisper_text"], language_for_record(rec, rec["lang"]),
             )
         except Exception:
             actual_phonemes = []

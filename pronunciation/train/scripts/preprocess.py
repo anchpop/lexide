@@ -34,7 +34,7 @@ import soundfile as sf
 from tqdm import tqdm
 
 # Historical voice metadata, used only by engine-comparison/replay tools.
-# Production labeling uses g2p language + variety requests.
+# Production labeling uses g2p combined language choices.
 LANG_TO_ESPEAK = {
     # Languages we currently train on:
     "eng": "en-us",
@@ -419,7 +419,7 @@ def load_accent_exclusions(path: Path) -> dict[str, str]:
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from corpus_labels import LabelCache, training_fields, variety_for_record  # noqa: E402
+from corpus_labels import LabelCache, training_fields, language_for_record  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -861,11 +861,11 @@ def main():
         dispositions = []
         with closing(LabelCache(lang_dir / ".cache" / "g2p_labels.sqlite3")) as label_cache:
             for rec in tqdm(prepared_records, desc=f"{lang} phonemize"):
-                variety = variety_for_record(rec, lang)
-                labels = label_cache.phonemize(rec["sentence"], lang, variety=variety)
-                dispositions.append((rec, variety, labels))
+                g2p_language = language_for_record(rec, lang)
+                labels = label_cache.phonemize(rec["sentence"], g2p_language)
+                dispositions.append((rec, g2p_language, labels))
             build_identity = label_cache.build
-        for rec, variety, labels in dispositions:
+        for rec, g2p_language, labels in dispositions:
             if labels.get("exclude_reason"):
                 g2p_excluded += 1
                 continue
@@ -911,7 +911,7 @@ def main():
                 "license": rec.get("license"),
                 "phoneme_backend": "g2p",
                 "g2p_identity": build_identity,
-                "variety": variety,
+                "g2p_language": g2p_language,
                 **fields,
             }
             acoustic_reason = accent_exclusions.get(rec["file"])
@@ -966,11 +966,11 @@ def main():
 
         exclusion_path = lang_dir / "g2p_exclusions.jsonl"
         with exclusion_path.open("w") as out:
-            for rec, variety, labels in dispositions:
+            for rec, g2p_language, labels in dispositions:
                 if labels.get("exclude_reason"):
                     out.write(json.dumps({
                         "file": rec["file"], "sentence": rec["sentence"],
-                        "variety": variety, "g2p_identity": build_identity,
+                        "g2p_language": g2p_language, "g2p_identity": build_identity,
                         "exclude_reason": labels["exclude_reason"],
                     }, ensure_ascii=False) + "\n")
         print(f"{lang}: wrote {len(entries)} entries to {phonemes_path}")

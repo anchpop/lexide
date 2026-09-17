@@ -23,22 +23,7 @@ struct TokenizedSentence {
 }
 
 fn language_from_code(code: &str) -> Result<Language> {
-    let lang = match code {
-        "deu" => Language::German,
-        "eng" => Language::English,
-        "fra" => Language::French,
-        "hin" => Language::Hindi,
-        "ita" => Language::Italian,
-        "jpn" => Language::Japanese,
-        "kor" => Language::Korean,
-        "por" => Language::Portuguese,
-        "rus" => Language::Russian,
-        "spa" => Language::Spanish,
-        "tha" => Language::Thai,
-        "zho-hans" => Language::ChineseSimplified,
-        other => bail!("unknown language code {other}"),
-    };
-    Ok(lang)
+    Language::from_code(code).with_context(|| format!("unknown language code {code}"))
 }
 
 const GEMMA_URL: &str = "https://anchpop--lexide-gemma-4-31b-vllm-serve.modal.run";

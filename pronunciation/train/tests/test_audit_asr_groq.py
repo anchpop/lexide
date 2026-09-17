@@ -15,7 +15,7 @@ def test_labels_use_unified_api(monkeypatch, lang):
     phonemize = Mock(return_value={"phonemes": ["a"]})
     monkeypatch.setattr(audit, "phonemize", phonemize)
     assert audit.label_phonemes("text", lang) == ["a"]
-    phonemize.assert_called_once_with("text", lang, variety="default")
+    phonemize.assert_called_once_with("text", lang)
 
 
 def run_live(tmp_path, monkeypatch, label, *, text_only=False, lang="hin"):
@@ -51,12 +51,12 @@ def test_live_whisper_failure_remains_per_one(tmp_path, monkeypatch, failure):
     assert result["expected_phonemes"] == ["a"] and result["actual_phonemes"] == []
 
 
-def test_live_passes_language_and_voice_for_both_texts(tmp_path, monkeypatch):
+def test_live_passes_language_for_both_texts(tmp_path, monkeypatch):
     label = Mock(return_value=["a"])
     result = run_live(tmp_path, monkeypatch, label, lang="eng")
     assert result["per"] == 0
     assert [call.args for call in label.call_args_list] == [
-        ("expected", "eng", "default"), ("actual", "eng", "default"),
+        ("expected", "eng"), ("actual", "eng"),
     ]
 
 

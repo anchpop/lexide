@@ -1,5 +1,4 @@
 mod dep;
-mod language;
 pub mod matching;
 #[cfg(feature = "remote")]
 mod parsing;
@@ -17,9 +16,9 @@ mod remote;
 pub mod segment;
 
 pub use crate::dep::DependencyRelation;
-pub use crate::language::Language;
 use crate::pos::PartOfSpeech;
 use anyhow::Result;
+pub use g2p_types::Language;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

@@ -78,8 +78,9 @@ def identity() -> str:
     ).stdout.strip()
 
 
-def request(**req) -> dict:
-    """One raw request (`text` plus `voice` or `lang`, optional `variety`)."""
+def request(*, text: str, lang: str) -> dict:
+    """One request containing `text` and a combined `lang` value."""
+    req = {"text": text, "lang": lang}
     with _lock:
         proc = _server()
         assert proc.stdin is not None and proc.stdout is not None
@@ -96,6 +97,6 @@ def request(**req) -> dict:
     return result
 
 
-def phonemize(text: str, lang: str, *, variety: str = "default") -> dict:
+def phonemize(text: str, lang: str) -> dict:
     """Return g2p's structured labels; engine selection belongs to g2p."""
-    return request(text=text, lang=lang, variety=variety)
+    return request(text=text, lang=lang)
