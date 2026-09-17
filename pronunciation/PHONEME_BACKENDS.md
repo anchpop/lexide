@@ -32,13 +32,11 @@ for all languages, so an ingestion-time engine check cannot discard recordings.
 
 The `--phoneme-backend` override and unused `--espeak-batch-size` option are
 removed. The old provider sidecars are not inputs to production preprocessing.
-`audit_g2p_backends.py` and `build_external_phoneme_sidecars.py` remain independent
-historical engine-comparison/reproduction tools, not production dependencies.
+The historical Python engine-comparison and sidecar builders have been removed.
 
 Use `--langs` to select a corpus subset. Unsupported language requests
 fail at g2p rather than being silently skipped using a local capability table.
 The existing `--skip-narrowing` requirement for merged-token labels still applies.
 
 Run the Rust pipeline as documented in [preprocess/README.md](preprocess/README.md).
-The remaining historical Python engine-comparison tools use `g2p serve`; removing that transport
-is tracked in YAP-26.
+g2p is consumed only through its Rust library API.

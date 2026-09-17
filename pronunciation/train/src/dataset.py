@@ -181,13 +181,12 @@ class StressDataset(Dataset):
                     # contrastive label that is decidable from the frames it
                     # occupies, instead of one phrase in N carrying a single
                     # positive whose acoustic evidence (the fall) lands on the
-                    # *following* mora. See tokyo_pitch_level in
-                    # scripts/build_external_phoneme_sidecars.py.
+                    # *following* mora. g2p supplies these realized H/L levels.
                     if "level" not in accent:
                         raise ValueError(
                             f"{phonemes_path}:{rec['file']}: pitch_accent entries "
                             f"predate the H/L retarget (no 'level'); rebuild the "
-                            f"sidecar with scripts/build_external_phoneme_sidecars.py"
+                            f"labels with the Rust preprocessing labels stage"
                         )
                     level = int(accent["level"])
                     if level not in (0, 1):

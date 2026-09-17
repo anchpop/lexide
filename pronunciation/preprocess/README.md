@@ -99,5 +99,4 @@ cargo run --manifest-path preprocess/Cargo.toml -- run \
   --skip-narrowing --skip-upload
 ```
 
-Historical engine-comparison tools still use the Python g2p client, tracked in
-YAP-26; neither production labels nor ASR audits use that transport.
+All phonemization callers use the g2p Rust library; no g2p executable is needed.

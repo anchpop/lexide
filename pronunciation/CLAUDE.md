@@ -255,8 +255,7 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
 - **G2P**: production preprocessing calls `g2p::phonemize(Language, text)` directly
   from Rust. g2p owns engine selection and structured pronunciation annotations.
   Python `corpus_labels.py` adapts recording metadata and training fields; there
-  is no preprocessing g2p response cache or g2p subprocess. ASR audits also use Rust directly; historical engine-comparison tools
-  still use `g2p_client` and `g2p serve` pending YAP-26. Some g2p implementations
+  is no preprocessing g2p response cache or g2p subprocess. ASR audits also use Rust directly. Some g2p implementations
   need `uv`; g2p manages that dependency behind its API. See `preprocess/README.md`
   and `PHONEME_BACKENDS.md`.
   - Our patches live on branch **`french-phrase-stress-liaison`**
@@ -266,9 +265,9 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
     is **rebased onto upstream master `7d426728`** (tip `354bced1`), which is
     the commit g2p's submodule pins. To move to a new fork commit: update the
     submodule in the g2p repo, bump its version, then point this repo's
-    installed binary (and yap's `rev`) at it — each consumer pins its own
+    Cargo dependency (and yap's `rev`) at it — each consumer pins its own
     g2p rev, so yap can stay on the build matching the deployed model while
-    this repo relabels with a newer one. `g2p identity` names the build.
+    this repo relabels with a newer one. `g2p::identity()` names the build.
   - **The on-disk corpus labels reproduce at tag `corpus-v1-labels`
     (= `4dd31042`), NOT at the current branch tip.** To patch or reproduce
     existing labels, build the tag. The rebase (2026-08-23) pulled in
