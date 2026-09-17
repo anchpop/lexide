@@ -5,7 +5,7 @@ One source-parameterized auditor for both corpora — they differ only in which
 manifest `source` to read and which exclusions file to write. We use
 **phoneme-level** error, not raw text: both the expected sentence and Whisper's
 transcript use the production label provider: g2p-tha (vachana-thai), g2p-hin
-(current canon), g2p-zho, g2p-jpn, g2p-kor, or preprocess.phonemize (eSpeak)
+(unified labels), g2p-zho, g2p-jpn, g2p-kor, or preprocess.phonemize (eSpeak)
 for the remaining languages. Orthographic differences that don't change sound
 (apostrophes, capitalization, "15" vs "fifteen", name transliteration) normalize
 away when accepted by the provider, while genuine pronunciation/content mismatch

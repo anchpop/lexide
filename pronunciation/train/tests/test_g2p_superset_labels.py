@@ -114,7 +114,7 @@ def test_input_arrays_field_order_and_omission(lang):
             for field in ("tone", "pitch_accent"):
                 if field in labels:
                     assert labels[field] is out[field]
-            assert not {"raw", "word_spans", "canon", "g2p"} & labels.keys()
+            assert not {"raw", "word_spans", "g2p"} & labels.keys()
 
 
 @pytest.mark.parametrize("lang", ("tha", "zho-hans", "jpn"))

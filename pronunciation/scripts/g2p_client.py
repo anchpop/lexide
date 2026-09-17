@@ -79,7 +79,7 @@ def identity() -> str:
 
 
 def request(**req) -> dict:
-    """One raw request (`text` plus `voice` or `lang`, optional `canon`)."""
+    """One raw request (`text` plus `voice` or `lang`, optional `variety`)."""
     with _lock:
         proc = _server()
         assert proc.stdin is not None and proc.stdout is not None

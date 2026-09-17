@@ -5,7 +5,6 @@
   "g2p_identity": "g2p/0.4.0 espeak-ng/aa907af78d5665d8 thai/ad66331eca29d4ea korean/9e4bc6b854f6a903",
   "binary": "/data/coding/g2p/target/release/g2p",
   "binary_sha256": "0322fce77b6955b1a4ecc6781590e730fc48574b830a2acf325dc7e77309a174",
-  "canon": "current",
   "case_count": 31,
   "cases_sha256": "af73b675f6ba3006463eddfbba96d8deaf3b392054e511483db87b0a6aa137a5",
   "expected_sidecar_sha256": "2e6b8aadcf3b9e3690fc401417207ea257cb196fad59ee66b503e9eb15743e82",

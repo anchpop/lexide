@@ -1,4 +1,4 @@
-"""Label-canon and dialect provenance regressions; no corpus/network writes."""
+"""Label validation and dialect provenance regressions; no corpus/network writes."""
 
 import json
 import sys

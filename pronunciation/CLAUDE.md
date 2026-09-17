@@ -263,7 +263,7 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
   - Our patches live on branch **`french-phrase-stress-liaison`**
     (github.com/anchpop/espeak-ng): the French phrase-final stress/liaison
     work, the fr/de/ru modal-surface fixes, the Portuguese final-nasal
-    endings, and the ru/it ipa-label canon fixes. As of 2026-08-23 the branch
+    endings, and the ru/it IPA label fixes. As of 2026-08-23 the branch
     is **rebased onto upstream master `7d426728`** (tip `354bced1`), which is
     the commit g2p's submodule pins. To move to a new fork commit: update the
     submodule in the g2p repo, bump its version, then point this repo's
@@ -288,7 +288,7 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
     are keyed by `sha256(sentence)`, not by phoneme labels, so they survive
     relabeling unchanged (verified in `train_unified.py`). Do NOT feed the
     rebased fork's references to anything scoring the *current* production
-    model — it emits corpus-canon (`ʲ`, tap-everywhere ita) and will
+    model — it emits corpus labels (`ʲ`, tap-everywhere ita) and will
     spuriously mismatch.
   - **g2p 0.4.0 relabel (2026-09-14) and the narrowing caveat.** The corpus
     labels now come from g2p 0.4.0 (fork `cb97cc1d`): diphthongs, r-coloured
@@ -311,7 +311,7 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
   - *Historical, for context*: the 2026-08-10 "Russian drift" (`y` for `ɨ`,
     `ɭ` for `ɫ`/`ɫʲ`) was a stale compiled build — `ph_russian`'s ipa labels
     were fixed in source but the phoneme data was never recompiled.
-    `4dd31042` set `l^ → ɫʲ` (corpus canon) and gave ita's reduced `I`/`U`
+    `4dd31042` set `l^ → ɫʲ` (corpus labels) and gave ita's reduced `I`/`U`
     explicit `ipa i`/`ipa u`. g2p now also normalizes the exact `ɪ ʊ`
     in English `(en)…(it)` code-switch spans to Italian `i u`; lexide
     consumes those labels directly. 10

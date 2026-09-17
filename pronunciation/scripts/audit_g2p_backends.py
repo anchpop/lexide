@@ -245,21 +245,14 @@ def _schwa_stress_hin(text: str) -> dict[str, Any]:
 
 
 def _g2p_hin(text: str) -> dict[str, Any]:
-    """The production Hindi chain: `schwa-stress-hin` ported into the g2p
-    crate (github.com/anchpop/g2p, `src/hindi`) with the 2026-09-02 audit's
-    corrections (ə→[ɛ] beside ɦ, homorganic ŋ before velars, ज्ञ as [ɡj],
-    final ɪ/ʊ neutralized, no deletion into impossible clusters). Text with
-    digits or Latin script is excluded rather than labeled with a hole where
-    the audio has speech. `canon: legacy` reproduces `_schwa_stress_hin`
-    byte for byte (verified on the whole corpus), which is what the deployed
-    model was trained on."""
+    """Hindi pronunciation from g2p, with explicit refusals and build provenance."""
     import g2p_client
 
     try:
-        result = g2p_client.request(text=text, lang="hin", canon="current")
+        result = g2p_client.request(text=text, lang="hin")
     except g2p_client.Unlabelable as exc:
         result = {"exclude_reason": exc.reason}
-    return {**result, "canon": "current", "g2p": g2p_client.identity()}
+    return {**result, "g2p": g2p_client.identity()}
 
 
 def _g2p_audit_output(

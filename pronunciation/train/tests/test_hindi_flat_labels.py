@@ -1,7 +1,7 @@
 """Byte-level Hindi migration gates; default tests use frozen offline fixtures.
 
 The goldens were captured through the unmodified production provider and
-build_sidecar, with the pinned binary/current canon (see provenance.json).
+build_sidecar, with the pinned binary output (see provenance.json).
 Set LEXIDE_HINDI_LIVE_SHADOW=1 to replay the fixtures through that binary, or
 LEXIDE_HINDI_FULL_SHADOW=1 to shadow every current Hindi manifest disposition.
 Neither mode writes to the corpus or updates the goldens.
@@ -148,7 +148,7 @@ def test_trailing_syllable_and_missing_mandatory_fields_fail():
 
 
 @pytest.mark.parametrize("reason", [None, "hindi_digits:१२", "hindi_latin_script:test"])
-def test_provider_dispatch_canon_and_refusal(monkeypatch, reason):
+def test_provider_dispatch_and_refusal(monkeypatch, reason):
     native = {"raw": "", "phonemes": [], "stress": [], "word_spans": []}
     request = Mock(return_value=native)
     if reason:
@@ -156,9 +156,9 @@ def test_provider_dispatch_canon_and_refusal(monkeypatch, reason):
     monkeypatch.setattr(g2p_client, "request", request)
     monkeypatch.setattr(g2p_client, "identity", lambda: "test-build")
     result = providers._g2p_hin("text")
-    request.assert_called_once_with(text="text", lang="hin", canon="current")
+    request.assert_called_once_with(text="text", lang="hin")
     assert result == {**({"exclude_reason": reason} if reason else native),
-                      "canon": "current", "g2p": "test-build"}
+                      "g2p": "test-build"}
     assert "words" not in result
 
 
@@ -181,7 +181,7 @@ def test_cache_shape_migration(tmp_path, monkeypatch, exclusion, old_schema):
         stale["provider_schema"] = old_schema
     if old_schema == 2 and not exclusion:
         stale["output"] = {"raw": "", "phonemes": [], "stress": [], "word_spans": [],
-                           "canon": "current", "g2p": "test-build"}
+                           "g2p": "test-build"}
     write_jsonl(path, [stale])
     generate = Mock(return_value={"exclude_reason": "new-refusal"})
     monkeypatch.setitem(providers.PROVIDERS, "g2p-hin", ("hin", generate))
