@@ -29,8 +29,6 @@ use std::collections::HashMap;
 pub const DECODER_VERSION: &str = "nonblank_v1";
 mod frame_matrix;
 pub use frame_matrix::*;
-mod training_labels;
-pub use training_labels::{training_labels, TrainingLabels};
 
 /// Identity reported by the serving container's `marker_only` probe.
 /// Model fields are required: missing identity must never produce a cache key.
@@ -760,11 +758,7 @@ mod tests {
     #[test]
     fn raw_matrix_has_unknown_label_source() {
         let raw = matrix(&["<pad>", "a"], 0, &[&[0.5_f32.ln(), 0.5_f32.ln()]]);
-        let error = raw
-            .check_labels_from("g2p/fixture")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("unknown"), "{error}");
+        assert!(raw.trained_against_g2p.is_none());
     }
 
     fn lp(p: &[f32]) -> Vec<f32> {

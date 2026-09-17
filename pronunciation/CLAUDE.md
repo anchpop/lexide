@@ -312,9 +312,9 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
     `ɭ` for `ɫ`/`ɫʲ`) was a stale compiled build — `ph_russian`'s ipa labels
     were fixed in source but the phoneme data was never recompiled.
     `4dd31042` set `l^ → ɫʲ` (corpus canon) and gave ita's reduced `I`/`U`
-    explicit `ipa i`/`ipa u`. The ita `LANG_PHONEME_REMAP` **stays** even
-    though pure-Italian output no longer needs it — English `(en)…(it)`
-    code-switch spans still emit real `ɪ ʊ` that the corpus normalized. 10
+    explicit `ipa i`/`ipa u`. g2p now also normalizes the exact `ɪ ʊ`
+    in English `(en)…(it)` code-switch spans to Italian `i u`; lexide
+    consumes those labels directly. 10
     ita rows with leftover `ɪː ʊː` (missed by the exact-token remap) were
     surgically relabeled in place 2026-08-23.
 - **Python**:

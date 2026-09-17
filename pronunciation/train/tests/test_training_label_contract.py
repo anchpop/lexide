@@ -1,10 +1,9 @@
-"""Shared frozen pre-change label oracle, offline tokenizer and staging gates."""
+"""Model vocabulary, offline tokenizer and staging gates."""
 
 import hashlib
 import importlib.util
 import json
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,83 +17,11 @@ sys.path.insert(0, str(SCRIPTS))
 import preprocess
 
 DEFINITION = ROOT / "tagging/lexide/data/training_labels.json"
-FIXTURE = json.loads((DEFINITION.parent / "training_labels_conformance.json").read_text())
-
-
-def wire(value):
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
-
-
-@pytest.mark.parametrize("case", FIXTURE["cases"], ids=lambda c: c["name"])
-def test_frozen_prechange_conformance(case, monkeypatch):
-    base = preprocess._tokenizer_vocab() | set(case["extra_vocab"])
-    monkeypatch.setattr(preprocess, "_tokenizer_vocab", lambda: base)
-    phones, stress, unknown = preprocess.validate_phonemes(
-        case["phones"], case["stress"], case["lang"],
-    )
-    assert wire([phones, stress, sorted(unknown)]) == wire(case["expected"])
-
-
-def test_fixture_generator_is_a_byte_identical_noop():
-    script = SCRIPTS / "generate_training_label_fixture.py"
-    fixture = DEFINITION.parent / "training_labels_conformance.json"
-    before = fixture.read_bytes()
-    result = subprocess.run([sys.executable, str(script)], check=True, capture_output=True)
-    assert result.stdout == before
-    subprocess.run([sys.executable, str(script), "--check"], check=True, capture_output=True)
-    assert fixture.read_bytes() == before
-    assert FIXTURE["generated_by"] == (
-        "python pronunciation/train/scripts/generate_training_label_fixture.py --write"
-    )
-
-
-def test_frozen_oracle_digest_and_inventory_coverage():
-    # Captured before extracting the tables, using the original validator and
-    # the actual cached tokenizer (provenance in the fixture). Never derive
-    # expected outputs from the new contract or auto-refresh this oracle.
-    assert hashlib.sha256(wire([c["expected"] for c in FIXTURE["cases"]])).hexdigest() == (
-        "475cb3ef22332802623e8a301142c73b4e0fa74fbcd70bdc425b915b2e44133b"
-    )
-    accepted = {p for c in FIXTURE["cases"] if c["name"].startswith("accepted-")
-                for p in c["expected"][0]}
-    base = preprocess._tokenizer_vocab()
-    extensions = preprocess.VOCAB_EXTENSIONS
-    assert len(base) == 393 and len(extensions) == 77
-    assert not base & extensions
-    assert accepted == base | extensions
-    assert {"<unk>", "<s>", "</s>", "<pad>", "|"} <= accepted
-    assert len(preprocess.TOKEN_BLACKLIST) == 8
-    assert not accepted & preprocess.TOKEN_BLACKLIST
-    cases = {c["name"]: c for c in FIXTURE["cases"]}
-    assert set(cases["blacklist"]["phones"]) == preprocess.TOKEN_BLACKLIST
-    assert set(cases["global-remap"]["phones"]) == set(preprocess.TOKEN_REMAP)
-    for lang, table in preprocess.LANG_PHONEME_REMAP.items():
-        for phone, expected in table.items():
-            case = cases[f"{lang}-exact-{phone}"]
-            assert case["phones"][0] == phone
-            assert case["expected"][0][0] == expected
-
-
-def test_language_remap_precedes_global_and_vocab_precedes_blacklist(monkeypatch):
-    monkeypatch.setattr(preprocess, "LANG_PHONEME_REMAP", {"synthetic": {"raw": "ε"}})
-    monkeypatch.setattr(preprocess, "TOKEN_BLACKLIST", {"ɛ"})
-    assert preprocess.validate_phonemes(["raw"], [2], "synthetic") == (["ɛ"], [2], set())
-
-
-@pytest.mark.parametrize("phones,stress,expected", [
-    (["a", "unknown"], [1], (["a"], [1], set())),
-    (["a"], [1, 2], (["a"], [1], set())),
-    (["unknown"], [], ([], [], set())),
-])
-def test_python_keeps_legacy_zip_truncation(phones, stress, expected):
-    assert preprocess.validate_phonemes(phones, stress, "eng") == expected
-
-
 def test_cached_tokenizer_matches_contract():
     from transformers import Wav2Vec2CTCTokenizer
     from huggingface_hub import hf_hub_download
 
-    provenance = FIXTURE["provenance"]
+    provenance = json.loads(DEFINITION.read_text())["provenance"]
     try:
         raw = Path(hf_hub_download(
             provenance["tokenizer_name"], "vocab.json",
@@ -171,9 +98,7 @@ def test_sky_mount_and_pronunciation_only_import(recipe, tmp_path):
     # No tagging tree exists in this layout, exactly as in the Sky workdir.
     module = import_staged(script)
     assert module._TRAINING_LABELS == preprocess._TRAINING_LABELS
-    assert module.validate_phonemes(["ɐ", ".", "ɪ"], [1, 0, 2], "eng") == (
-        ["ə", "ɪ"], [1, 2], set(),
-    )
+    assert module.unknown_phonemes(["ə", ".", "hʲ", "ɪ"]) == {".", "hʲ"}
 
 
 def test_full_checkout_prefers_canonical_over_stale_adjacent_copy(tmp_path):
