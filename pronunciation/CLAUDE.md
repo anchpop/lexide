@@ -75,7 +75,7 @@ These are hard-won and override generic ML instincts. Violating them has burned 
 
 6. **The vocab is ours.** The xls-r-2b backbone never saw IPA; the CTC head is
    trained from scratch and the phoneme vocab is fully extensible
-   (`training_vocabulary.VOCAB_EXTENSIONS`). Add real phonemes as real classes — don't collapse
+   (`tagging/lexide/data/training_labels.json`, `phonemes`). Add real phonemes as real classes — don't collapse
    them into near-neighbors to fit an old vocab.
 
 7. **Stress is suprasegmental.** It has a separate factor head rather than inline

@@ -147,27 +147,16 @@ def _dataloader_worker_init(_worker_id: int) -> None:
     torch.set_num_threads(1)
 
 
-def load_processor(model_name: str):
+def load_processor(model_name: str, resume_from: Path | None = None):
+    if resume_from is not None:
+        # Token IDs belong to the checkpoint, not the current training inventory.
+        # Missing processor files must fail rather than rebuilding different IDs.
+        return Wav2Vec2Processor.from_pretrained(str(resume_from), local_files_only=True)
     feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-    tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(model_name)
-    # Extend the borrowed vocab with phonemes the patched espeak emits that
-    # the xlsr-53 vocab didn't have (e.g. German ʏ, Danish ɐ̯ / ʌː). The
-    # xls-r-2b backbone has no pretrained phoneme embeddings, so the CTC
-    # head's output dim is sized to len(tokenizer) AFTER this add and the
-    # new logits are learned from scratch.
-    #
-    # Imported here (not at module load) so train_unified can run from any
-    # CWD without forcing the preprocess script's sys.path tweaks.
     import sys as _sys
-    from pathlib import Path as _Path
-    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "scripts"))
-    from training_vocabulary import VOCAB_EXTENSIONS, check_training_label_vocab
-    check_training_label_vocab(model_name, set(tokenizer.get_vocab()))
-    added = tokenizer.add_tokens(sorted(VOCAB_EXTENSIONS))
-    if added:
-        print(f"Tokenizer vocab extended with {added} new tokens: "
-              f"{sorted(VOCAB_EXTENSIONS)}")
-    return Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from training_vocabulary import new_tokenizer
+    return Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=new_tokenizer())
 
 
 def load_asr_audit_exclusions(
@@ -794,7 +783,8 @@ def main():
     parser.add_argument("--data-dir", type=Path, default=Path("../data/audio"))
     parser.add_argument("--model-name", type=str, default="facebook/wav2vec2-xls-r-2b")
     parser.add_argument("--processor-source", type=str,
-                        default="facebook/wav2vec2-xlsr-53-espeak-cv-ft")
+                        default="facebook/wav2vec2-xlsr-53-espeak-cv-ft",
+                        help="Feature extractor source for fresh training; the phone vocabulary is local.")
     parser.add_argument("--epochs", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--backbone-lr", type=float, default=1e-5)
@@ -1117,7 +1107,7 @@ def main():
     device = torch.device("cuda")
     print(f"Using device: {device} ({torch.cuda.get_device_name(0)})")
 
-    processor = load_processor(args.processor_source)
+    processor = load_processor(args.processor_source, args.resume_from)
 
     if args.use_features and args.use_aux_features:
         raise SystemExit("--use-features and --use-aux-features are mutually exclusive.")
@@ -1169,17 +1159,12 @@ def main():
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
-    # The CTC head size must match the (extension-augmented) tokenizer, or target
-    # ids land outside the head. Fresh models size to len(tokenizer) by construction;
-    # a RESUMED checkpoint keeps its own vocab_size — so if VOCAB_EXTENSIONS grew
-    # since it was trained (e.g. the narrowed nasal symbols), resuming would feed
-    # out-of-range targets. Fail early and clearly rather than deep in CTC.
-    if model.vocab_size != len(processor.tokenizer):
+    # A checkpoint always keeps its saved processor; never resize or renumber it.
+    if (model.vocab_size != len(processor.tokenizer)
+            or model.blank_id != processor.tokenizer.pad_token_id):
         raise SystemExit(
-            f"Vocab-size mismatch: model head={model.vocab_size} but tokenizer="
-            f"{len(processor.tokenizer)}. The checkpoint predates the current "
-            f"VOCAB_EXTENSIONS (narrowed symbols?). Train fresh or expand the head; "
-            f"do not resume an old head with new target ids.")
+            "Checkpoint head and saved tokenizer disagree on vocabulary size or blank ID. "
+            "Use the processor saved with this checkpoint; train fresh for a new vocabulary.")
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -1254,12 +1239,9 @@ def main():
             raise SystemExit(
                 f"Teacher/student blank-id mismatch ({teacher.blank_id} vs "
                 f"{model.blank_id}); KD assumes a shared blank slot.")
-        # The student vocab is often a SUPERSET of the teacher's: VOCAB_EXTENSIONS
-        # grows over time (new narrowed nasal/length symbols), so a teacher pinned
-        # to an older commit has fewer classes (e.g. 404 vs the current 423). Worse,
-        # tokenizer.add_tokens(sorted(...)) REORDERS ids, so teacher class k and
-        # student class k are NOT the same phoneme. Build a per-token-string map
-        # teacher_id -> student_id so KD compares like phonemes, not like indices.
+        # Match IDs by token string, never by position. Distillation still
+        # requires all teacher classes in the student: old artifact-bearing
+        # teachers must be retrained before distilling into the clean inventory.
         teacher_tok = Wav2Vec2CTCTokenizer.from_pretrained(teacher_dir)
         student_vocab = processor.tokenizer.get_vocab()        # token -> id (current)
         teacher_id_to_token = {i: t for t, i in teacher_tok.get_vocab().items()}

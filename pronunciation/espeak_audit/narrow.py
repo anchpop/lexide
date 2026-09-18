@@ -282,7 +282,7 @@ def run(langs, mode="acoustic", depth=DEFAULT_DEPTH, out_name="phonemes_narrowed
         print(f"{lang}: {n_clips} clips → {n_narrowed} narrowed ({n_nasal} nasal{flap_note}) "
               f"→ {out_path.name}{acoustic_note}")
     print(f"\nnasalized symbols produced: {sorted(new_symbols)}")
-    print("(ensure all are in preprocess.VOCAB_EXTENSIONS or the tokenizer vocab)")
+    print("(ensure all are in training_labels.json phonemes and g2p-types::Phoneme)")
 
 
 def main():

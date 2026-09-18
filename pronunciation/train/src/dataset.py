@@ -156,8 +156,12 @@ class StressDataset(Dataset):
             pitch_accent_seq = []
             for pos, (phoneme, stress) in enumerate(zip(rec["phonemes"], rec["stress"])):
                 tid = tokenizer.convert_tokens_to_ids(phoneme)
-                if tid == unk_id or tid is None:
-                    continue
+                if (tid == unk_id or tid is None or phoneme == "|"
+                        or (phoneme.startswith("<") and phoneme.endswith(">"))):
+                    raise ValueError(
+                        f"{phonemes_path}:{rec['file']}: unsupported training phone {phoneme!r}. "
+                        "Regenerate labels or explicitly extend the fresh model vocabulary; "
+                        "phones must not be silently dropped.")
                 phoneme_ids.append(tid)
                 stress_seq.append(stress)
 
