@@ -31,8 +31,8 @@ def test_fresh_vocab_and_saved_processor_resume(tmp_path, monkeypatch):
     assert not preprocess.unknown_phonemes(nasal_phones)
     assert all(processor.tokenizer.convert_tokens_to_ids(phone) != processor.tokenizer.unk_token_id
                for phone in nasal_phones)
-    assert preprocess.unknown_phonemes(["a", "tʃ", "??", "d[", "a1", "ʲ", "<pad>", "|"]) == {
-        "??", "d[", "a1", "ʲ", "<pad>", "|"}
+    assert preprocess.unknown_phonemes(["a", "tʃ", "??", "d[", "a1", "aɜ", "ɜ", "ɜː", "ʲ", "<pad>", "|"]) == {
+        "??", "d[", "a1", "aɜ", "ʲ", "<pad>", "|"}
 
     # A checkpoint's mapping wins even if current fresh IDs differ at the same size.
     processor.save_pretrained(tmp_path)

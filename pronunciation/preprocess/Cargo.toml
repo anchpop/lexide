@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-g2p = { git = "https://github.com/anchpop/g2p", rev = "ffe3fb9f3a42d0097e327d92fc8640f96b38255b" }
+g2p = { git = "https://github.com/anchpop/g2p", rev = "db3cc12b4f2cf916342304c83314f4cabc8993f7" }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

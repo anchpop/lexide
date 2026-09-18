@@ -11,8 +11,8 @@ to YAP-39 and requires training coverage, not just enum membership.
 
 ## Fresh training and checkpoint resume
 
-The cleaned inventory has **347 segmental phones**. The tokenizer adds only
-`<pad>` (CTC blank, ID 0) and `<unk>` (required unknown sentinel), for **349 slots**.
+The cleaned inventory has **320 segmental phones**. The tokenizer adds only
+`<pad>` (CTC blank, ID 0) and `<unk>` (required unknown sentinel), for **322 slots**.
 Both are masked out of the conditional phone logits, and neither is a valid
 training target. Stress, tone and pitch remain separate factors.
 
@@ -32,9 +32,9 @@ against the refreshed sequences. No corpus rewrite or retraining was performed h
 
 ## YAP-38 inventory audit (2026-09-18)
 
-The prior 470 entries (393 inherited + 77 extensions) contained 123 entries outside
-the shared segmental inventory. Retaining two required controls leaves 349 slots.
-The 347 retained entries preserve every existing model phone recognized by the
+The prior 470 entries (393 inherited + 77 extensions) contained 150 entries outside
+the shared segmental inventory. Retaining two required controls leaves 322 slots.
+The 320 retained entries preserve every existing model phone recognized by the
 shared enum; this change adds no acoustic classes and performs no phonetic mergers.
 
 ### Structural controls
@@ -47,6 +47,13 @@ classes: training consumes pre-tokenized phone lists and word boundaries are met
 ### Tone-number labels
 
 `1`, `a1`, `a2`, `a4`, `a5`, `ai2`, `ai5`, `ei2`, `ei5`, `i.1`, `i.2`, `i.4`, `i.5`, `i1`, `i2`, `i4`, `i5`, `iou1`, `iou2`, `iou4`, `iou5`, `iɑ1`, `iɑ2`, `iɑ5`, `iɛ1`, `iɛ2`, `iɛ4`, `iɛ5`, `iː1`, `i̪1`, `i̪2`, `i̪4`, `i̪5`, `o1`, `o2`, `o4`, `o5`, `onɡ2`, `onɡ5`, `ou1`, `ou2`, `ou5`, `u1`, `u2`, `u4`, `u5`, `ua1`, `ua2`, `ua4`, `ua5`, `uai5`, `uei2`, `uei5`, `uo1`, `uo2`, `uo5`, `uə2`, `uə5`, `y1`, `y2`, `y5`, `yu2`, `yu5`, `yæ2`, `yæ5`, `yə2`, `yə5`, `yɛ2`, `yɛ5`, `yɛ5ʲ`, `ɑ1`, `ɑ2`, `ɑ4`, `ɑ5`, `ɑu2`, `ɑu5`, `ə1`, `ə2`, `ə4`, `ə5`, `ər1`, `ər2`, `ər4`, `ər5`, `əː1`
+
+The inherited tone-3 forms also belong here: `aiɜ`, `aɜ`, `eiɜ`, `iouɜ`, `iɑɜ`, `iɛɜ`, `iɜ`, `i̪ɜ`, `onɡɜ`, `ouɜ`, `oɜ`, `uaiɜ`, `uaɜ`, `ueiɜ`, `uoɜ`, `uəɜ`, `uɜ`, `yiɜ`, `yuɜ`, `yæɜ`, `yəɜ`, `yɛɜ`, `yɜ`, `ɑuɜ`, `ɑɜ`, `ərɜ`, `əɜ`.
+
+The embedded eSpeak source defines Mandarin `phoneme 3` as stress/tone in
+`phsource/ph_cmn`; its Kirshenbaum-to-IPA table (`dictionary.c`, `ipa1`) maps
+ASCII `3` to U+025C `ɜ`. Those 27 inherited whole-syllable labels were removed
+from both the shared enum and this model subset. Plain `ɜ` and `ɜː` remain phones.
 
 These encode suprasegmental information or old mnemonic leakage, not new segmental
 classes. Current G2P separates tones; Persian `q1` leakage was fixed at its source.
@@ -71,6 +78,9 @@ historical training rows.
 
 ### Corpus evidence
 
+The tone-3 follow-up independently checked all 373,525 local broad-label rows
+(`data/audio/*/phonemes.jsonl`): none contained any of the 27 removed forms.
+
 A read-only scan of 747,050 rows across 22 local broad/narrowed files found only
 standalone `ʲ` (88,588 occurrences) and `1` (1,862) among the removed labels.
 Broad/narrowed files overlap, so these are row/token counts, not distinct recordings.
@@ -78,7 +88,8 @@ Broad/narrowed files overlap, so these are row/token counts, not distinct record
 across nine language directories. Other removed labels had zero occurrences in
 this local snapshot. This is not a claim that every remote training dataset was audited.
 
-Current G2P already rejects these spellings via `Phoneme`; Cantonese/Vietnamese
+The original cleanup rejected digit/mnemonic artifacts. This follow-up also
+removes the 27 tone-3 aliases from `Phoneme`; Cantonese/Vietnamese
 tones were moved into metadata in G2P 0.6.0. No further G2P output change is needed
 for this inventory cleanup. Raw old checkpoint labels remain readable; typed
 extraction continues to report an unsupported winner explicitly.
