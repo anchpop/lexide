@@ -233,6 +233,76 @@ pub struct RawBatchResponse {
     pub envelope: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawPrediction {
+    pub item: Box<serde_json::value::RawValue>,
+    pub envelope: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>>,
+}
+
+impl RawPrediction {
+    pub fn decode(&self) -> Result<PredictResponse> {
+        let mut modal = match serde_json::from_str::<BatchResult>(self.item.get())? {
+            BatchResult::Prediction(response) => response,
+            BatchResult::Error { error } => anyhow::bail!(
+                "Modal wav2vec2 rejected the clip: {}: {}",
+                error.error_type,
+                error.message
+            ),
+        };
+        for (name, field) in [
+            ("model_id", &mut modal.model_id),
+            ("model_revision", &mut modal.model_revision),
+            ("decoder_version", &mut modal.decoder_version),
+            ("deploy_marker", &mut modal.deploy_marker),
+        ] {
+            if let Some(raw) = self.envelope.get(name) {
+                merge_metadata(name, field, &serde_json::from_str(raw.get())?)?;
+            }
+        }
+        Ok(modal)
+    }
+}
+
+fn merge_metadata(name: &str, item: &mut Option<String>, envelope: &Option<String>) -> Result<()> {
+    if let Some(envelope) = envelope {
+        if let Some(item) = item.as_ref() {
+            anyhow::ensure!(
+                item == envelope,
+                "batch {name} mismatch: item {item:?}, envelope {envelope:?}"
+            );
+        } else {
+            *item = Some(envelope.clone());
+        }
+    }
+    Ok(())
+}
+
+impl RawBatchResponse {
+    /// Split a response without losing envelope fields; reject malformed items individually.
+    pub fn into_predictions(self) -> Result<Vec<Result<RawPrediction>>> {
+        let raw = self;
+        if let Some(decoder) = &raw.batch.decoder_version {
+            anyhow::ensure!(
+                decoder == DECODER_VERSION,
+                "decoder mismatch: endpoint reported {decoder:?}, expected {DECODER_VERSION:?}"
+            );
+        }
+        Ok(raw
+            .batch
+            .results
+            .into_iter()
+            .map(|item| {
+                let response = RawPrediction {
+                    item,
+                    envelope: raw.envelope.clone(),
+                };
+                response.decode()?;
+                Ok(response)
+            })
+            .collect())
+    }
+}
+
 #[cfg(feature = "pronunciation-remote")]
 pub mod remote;
 

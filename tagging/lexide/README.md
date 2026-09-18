@@ -122,14 +122,55 @@ returns that identity only if its deploy marker matches. This is a one-shot
 probe, not a guarantee about later containers: validate each prediction's marker
 (or the batch envelope's marker) before caching.
 
-`predict_batch(&[PredictRequest])` sends 1–64 requests and returns ordered
-`BatchResult::Prediction` / `BatchResult::Error` entries. The batch marker remains
-on the envelope. Modal's batch URL is derived from the `-predict.modal.run`
-suffix; use `with_endpoints(http_client, predict_url, batch_url)` for custom URLs,
-or `new(predict_url)?.with_http_client(http_client)` to retain derived URLs with
-custom authentication or timeouts. There is no caching or retry layer. Native callers
-supply a Tokio runtime for reqwest; this feature does not enable lexide's optional
-Tokio dependency or its text client.
+`predict_many(Vec<AudioClip<Id>>)` accepts any number of clips and streams
+`(Id, Result<RawPrediction>)` as work completes. Give each clip an ID, a duration
+hint, and `AudioInput::File(path)` or `AudioInput::Bytes(encoded_audio)`.
+The ID need not be unique; it is carried through unchanged. Files are opened
+lazily. Keep them alive until their results arrive. ffmpeg decodes file/byte
+inputs to mono 16 kHz, with symmetric padding to 0.6 seconds for short clips.
+These inputs request top-k 10, frame matrices and all heads. For custom request
+options or already-encoded float32 samples, use `AudioInput::Request`.
+
+```rust,no_run
+# async fn example(client: &lexide::pronunciation::remote::PhonemizerClient) -> anyhow::Result<()> {
+use futures::StreamExt;
+use lexide::pronunciation::remote::{AudioClip, AudioInput};
+use std::time::Duration;
+
+let results = client.predict_many(vec![AudioClip {
+    id: "clip-1",
+    duration: Duration::from_secs(3),
+    audio: AudioInput::File("clip-1.wav".into()),
+}]);
+futures::pin_mut!(results);
+while let Some((id, response)) = results.next().await {
+    println!("{id}: {:?}", response?.decode()?.phonemes);
+}
+# Ok(()) }
+```
+
+The client sorts by duration, prepares up to eight clips at a time, and sends
+up to two requests concurrently, with at most 64 successfully prepared clips
+per request. Invalid files fail individually. Failed HTTP batches retry up to
+five attempts with 5/10/15/20-second delays for transport/decode failures and
+408/425/429/500/502/503/504 statuses. Other statuses and per-item failures are
+not retried. Results retain unknown item and envelope fields for caching.
+
+For concurrent individual callers, `predict_audio(AudioInput)` coalesces work
+for 200 ms through a bounded queue shared by client clones. Both paths share
+the HTTP concurrency limit. Dropping a batch stream stops scheduling further
+clips; already-started blocking audio decodes may finish. Dropping all client
+clones lets the individual-call worker drain its queue and stop.
+
+The low-level `predict_batch` and `predict_batch_raw` methods expose one HTTP
+request for protocol-level callers; the arbitrary-sized API owns retries and
+scheduling. `with_activity(Arc<RequestActivity>)` reports actual HTTP attempts,
+retries and time without an active request. It does not measure GPU utilization.
+
+Modal's batch URL is derived from the `-predict.modal.run` suffix; use
+`with_endpoints(http_client, predict_url, batch_url)` for custom URLs or
+`with_http_client` for authentication/timeouts. Native callers supply a Tokio
+runtime. Caching and response freshness policy stay with the caller.
 
 `cache_version(&identity)` yields
 `<model_id with '/' replaced by '_'>@<first 12 revision chars>__nonblank_v1`, e.g.
