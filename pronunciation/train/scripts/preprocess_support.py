@@ -2,6 +2,7 @@
 
 import argparse
 import ast
+import hashlib
 import json
 import re
 import os
@@ -475,14 +476,60 @@ def refresh_mixed_script_exclusions(data_dir: Path, output: Path) -> None:
     build_mixed_script_exclusions.main(data_dir, output)
 
 
-def prepare(data_dir: Path, lang: str, output: Path, allow_noncommercial: bool) -> None:
+def load_training_exclusions(train_dir: Path) -> dict[str, dict[str, str]]:
+    """Match src/train_unified.py's load_asr_audit_exclusions at default thresholds.
+
+    Keep this loader lightweight: importing the trainer pulls in torch and
+    transformers. Sidecar order matches train.sh, including last-audit wins.
+    """
+    exclusions: dict[str, dict[str, str]] = {}
+    for name in (
+        "fleurs_asr_exclusions", "tatoeba_asr_exclusions", "tts_asr_exclusions",
+        "lang_exclusions", "mixed_script_exclusions", "boilerplate_exclusions",
+    ):
+        path = train_dir / f"{name}.jsonl"
+        if not path.exists():
+            continue
+        with path.open() as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                if not rec.get("ok", True):
+                    continue
+                if "per" in rec:
+                    if float(rec["per"]) < 1e-12:
+                        continue
+                else:
+                    if float(rec.get("cer", 0.0)) < 1e-12:
+                        continue
+                    if float(rec.get("wer", 0.0)) < 1e-12:
+                        continue
+                lang = rec.get("lang")
+                file = rec.get("file")
+                expected_hash = rec.get("expected_sha256")
+                if expected_hash is None and rec.get("expected") is not None:
+                    expected_hash = hashlib.sha256(rec["expected"].encode()).hexdigest()
+                if lang and file and expected_hash is not None:
+                    exclusions.setdefault(lang, {})[file] = expected_hash
+    return exclusions
+
+
+def prepare(data_dir: Path, lang: str, output: Path, allow_noncommercial: bool,
+            train_dir: Path = REPO_ROOT / "train") -> None:
     lang_dir = data_dir / lang
     phonemes_path = lang_dir / "phonemes.jsonl"
     records = [json.loads(line) for line in (lang_dir / "manifest.jsonl").read_text().splitlines() if line.strip()]
-    license_excluded = silent_dropped = 0
+    excluded_target_hashes = load_training_exclusions(train_dir).get(lang, {})
+    license_excluded = silent_dropped = audit_excluded = 0
     prepared_records: list[dict] = []
     with SilenceCache(lang_dir, phonemes_path) as silence_cache:
         for rec in tqdm(records, desc=f"{lang} silence"):
+            audited_hash = excluded_target_hashes.get(rec["file"])
+            if audited_hash is not None and audited_hash == hashlib.sha256(
+                    rec.get("sentence", "").encode()).hexdigest():
+                audit_excluded += 1
+                continue
             license_name = str(rec.get("license") or "")
             if not allow_noncommercial and (
                     "BY-NC" in license_name.upper()
@@ -499,7 +546,7 @@ def prepare(data_dir: Path, lang: str, output: Path, allow_noncommercial: bool) 
     with output.open("w") as out:
         for rec in prepared_records:
             out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    print(f"{lang}: prepared {len(prepared_records)} recordings; dropped {silent_dropped} silent and {license_excluded} noncommercial")
+    print(f"{lang}: prepared {len(prepared_records)} recordings; dropped {silent_dropped} silent, {license_excluded} noncommercial and {audit_excluded} by exclusions")
 
 
 def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str, train_dir: Path = REPO_ROOT / "train") -> None:
@@ -672,7 +719,7 @@ def main():
     parser.add_argument("--allow-noncommercial", action="store_true")
     args = parser.parse_args()
     if args.stage == "prepare":
-        prepare(args.data_dir, args.lang, args.exchange, args.allow_noncommercial)
+        prepare(args.data_dir, args.lang, args.exchange, args.allow_noncommercial, args.train_dir)
     elif args.stage == "finalize":
         finalize(args.data_dir, args.lang, args.exchange, args.identity, args.train_dir)
     elif args.stage == "guard":

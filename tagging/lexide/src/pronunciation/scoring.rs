@@ -373,7 +373,6 @@ impl PredictResponse {
         expected: &[Phonemized],
         language: Option<Language>,
     ) -> anyhow::Result<Option<PronunciationScore>> {
-        self.phonemes()?;
         let raw = self
             .phonemes
             .iter()
@@ -505,6 +504,20 @@ mod tests {
             .failure_reason(1.0)
             .unwrap()
             .starts_with("word /x y/ not heard"));
+    }
+
+    #[test]
+    fn score_normalizes_wire_artifacts_before_parsing() {
+        for raw in ["q1", "r^", "qˑ"] {
+            let prediction: PredictResponse = serde_json::from_value(serde_json::json!({
+                "phonemes": [{"phoneme": raw, "top_k": []}]
+            }))
+            .unwrap();
+            assert!(prediction.phonemes().is_err());
+            let target = Phonemized::from_ipa_tokens(&raw[..1]).unwrap();
+            let score = prediction.score(&[target], None).unwrap().unwrap();
+            assert_eq!(score.edit_distance, 0);
+        }
     }
 
     #[test]

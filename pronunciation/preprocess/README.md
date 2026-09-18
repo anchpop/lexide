@@ -55,9 +55,11 @@ No production pass or cache migration is performed by building this crate.
 Rust owns the HTTP audit, g2p calls, dialect selection, scoring, French stress,
 language filtering and VAD. Python retains audio filtering, training-schema
 adaptation, stress overrides, supervision masks, acoustic DSP, speaker embeddings
-and clustering, and Hugging Face's resumable uploader. The old shell/Python
-pipeline drivers and standalone stress/filter/VAD binaries are removed. The Modal
-services stay Python and are unchanged. Deployment is explicit:
+and clustering, and Hugging Face's resumable uploader. Before g2p, prepare skips
+clips in the six training exclusion sidecars when the audited sentence hash still
+matches, as well as silent and (unless allowed) noncommercial recordings. The old
+shell/Python pipeline drivers and standalone stress/filter/VAD binaries are
+removed. The Modal services stay Python and are unchanged. Deployment is explicit:
 
 ```sh
 cargo run --release --manifest-path preprocess/Cargo.toml -- deploy-aligner
