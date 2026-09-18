@@ -183,6 +183,17 @@ mod tests {
 
     #[test]
     fn model_inventory_is_typed_and_rejects_unsupported_targets() {
+        // Read raw spellings: Phoneme deserialization accepts NFD aliases, but
+        // Python finalization and the tokenizer compare exact strings.
+        let inventory: Value = serde_json::from_str(include_str!(
+            "../../../tagging/lexide/data/training_labels.json"
+        ))
+        .unwrap();
+        for value in inventory["phonemes"].as_array().unwrap() {
+            let spelling = value.as_str().unwrap();
+            let phone: g2p::Phoneme = spelling.parse().unwrap();
+            assert_eq!(spelling, phone.as_str(), "noncanonical model phone");
+        }
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), r#"{"phonemes":["a","tʃ"]}"#).unwrap();
         validate_phonemes(file.path()).unwrap();

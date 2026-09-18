@@ -4,7 +4,9 @@ Fresh training uses the explicit `phonemes` list in
 `tagging/lexide/data/training_labels.json`, not a borrowed tokenizer's classes.
 This is a subset of G2P's shared `Phoneme` inventory, not every phone G2P or
 WikiPron can represent. Rust preprocessing checks both inventories; Python
-finalization checks the model subset. Adding a legitimate model contrast belongs
+finalization checks the model subset. Every JSON spelling must exactly match the
+shared enum’s canonical NFC spelling; accepting an alias during Rust deserialization
+is insufficient for Python’s exact string comparisons. Adding a legitimate model contrast belongs
 to YAP-39 and requires training coverage, not just enum membership.
 
 ## Fresh training and checkpoint resume

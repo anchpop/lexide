@@ -27,6 +27,10 @@ def test_fresh_vocab_and_saved_processor_resume(tmp_path, monkeypatch):
     assert set(vocab) == preprocess.PHONEMES | {"<pad>", "<unk>"}
     assert sorted(vocab.values()) == list(range(len(vocab)))
     assert processor.tokenizer.pad_token_id == 0
+    nasal_phones = ["ã", "ẽ", "ẽː", "ĩ", "õ", "õɪ̃", "ũ", "ũɪ̃"]
+    assert not preprocess.unknown_phonemes(nasal_phones)
+    assert all(processor.tokenizer.convert_tokens_to_ids(phone) != processor.tokenizer.unk_token_id
+               for phone in nasal_phones)
     assert preprocess.unknown_phonemes(["a", "tʃ", "??", "d[", "a1", "ʲ", "<pad>", "|"]) == {
         "??", "d[", "a1", "ʲ", "<pad>", "|"}
 
