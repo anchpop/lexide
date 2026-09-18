@@ -1,8 +1,18 @@
-//! Thin async client for Modal's separate predict and predict-batch URLs.
-//! No caching, retries, runtime creation, or implicit deploy-marker checks.
+//! Async client for Modal's separate predict and predict-batch URLs.
+//! Owns bounded audio loading, request batching, coalescing and retries.
+//! Callers retain cache identity and response freshness policy.
 
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
+
+mod activity;
+mod audio;
+mod batching;
+pub use activity::{RequestActivity, RequestActivitySnapshot};
+pub use audio::{decode_audio_bytes, min_samples, request_from_samples, AudioInput};
+pub use batching::AudioClip;
+use std::sync::Arc;
+use tokio::sync::{mpsc, OnceCell, Semaphore};
 
 use super::{BatchResponse, ModelIdentity, PredictRequest, PredictResponse, RawBatchResponse};
 
@@ -11,6 +21,9 @@ pub struct PhonemizerClient {
     http: reqwest::Client,
     predict_url: String,
     batch_url: String,
+    queue: Arc<OnceCell<mpsc::Sender<batching::QueuedClip>>>,
+    requests: Arc<Semaphore>,
+    activity: Option<Arc<RequestActivity>>,
 }
 
 impl PhonemizerClient {
@@ -36,11 +49,15 @@ impl PhonemizerClient {
             http,
             predict_url,
             batch_url,
+            queue: Arc::new(OnceCell::new()),
+            requests: Arc::new(Semaphore::new(batching::REQUESTS)),
+            activity: None,
         })
     }
 
     /// Replace the HTTP client while retaining the configured endpoint URLs.
     pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+        self.queue = Arc::new(OnceCell::new());
         self.http = http;
         self
     }
@@ -144,8 +161,11 @@ impl PhonemizerClient {
     }
 
     async fn batch_body(&self, requests: &[PredictRequest]) -> Result<Vec<u8>> {
-        if !(1..=64).contains(&requests.len()) {
-            bail!("requests must contain between 1 and 64 items");
+        if !(1..=batching::BATCH_SIZE).contains(&requests.len()) {
+            bail!(
+                "requests must contain between 1 and {} items",
+                batching::BATCH_SIZE
+            );
         }
         #[derive(Serialize)]
         struct BatchRequest<'a> {

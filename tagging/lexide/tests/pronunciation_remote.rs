@@ -470,3 +470,147 @@ fn batch_accepts_the_upper_bound_and_optional_identity() {
         );
     }
 }
+
+#[tokio::test]
+async fn arbitrary_batches_compact_failures_retry_and_keep_ids_and_metadata() {
+    use futures::StreamExt;
+    use lexide::pronunciation::remote::{AudioClip, AudioInput, RequestActivity};
+    use std::sync::Arc;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}/batch", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut sizes = Vec::new();
+        while sizes.len() < 4 {
+            let (mut socket, _) = match listener.accept() {
+                Ok(socket) => socket,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "missing batch request"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&socket);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((key, value)) = line.split_once(':') {
+                    if key.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+            }
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes).unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            let requests = body["requests"].as_array().unwrap();
+            sizes.push(requests.len());
+            let (status, response) = if sizes.len() == 1 {
+                (503, json!({"detail": "cold"}))
+            } else {
+                (
+                    200,
+                    json!({"future_field": {"kept": 42}, "results": requests.iter().map(|request| {
+                    if request["top_k"] == 7 { json!({"error": {"type": "ValueError", "message": "one bad clip"}}) }
+                    else { json!({"phonemes": [], "clip_id": request["top_k"]}) }
+                }).collect::<Vec<_>>()}),
+                )
+            };
+            let body = response.to_string();
+            write!(socket, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+        sizes
+    });
+    let activity = Arc::new(RequestActivity::default());
+    let client = PhonemizerClient::with_endpoints(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        &url,
+        &url,
+    )
+    .unwrap()
+    .with_activity(activity.clone());
+    let mut clips: Vec<_> = (0..130)
+        .rev()
+        .map(|id| AudioClip {
+            id,
+            duration: Duration::from_millis(id),
+            audio: AudioInput::Request(PredictRequest {
+                top_k: id as usize,
+                ..PredictRequest::from_samples(&[0.0])
+            }),
+        })
+        .collect();
+    clips.push(AudioClip {
+        id: 130,
+        duration: Duration::ZERO,
+        audio: AudioInput::File("/missing/lexide-batch-fixture.wav".into()),
+    });
+    let mut results = tokio::time::timeout(
+        Duration::from_secs(20),
+        client.predict_many(clips).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap();
+    results.sort_by_key(|(id, _)| *id);
+    assert_eq!(results.len(), 131);
+    for (id, result) in results {
+        if id == 7 || id == 130 {
+            assert!(result.is_err());
+            continue;
+        }
+        let result = result.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(result.item.get()).unwrap()["clip_id"],
+            id
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(result.envelope["future_field"].get()).unwrap(),
+            json!({"kept": 42})
+        );
+    }
+    let mut sizes = server.join().unwrap();
+    sizes.sort();
+    assert_eq!(sizes, [2, 64, 64, 64]);
+    assert_eq!(activity.snapshot().retries, 1);
+    assert!(activity.snapshot().peak_requests <= 2);
+}
+
+#[test]
+fn file_and_byte_callers_share_the_individual_queue() {
+    use futures::future::join;
+    use lexide::pronunciation::remote::{request_from_samples, AudioInput};
+    let wav = b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\x02\0\0\0\0\0";
+    let path = std::env::temp_dir().join(format!("lexide-batch-{}.wav", std::process::id()));
+    std::fs::write(&path, wav).unwrap();
+    let request = request_from_samples(&[0.0], 16_000, 10);
+    with_response(
+        "/batch",
+        json!({"requests": [request, request]}),
+        json!({"results": [{"phonemes": []}, {"phonemes": []}]}),
+        |client| {
+            let path = path.clone();
+            async move {
+                let (a, b) = join(
+                    client.predict_audio(AudioInput::File(path)),
+                    client.predict_audio(AudioInput::Bytes(wav.to_vec())),
+                )
+                .await;
+                assert!(a.is_ok(), "{a:?}");
+                assert!(b.is_ok(), "{b:?}");
+            }
+        },
+    );
+    std::fs::remove_file(path).unwrap();
+}
