@@ -1,6 +1,6 @@
 //! Async client for Modal's separate predict and predict-batch URLs.
 //! Owns bounded audio loading, request batching, coalescing and retries.
-//! Callers retain cache identity and response freshness policy.
+//! Cache storage and policy are configured on the client; callers supply keys.
 
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
@@ -8,16 +8,24 @@ use serde::{de::DeserializeOwned, Serialize};
 mod activity;
 mod audio;
 mod batching;
+mod cache;
 pub use activity::{RequestActivity, RequestActivitySnapshot};
 pub use audio::{decode_audio_bytes, min_samples, request_from_samples, AudioInput};
 pub use batching::AudioClip;
+pub use cache::{response_identity, CachePolicy};
 use std::sync::Arc;
 use tokio::sync::{mpsc, OnceCell, Semaphore};
 
 use super::{BatchResponse, ModelIdentity, PredictRequest, PredictResponse, RawBatchResponse};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PhonemizerClient {
+    store: Option<osmo::Store>,
+    cache_policy: CachePolicy,
+    expected_identity: Option<ModelIdentity>,
+    expected_deploy_marker: Option<String>,
+    check_identity_on_miss: bool,
+    live_identity: Arc<OnceCell<ModelIdentity>>,
     http: reqwest::Client,
     predict_url: String,
     batch_url: String,
@@ -46,6 +54,12 @@ impl PhonemizerClient {
         reqwest::Url::parse(&predict_url).context("invalid predict URL")?;
         reqwest::Url::parse(&batch_url).context("invalid batch URL")?;
         Ok(Self {
+            store: None,
+            cache_policy: CachePolicy::default(),
+            expected_identity: None,
+            expected_deploy_marker: None,
+            check_identity_on_miss: false,
+            live_identity: Arc::new(OnceCell::new()),
             http,
             predict_url,
             batch_url,
@@ -238,6 +252,17 @@ fn batch_endpoint(single: &str) -> Result<String> {
     match single.strip_suffix("-predict.modal.run") {
         Some(prefix) => Ok(format!("{prefix}-predict-batch.modal.run")),
         None => bail!("supply an explicit batch URL for custom predict endpoint {single}"),
+    }
+}
+
+impl std::fmt::Debug for PhonemizerClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhonemizerClient")
+            .field("predict_url", &self.predict_url)
+            .field("batch_url", &self.batch_url)
+            .field("cache_enabled", &self.store.is_some())
+            .field("cache_policy", &self.cache_policy)
+            .finish_non_exhaustive()
     }
 }
 

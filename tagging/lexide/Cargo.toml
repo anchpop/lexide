@@ -66,6 +66,7 @@ hf-hub = { version = "0.4", optional = true, default-features = false, features 
 # HTTP shared by the remote text and pronunciation clients.
 reqwest = { version = "0.13", features = ["json"], optional = true }
 http = { version = "1", optional = true }
+osmo = { git = "https://github.com/anchpop/osmo", optional = true }
 async-stream = { version = "0.3", optional = true }
 
 # Offline pronunciation wire-format dependencies.
@@ -74,6 +75,7 @@ flate2 = { version = "1", optional = true }
 base64 = { version = "0.22", optional = true }
 
 [dev-dependencies]
+tempfile = "3"
 # Loopback HTTP tests supply the runtime just like downstream callers.
 tokio = { version = "1.42", features = ["rt"] }
 
@@ -86,7 +88,7 @@ remote = ["dep:reqwest", "dep:tokio"]
 # Pure CPU frame decoding/scoring; no inference runtime or HTTP client.
 pronunciation = ["dep:half", "dep:flate2", "dep:base64", "serde_json/raw_value"]
 # Async audio preparation and HTTP; the caller supplies its runtime.
-pronunciation-remote = ["pronunciation", "dep:reqwest", "dep:http", "dep:tokio", "dep:async-stream"]
+pronunciation-remote = ["pronunciation", "dep:reqwest", "dep:http", "dep:tokio", "dep:async-stream", "dep:osmo"]
 
 [[example]]
 name = "verify_frame_matrix"

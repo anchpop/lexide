@@ -240,6 +240,17 @@ pub struct RawPrediction {
 }
 
 impl RawPrediction {
+    /// Decode the complete cached signal without discarding the raw response.
+    pub fn frames(&self) -> Result<FrameMatrix> {
+        let response = self.decode()?;
+        FrameMatrix::decode(
+            response
+                .frame_matrix
+                .as_ref()
+                .context("response has no frame matrix")?,
+        )
+    }
+
     pub fn decode(&self) -> Result<PredictResponse> {
         let mut modal = match serde_json::from_str::<BatchResult>(self.item.get())? {
             BatchResult::Prediction(response) => response,
