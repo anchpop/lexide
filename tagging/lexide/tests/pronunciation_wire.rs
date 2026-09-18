@@ -198,3 +198,14 @@ fn optional_fields_and_unknown_server_extensions_are_compatible() {
     .unwrap();
     assert!(response.target_score.is_none());
 }
+
+#[test]
+fn wire_stress_is_not_a_segment_and_unknown_labels_are_explicit_errors() {
+    let response: PredictResponse =
+        serde_json::from_value(json!({"phonemes": [phoneme()]})).unwrap();
+    assert_eq!(response.phonemes().unwrap(), [Phoneme::A]);
+    assert_eq!(response.phonemes[0].stress, Some(1));
+    let bad: PredictResponse =
+        serde_json::from_value(json!({"phonemes": [{"phoneme": "??"}]})).unwrap();
+    assert!(bad.phonemes().is_err());
+}

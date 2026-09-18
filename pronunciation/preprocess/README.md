@@ -100,3 +100,12 @@ cargo run --manifest-path preprocess/Cargo.toml -- run \
 ```
 
 All phonemization callers use the g2p Rust library; no g2p executable is needed.
+
+### Shared phoneme inventory
+
+Rust consumes `g2p::Phonemized` with `Vec<g2p::Phoneme>` throughout label generation
+and ASR comparisons. JSON still contains the exact IPA spellings expected by
+Python. After Python finalization and acoustic narrowing, Rust validates each
+output row against that same enum before later stages proceed. Unsupported
+labels fail with the file and line number; they are never coerced to `<unk>`.
+Raw historical files are not rewritten by this API change.

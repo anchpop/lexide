@@ -179,6 +179,7 @@ impl Args {
                 .arg(identity),
             log.as_ref(),
         )?;
+        corpus::validate_phonemes(&self.data_dir.join(lang).join("phonemes.jsonl"))?;
         eprintln!("{lang}: complete");
         Ok(())
     }
@@ -280,6 +281,11 @@ impl Args {
                     };
                     for lang in langs {
                         run(self.helper(name).arg("--lang").arg(lang), None)?;
+                        if *stage == Stage::Narrow {
+                            corpus::validate_phonemes(
+                                &self.data_dir.join(lang).join("phonemes_narrowed.jsonl"),
+                            )?;
+                        }
                     }
                 }
                 Stage::Pack => {

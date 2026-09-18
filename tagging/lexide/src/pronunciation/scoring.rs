@@ -1,10 +1,10 @@
 //! Edit-distance comparison of supplied readings with the decoded prediction.
 use super::{PhonemeAlternative as RawPhonemeAlt, PredictResponse};
-use g2p_types::{Language, Phonemized};
+use g2p_types::{Language, Phoneme, Phonemized};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-type Reading = Vec<Vec<String>>;
+type Reading = Vec<Vec<Phoneme>>;
 
 /// One step of the optimal alignment between predicted and expected phoneme
 /// sequences. Read in order, the ops reconstruct both sequences and show
@@ -18,29 +18,41 @@ type Reading = Vec<Vec<String>>;
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum AlignmentOp {
     /// Same phoneme on both sides.
-    Match { phoneme: String, probability: f64 },
+    Match { phoneme: Phoneme, probability: f64 },
     /// Different phoneme — predicted has one thing, expected has another.
     Sub {
-        expected: String,
-        predicted: String,
+        expected: Phoneme,
+        predicted: Phoneme,
         predicted_prob: f64,
         expected_prob: Option<f64>,
     },
     /// Predicted has a phoneme the expected sequence doesn't.
     Extra {
-        predicted: String,
+        predicted: Phoneme,
         predicted_prob: f64,
     },
     /// Expected has a phoneme the model didn't output. We have no model
     /// position for this gap, so no probability is available.
-    Missing { expected: String },
+    Missing { expected: Phoneme },
+}
+
+/// Comparable model labels for a known phone. Only explicit ties split;
+/// language equivalences follow the existing verification policy.
+pub fn normalize_phonemes(phone: Phoneme, language: Option<Language>) -> Vec<Phoneme> {
+    normalize_token(phone.as_str(), language)
+        .iter()
+        .map(|p| {
+            p.parse()
+                .expect("comparison normalization stays in the shared inventory")
+        })
+        .collect()
 }
 
 /// Expand a raw IPA token into the deployed model's comparable token sequence.
 /// Shared by expected readings, predictions, and top-k alternatives.
 ///
 /// Only explicit tie bars split tokens: preserve untied diphthongs/diacritics.
-pub fn normalize_phonemes(token: &str, language: Option<Language>) -> Vec<String> {
+fn normalize_token(token: &str, language: Option<Language>) -> Vec<String> {
     token
         .split(['\u{0361}', '\u{035c}'])
         .filter_map(|component| normalize_phoneme(component, language))
@@ -133,16 +145,16 @@ fn normalize_with_topk(
     raw_phonemes: &[String],
     raw_top_k: &[Vec<RawPhonemeAlt>],
     language: Option<Language>,
-) -> (Vec<String>, Vec<Vec<(String, f64)>>) {
+) -> anyhow::Result<(Vec<Phoneme>, Vec<Vec<(String, f64)>>)> {
     let mut normalized = Vec::with_capacity(raw_phonemes.len());
     let mut normalized_top_k: Vec<Vec<(String, f64)>> = Vec::with_capacity(raw_phonemes.len());
 
     for (i, raw) in raw_phonemes.iter().enumerate() {
-        let components = normalize_phonemes(raw, language);
+        let components = normalize_token(raw, language);
         let mut merged = vec![HashMap::<String, f64>::new(); components.len()];
         if let Some(alts) = raw_top_k.get(i) {
             for alt in alts {
-                let alt_components = normalize_phonemes(&alt.phoneme, language);
+                let alt_components = normalize_token(&alt.phoneme, language);
                 // Alternatives must span the same number of component positions.
                 // Do not credit a single /t/ with a whole /t͡ʃ/, or duplicate an
                 // atomic alternative across both positions of a split affricate.
@@ -153,7 +165,12 @@ fn normalize_with_topk(
                 }
             }
         }
-        normalized.extend(components);
+        normalized.extend(
+            components
+                .iter()
+                .map(|p| p.parse())
+                .collect::<Result<Vec<Phoneme>, _>>()?,
+        );
         for position in merged {
             let mut alts: Vec<_> = position.into_iter().collect();
             alts.sort_by(|a, b| {
@@ -165,7 +182,7 @@ fn normalize_with_topk(
         }
     }
 
-    (normalized, normalized_top_k)
+    Ok((normalized, normalized_top_k))
 }
 
 /// Look up `phoneme`'s probability in a normalized top-k list. Returns
@@ -178,17 +195,13 @@ fn prob_of(phoneme: &str, top_k: &[(String, f64)]) -> Option<f64> {
         .map(|(_, prob)| *prob)
 }
 
-/// Levenshtein alignment with per-position probability annotations. Same
-/// algorithm as before; ops now carry the model's confidence at the
-/// predicted position so the JSONL output can show how close the model
-/// was to the correct answer.
 /// The first word of `reading` with two or more phonemes that the alignment
 /// leaves entirely unheard: every phoneme `Missing`, none matched or
 /// substituted. A whole word gone is a letter or word the audio skipped —
 /// a voice that silently drops "œ" — however small the edit distance looks
 /// beside a long example. One-phoneme words are exempt: the model does
 /// swallow a lone schwa.
-fn unheard_word<'a>(reading: &'a Reading, ops: &[AlignmentOp]) -> Option<&'a [String]> {
+fn unheard_word<'a>(reading: &'a Reading, ops: &[AlignmentOp]) -> Option<&'a [Phoneme]> {
     let mut consumed = ops
         .iter()
         .filter(|op| !matches!(op, AlignmentOp::Extra { .. }));
@@ -205,10 +218,11 @@ fn unheard_word<'a>(reading: &'a Reading, ops: &[AlignmentOp]) -> Option<&'a [St
     None
 }
 
+/// Levenshtein alignment with per-position probability annotations.
 fn align(
-    predicted: &[String],
+    predicted: &[Phoneme],
     predicted_top_k: &[Vec<(String, f64)>],
-    expected: &[String],
+    expected: &[Phoneme],
 ) -> (usize, Vec<AlignmentOp>) {
     let (m, n) = (predicted.len(), expected.len());
 
@@ -266,15 +280,15 @@ fn align(
             if dp[i - 1][j - 1] + cost == here {
                 if cost == 0 {
                     ops.push(AlignmentOp::Match {
-                        phoneme: predicted[i - 1].clone(),
+                        phoneme: predicted[i - 1],
                         probability: pred_prob(i - 1),
                     });
                 } else {
                     ops.push(AlignmentOp::Sub {
-                        expected: expected[j - 1].clone(),
-                        predicted: predicted[i - 1].clone(),
+                        expected: expected[j - 1],
+                        predicted: predicted[i - 1],
                         predicted_prob: pred_prob(i - 1),
-                        expected_prob: exp_prob_at(i - 1, &expected[j - 1]),
+                        expected_prob: exp_prob_at(i - 1, expected[j - 1].as_str()),
                     });
                 }
                 i -= 1;
@@ -284,7 +298,7 @@ fn align(
         }
         if i > 0 && dp[i - 1][j] + 1 == here {
             ops.push(AlignmentOp::Extra {
-                predicted: predicted[i - 1].clone(),
+                predicted: predicted[i - 1],
                 predicted_prob: pred_prob(i - 1),
             });
             i -= 1;
@@ -292,7 +306,7 @@ fn align(
         }
         // Remaining case: dp[i][j-1] + 1 == here
         ops.push(AlignmentOp::Missing {
-            expected: expected[j - 1].clone(),
+            expected: expected[j - 1],
         });
         j -= 1;
     }
@@ -303,15 +317,15 @@ fn align(
 /// The closest accepted reading, with normalized labels and alignment diagnostics.
 #[derive(Debug, Clone)]
 pub struct PronunciationScore {
-    pub predicted: Vec<String>,
-    pub expected: Vec<String>,
+    pub predicted: Vec<Phoneme>,
+    pub expected: Vec<Phoneme>,
     pub variant_index: usize,
     pub variants_considered: usize,
     pub edit_distance: usize,
     /// Edit distance divided by max(predicted length, expected length, 1).
     pub edit_distance_ratio: f64,
     pub alignment: Vec<AlignmentOp>,
-    pub unheard_word: Option<Vec<String>>,
+    pub unheard_word: Option<Vec<Phoneme>>,
 }
 
 impl PronunciationScore {
@@ -336,6 +350,20 @@ impl PronunciationScore {
 }
 
 impl PredictResponse {
+    /// Typed segmental output; strip the wire stress prefix (the original
+    /// response retains stress), and reject unsupported labels explicitly.
+    pub fn phonemes(&self) -> anyhow::Result<Vec<Phoneme>> {
+        self.phonemes
+            .iter()
+            .map(|p| {
+                p.phoneme
+                    .trim_start_matches(['ˈ', 'ˌ'])
+                    .parse()
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
     /// Compare supplied readings. Ties keep the first reading; an empty set
     /// returns None. Only segmental labels and word boundaries are scored;
     /// stress, tone and pitch remain available on the supplied targets.
@@ -345,6 +373,7 @@ impl PredictResponse {
         expected: &[Phonemized],
         language: Option<Language>,
     ) -> anyhow::Result<Option<PronunciationScore>> {
+        self.phonemes()?;
         let raw = self
             .phonemes
             .iter()
@@ -355,7 +384,7 @@ impl PredictResponse {
             .iter()
             .map(|p| p.top_k.clone())
             .collect::<Vec<_>>();
-        let (predicted, topk) = normalize_with_topk(&raw, &topk, language);
+        let (predicted, topk) = normalize_with_topk(&raw, &topk, language)?;
         let mut best: Option<PronunciationScore> = None;
         for (variant_index, target) in expected.iter().enumerate() {
             let spans = if target.word_spans.is_empty() {
@@ -373,7 +402,7 @@ impl PredictResponse {
                 reading.push(
                     target.phonemes[start..stop]
                         .iter()
-                        .flat_map(|p| normalize_phonemes(p, language))
+                        .flat_map(|p| normalize_phonemes(*p, language))
                         .collect::<Vec<_>>(),
                 );
                 end = stop;
@@ -385,7 +414,7 @@ impl PredictResponse {
             let flat = reading.concat();
             let (dist, alignment) = align(&predicted, &topk, &flat);
             if best.as_ref().is_none_or(|best| dist < best.edit_distance) {
-                let missing = unheard_word(&reading, &alignment).map(<[String]>::to_vec);
+                let missing = unheard_word(&reading, &alignment).map(<[Phoneme]>::to_vec);
                 let ratio = dist as f64 / predicted.len().max(flat.len()).max(1) as f64;
                 best = Some(PronunciationScore {
                     predicted: predicted.clone(),
@@ -406,22 +435,49 @@ impl PredictResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn align(
+        predicted: &[String],
+        topk: &[Vec<(String, f64)>],
+        expected: &[String],
+    ) -> (usize, Vec<AlignmentOp>) {
+        let predicted = predicted
+            .iter()
+            .map(|p| p.parse().unwrap())
+            .collect::<Vec<_>>();
+        let expected = expected
+            .iter()
+            .map(|p| p.parse().unwrap())
+            .collect::<Vec<_>>();
+        super::align(&predicted, topk, &expected)
+    }
     fn word(phones: &[&str]) -> Vec<String> {
         phones.iter().map(|p| p.to_string()).collect()
     }
     fn normalize_phonemes(token: &str, language: Language) -> Vec<String> {
-        super::normalize_phonemes(token, Some(language))
+        super::normalize_token(token, Some(language))
     }
     fn normalize_with_topk(
         raw: &[String],
         topk: &[Vec<RawPhonemeAlt>],
         language: Language,
     ) -> (Vec<String>, Vec<Vec<(String, f64)>>) {
-        super::normalize_with_topk(raw, topk, Some(language))
+        {
+            let (phones, topk) = super::normalize_with_topk(raw, topk, Some(language)).unwrap();
+            (phones.iter().map(ToString::to_string).collect(), topk)
+        }
     }
     fn normalize_phoneme(token: &str, language: Language) -> Option<String> {
         super::normalize_phoneme(token, Some(language))
     }
+    #[test]
+    fn comparison_stays_within_the_inventory() {
+        for &phone in Phoneme::ALL {
+            for language in [None, Some(Language::French), Some(Language::German)] {
+                super::normalize_phonemes(phone, language);
+            }
+        }
+    }
+
     #[test]
     fn typed_readings_select_the_best_variant_and_validate_word_spans() {
         let prediction: PredictResponse = serde_json::from_value(serde_json::json!({
@@ -429,8 +485,8 @@ mod tests {
         }))
         .unwrap();
         let targets = [
-            Phonemized::from_ipa_tokens("a c"),
-            Phonemized::from_ipa_tokens("a | b"),
+            Phonemized::from_ipa_tokens("a c").unwrap(),
+            Phonemized::from_ipa_tokens("a | b").unwrap(),
         ];
         let score = prediction.score(&targets, None).unwrap().unwrap();
         assert_eq!(score.variant_index, 1);
@@ -441,10 +497,10 @@ mod tests {
         invalid.word_spans = vec![(0, 99)];
         assert!(prediction.score(&[invalid], None).is_err());
         let missing = prediction
-            .score(&[Phonemized::from_ipa_tokens("a b | x y")], None)
+            .score(&[Phonemized::from_ipa_tokens("a b | x y").unwrap()], None)
             .unwrap()
             .unwrap();
-        assert_eq!(missing.unheard_word, Some(word(&["x", "y"])));
+        assert_eq!(missing.unheard_word, Some(vec![Phoneme::X, Phoneme::Y]));
         assert!(missing
             .failure_reason(1.0)
             .unwrap()
@@ -546,7 +602,7 @@ mod tests {
                 serde_json::from_value(fixture["expected"].clone()).unwrap();
             let expected: Vec<_> = original
                 .iter()
-                .flat_map(|p| normalize_phonemes(p, language))
+                .flat_map(|p| normalize_phonemes(p.as_str(), language))
                 .collect();
             let (heard, topk) = normalize_with_topk(&raw, &[], language);
             assert_eq!(
@@ -631,12 +687,15 @@ mod tests {
 
     #[test]
     fn unheard_word_is_one_with_no_phoneme_matched_or_substituted() {
-        let reading: Reading = vec![word(&["o", "ʊ"]), word(&["æ", "z"]), word(&["ə"])];
+        let reading: Reading = vec![word(&["o", "ʊ"]), word(&["æ", "z"]), word(&["ə"])]
+            .into_iter()
+            .map(|word| word.iter().map(|p| p.parse().unwrap()).collect())
+            .collect();
         let missing = |p: &str| AlignmentOp::Missing {
-            expected: p.to_string(),
+            expected: p.parse().unwrap(),
         };
         let matched = |p: &str| AlignmentOp::Match {
-            phoneme: p.to_string(),
+            phoneme: p.parse().unwrap(),
             probability: 1.0,
         };
         // "œ" (o ʊ) skipped entirely, the rest heard: the first word is unheard.
@@ -648,18 +707,19 @@ mod tests {
             matched("ə"),
         ];
         assert_eq!(
-            unheard_word(&reading, &ops),
-            Some(word(&["o", "ʊ"]).as_slice())
+            unheard_word(&reading, &ops)
+                .map(|word| word.iter().map(ToString::to_string).collect::<Vec<_>>()),
+            Some(word(&["o", "ʊ"]))
         );
         // A substitution counts as heard; extras don't consume expected phonemes.
         let ops = vec![
             AlignmentOp::Extra {
-                predicted: "h".into(),
+                predicted: Phoneme::H,
                 predicted_prob: 1.0,
             },
             AlignmentOp::Sub {
-                expected: "o".into(),
-                predicted: "ɔ".into(),
+                expected: Phoneme::O,
+                predicted: "ɔ".parse().unwrap(),
                 predicted_prob: 1.0,
                 expected_prob: None,
             },
@@ -708,27 +768,39 @@ mod tests {
         for op in &ops {
             match op {
                 AlignmentOp::Match { phoneme, .. } => {
-                    reconstructed_predicted.push(phoneme.clone());
-                    reconstructed_expected.push(phoneme.clone());
+                    reconstructed_predicted.push(*phoneme);
+                    reconstructed_expected.push(*phoneme);
                 }
                 AlignmentOp::Sub {
                     expected,
                     predicted,
                     ..
                 } => {
-                    reconstructed_predicted.push(predicted.clone());
-                    reconstructed_expected.push(expected.clone());
+                    reconstructed_predicted.push(*predicted);
+                    reconstructed_expected.push(*expected);
                 }
                 AlignmentOp::Extra { predicted, .. } => {
-                    reconstructed_predicted.push(predicted.clone());
+                    reconstructed_predicted.push(*predicted);
                 }
                 AlignmentOp::Missing { expected } => {
-                    reconstructed_expected.push(expected.clone());
+                    reconstructed_expected.push(*expected);
                 }
             }
         }
-        assert_eq!(reconstructed_predicted, vec!["a", "b", "c", "d", "e"]);
-        assert_eq!(reconstructed_expected, vec!["a", "x", "c", "e"]);
+        assert_eq!(
+            reconstructed_predicted
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d", "e"]
+        );
+        assert_eq!(
+            reconstructed_expected
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "x", "c", "e"]
+        );
     }
 
     #[test]

@@ -28,7 +28,7 @@ use std::collections::HashMap;
 /// Cache-key decoder revision. Any change to decoding must bump this version.
 pub const DECODER_VERSION: &str = "nonblank_v1";
 mod scoring;
-pub use g2p_types::Phonemized;
+pub use g2p_types::{Phoneme, Phonemized};
 pub use scoring::{normalize_phonemes, AlignmentOp, PronunciationScore};
 mod frame_matrix;
 pub use frame_matrix::*;
@@ -67,7 +67,7 @@ pub struct PredictRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_phonemes: Option<Vec<String>>,
+    pub target_phonemes: Option<Vec<Phoneme>>,
     #[serde(default)]
     pub return_frame_matrix: bool,
     /// Include all checkpoint auxiliary heads in the matrix, regardless of language.
@@ -335,7 +335,9 @@ pub struct DecodedPath {
     pub runs: Vec<PhoneRun>,
 }
 
-/// Whether a vocab label represents a phone rather than a special token.
+/// Whether a raw vocab label is eligible for decoding rather than a control.
+/// This preserves historical decoding choices; it does not validate membership
+/// in the shared inventory. Typed extraction reports unsupported winners.
 /// Blank IDs must additionally be excluded, regardless of their label.
 pub fn is_phone_token(token: &str) -> bool {
     !token.is_empty() && token != "|" && !(token.starts_with('<') && token.ends_with('>'))
@@ -549,6 +551,23 @@ impl FrameMatrix {
         )
     }
 
+    /// Decode into the shared inventory. Unknown emitted checkpoint labels
+    /// are errors; the original matrix and its raw vocabulary remain available.
+    pub fn phonemes(&self) -> Result<Vec<Phoneme>> {
+        self.decode_path()?
+            .runs
+            .iter()
+            .map(|run| {
+                self.vocab[run.id].parse().with_context(|| {
+                    format!(
+                        "unsupported checkpoint label at vocabulary index {}",
+                        run.id
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// The model's own reading, with blanks and repeats collapsed.
     ///
     /// Uses the nonblank-first rule of [`decode_path`], not joint argmax:
@@ -736,7 +755,7 @@ impl FrameMatrix {
         let mut spans = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
             let start = ids.len();
-            ids.extend(target.phonemes.iter().filter_map(|p| self.id(p)));
+            ids.extend(target.phonemes.iter().filter_map(|p| self.id(p.as_str())));
             anyhow::ensure!(
                 ids.len() > start,
                 "no phonemes the model knows for segment {index}"
@@ -757,14 +776,14 @@ impl FrameMatrix {
     }
 
     /// Score `target` using joint CTC likelihood and a nonblank-first free decode.
-    /// Unknown and special tokens are reported in `oov` and omitted.
-    pub fn score_target(&self, target: &Phonemized) -> TargetScore {
-        let mut ids = Vec::with_capacity(target.phonemes.len());
+    /// Shared phonemes absent from this checkpoint are reported in `oov` and omitted.
+    pub fn score_target(&self, target: &[Phoneme]) -> TargetScore {
+        let mut ids = Vec::with_capacity(target.len());
         let mut oov = Vec::new();
-        for tok in &target.phonemes {
-            match self.id(tok) {
-                Some(id) if id != self.blank_id && is_phone_token(tok) => ids.push(id),
-                _ => oov.push(tok.clone()),
+        for tok in target {
+            match self.id(tok.as_str()) {
+                Some(id) if id != self.blank_id && is_phone_token(tok.as_str()) => ids.push(id),
+                _ => oov.push(*tok),
             }
         }
         let free = self.greedy_ids();
@@ -820,10 +839,10 @@ pub struct TargetScore {
     pub ratio: Option<f64>,
     pub target_len: usize,
     pub free_len: usize,
-    /// Target phonemes outside the model's vocabulary, or special tokens — dropped from the
+    /// Target phonemes outside the model's vocabulary — dropped from the
     /// scored sequence, so a non-empty list means the score is of a
     /// *shorter* target than asked for.
-    pub oov: Vec<String>,
+    pub oov: Vec<Phoneme>,
 }
 
 fn log_add(a: f64, b: f64) -> f64 {
@@ -896,10 +915,7 @@ mod tests {
         let m = matrix(&["<pad>", "a", "b", "c"], 0, &[&speech]);
         assert!((m.log_likelihood(&[1]).unwrap() - 0.24f64.ln()).abs() < 1e-6);
         assert!((m.force_align(&[1]).unwrap()[0].logp_mean - 0.24f64.ln()).abs() < 1e-6);
-        assert_eq!(
-            m.score_target(&Phonemized::from_ipa_tokens("a")).ratio,
-            Some(0.0)
-        );
+        assert_eq!(m.score_target(&["a".parse().unwrap()]).ratio, Some(0.0));
     }
 
     #[test]
@@ -957,10 +973,14 @@ mod tests {
         }
         assert!(is_phone_token("tʃ"));
         assert_eq!(m.id("<unk>"), Some(1)); // lookup preserves wire vocab
+        let unknown = matrix(&["<pad>", "??", "a"], 0, &[&lp(&[0.1, 0.8, 0.1])]);
+        assert_eq!(unknown.greedy_ids(), [1]);
+        assert!(unknown.phonemes().is_err()); // never substitute the runner-up
+        assert_eq!(m.phonemes().unwrap(), [Phoneme::A]);
         assert_eq!(
-            m.score_target(&Phonemized::from_ipa_tokens("<unk> <pad>"))
+            m.score_target(&["x".parse().unwrap(), "y".parse().unwrap()])
                 .oov,
-            ["<unk>", "<pad>"]
+            [Phoneme::X, Phoneme::Y]
         );
         for target in [vec![], vec![0], vec![1], vec![5], vec![usize::MAX], vec![2]] {
             assert!(m.log_likelihood(&target).is_none());
@@ -991,10 +1011,7 @@ mod tests {
         assert_eq!(empty.speech_fraction(0, 1), None);
         assert!(empty.force_align(&[1]).is_none());
         assert!(empty.log_likelihood(&[1]).is_none());
-        assert_eq!(
-            empty.score_target(&Phonemized::from_ipa_tokens("")).ratio,
-            None
-        );
+        assert_eq!(empty.score_target(&[]).ratio, None);
     }
 
     fn payload(rows: &[f32], frames: usize, vocab: &[&str]) -> LegacyFrameMatrixPayload {
@@ -1100,16 +1117,21 @@ mod tests {
         let blank = lp(&[0.8, 0.1, 0.1]);
         let m = matrix(&["<pad>", "a", "b"], 0, &[&a, &a, &blank, &a, &b, &b]);
         assert_eq!(m.greedy_ids(), vec![1, 1, 2]);
-        let s = m.score_target(&Phonemized::from_ipa_tokens("a a b"));
+        let s = m.score_target(&[
+            "a".parse().unwrap(),
+            "a".parse().unwrap(),
+            "b".parse().unwrap(),
+        ]);
         assert_eq!(s.free_len, 3);
         assert_eq!(s.target_len, 3);
         // The greedy path is the model's preferred reading: ratio is ≈ 0.
         assert!(s.ratio.unwrap().abs() < 1e-9, "{s:?}");
-        let worse = m.score_target(&Phonemized::from_ipa_tokens("b a"));
+        let worse = m.score_target(&["b".parse().unwrap(), "a".parse().unwrap()]);
         assert!(worse.ratio.unwrap() < s.ratio.unwrap());
         assert_eq!(
-            m.score_target(&Phonemized::from_ipa_tokens("zz a")).oov,
-            vec!["zz".to_string()]
+            m.score_target(&["z".parse().unwrap(), "a".parse().unwrap()])
+                .oov,
+            vec!["z".parse::<Phoneme>().unwrap()]
         );
     }
 

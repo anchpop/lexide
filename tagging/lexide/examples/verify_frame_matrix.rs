@@ -45,10 +45,8 @@ fn main() -> Result<()> {
         let duration_ms = artifact["duration_ms"].as_f64().context("duration")?;
         let frame_duration_ms = matrix.frames as f64 * matrix.frame_rate_ms.unwrap();
         ensure!(duration_ms >= frame_duration_ms && duration_ms - frame_duration_ms < 30.0);
-        let target = lexide::pronunciation::Phonemized {
-            phonemes: serde_json::from_value(artifact["target"].clone())?,
-            ..Default::default()
-        };
+        let target: Vec<lexide::pronunciation::Phoneme> =
+            serde_json::from_value(artifact["target"].clone())?;
         let score = matrix.score_target(&target);
         ensure!(score == old.score_target(&target), "legacy score differs");
         let endpoint = &artifact["response"]["target_score"];
