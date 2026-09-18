@@ -26,6 +26,14 @@ pub fn validate_phonemes(path: &Path) -> Result<()> {
     struct Labels {
         phonemes: Vec<g2p::Phoneme>,
     }
+    #[derive(serde::Deserialize)]
+    struct Vocabulary {
+        phonemes: std::collections::HashSet<g2p::Phoneme>,
+    }
+    let vocabulary: Vocabulary = serde_json::from_str(include_str!(
+        "../../../tagging/lexide/data/training_labels.json"
+    ))
+    .context("invalid model phoneme inventory")?;
     for (index, line) in std::io::BufReader::new(fs::File::open(path)?)
         .lines()
         .enumerate()
@@ -41,6 +49,14 @@ pub fn validate_phonemes(path: &Path) -> Result<()> {
                 index + 1
             )
         })?;
+        for phone in &row.phonemes {
+            anyhow::ensure!(
+                vocabulary.phonemes.contains(phone),
+                "unsupported model phone {phone} in {} line {}",
+                path.display(),
+                index + 1
+            );
+        }
         anyhow::ensure!(
             !row.phonemes.is_empty(),
             "empty phonemes in {} line {}",
@@ -164,6 +180,17 @@ pub fn language(row: &Value, code: &str) -> Result<Language> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn model_inventory_is_typed_and_rejects_unsupported_targets() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), r#"{"phonemes":["a","tʃ"]}"#).unwrap();
+        validate_phonemes(file.path()).unwrap();
+        for phone in ["??", "<pad>", "a̠"] {
+            std::fs::write(file.path(), json!({"phonemes":[phone]}).to_string()).unwrap();
+            assert!(validate_phonemes(file.path()).is_err());
+        }
+    }
 
     #[test]
     fn recording_dialects_and_explicit_overrides() {

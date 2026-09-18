@@ -111,3 +111,5 @@ Python. After Python finalization and acoustic narrowing, Rust validates each
 output row against that same enum before later stages proceed. Unsupported
 labels fail with the file and line number; they are never coerced to `<unk>`.
 Raw historical files are not rewritten by this API change.
+
+Fresh-model vocabulary and relabeling requirements are documented in [../train/VOCABULARY.md](../train/VOCABULARY.md). Validation rejects controls, legacy artifacts, and phones outside the model subset; it does not silently rewrite or drop them.

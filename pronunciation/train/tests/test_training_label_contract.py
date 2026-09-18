@@ -1,12 +1,10 @@
 """Model vocabulary, offline tokenizer and staging gates."""
 
-import hashlib
 import importlib.util
 import json
 import shutil
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -17,63 +15,32 @@ sys.path.insert(0, str(SCRIPTS))
 import training_vocabulary as preprocess
 
 DEFINITION = ROOT / "tagging/lexide/data/training_labels.json"
-def test_cached_tokenizer_matches_contract():
-    from transformers import Wav2Vec2CTCTokenizer
-    from huggingface_hub import hf_hub_download
-
-    provenance = json.loads(DEFINITION.read_text())["provenance"]
-    try:
-        raw = Path(hf_hub_download(
-            provenance["tokenizer_name"], "vocab.json",
-            revision=provenance["tokenizer_revision"], local_files_only=True,
-        ))
-        pinned = Wav2Vec2CTCTokenizer.from_pretrained(
-            provenance["tokenizer_name"], revision=provenance["tokenizer_revision"],
-            local_files_only=True,
-        )
-        current = Wav2Vec2CTCTokenizer.from_pretrained(
-            provenance["tokenizer_name"], local_files_only=True,
-        )
-    except OSError as exc:
-        pytest.skip(f"offline tokenizer snapshot unavailable: {exc}")
-    assert hashlib.sha256(raw.read_bytes()).hexdigest() == provenance["raw_vocab_sha256"]
-    assert set(pinned.get_vocab()) - set(json.loads(raw.read_text())) == {"|"}
-    assert set(pinned.get_vocab()) == preprocess._tokenizer_vocab()
-    # Check the default cached source as well, not just the provenance revision.
-    # Training performs this same guard on the tokenizer it actually loads.
-    preprocess.check_training_label_vocab(preprocess.TOKENIZER_NAME, set(current.get_vocab()))
-
-
-def test_default_tokenizer_guard_and_custom_source():
-    base = preprocess._tokenizer_vocab()
-    preprocess.check_training_label_vocab(preprocess.TOKENIZER_NAME, base)
-    for changed, token in [(base - {"|"}, "|"), (base | {"unexpected"}, "unexpected")]:
-        with pytest.raises(ValueError, match="Training-label vocabulary drift") as error:
-            preprocess.check_training_label_vocab(preprocess.TOKENIZER_NAME, changed)
-        assert token in str(error.value)
-    preprocess.check_training_label_vocab("custom/processor", {"anything"})
-
-
-def test_trainer_checks_before_adding_extensions(monkeypatch):
+def test_fresh_vocab_and_saved_processor_resume(tmp_path, monkeypatch):
+    from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2Processor
     from src import train_unified as training
 
-    added = []
-    base = preprocess._tokenizer_vocab()
-    tokenizer = SimpleNamespace(get_vocab=lambda: dict.fromkeys(base),
-                                add_tokens=lambda tokens: added.extend(tokens))
-    monkeypatch.setattr(training.Wav2Vec2FeatureExtractor, "from_pretrained", lambda _: "features")
-    monkeypatch.setattr(training.Wav2Vec2CTCTokenizer, "from_pretrained", lambda _: tokenizer)
-    monkeypatch.setattr(training, "Wav2Vec2Processor", lambda **kwargs: kwargs)
-    result = training.load_processor(preprocess.TOKENIZER_NAME)
-    assert result["tokenizer"] is tokenizer
-    assert added == sorted(preprocess.VOCAB_EXTENSIONS)
-    base = base - {"|"}
-    added.clear()
-    with pytest.raises(ValueError, match="Training-label vocabulary drift"):
-        training.load_processor(preprocess.TOKENIZER_NAME)
-    assert not added
-    training.load_processor("custom/processor")
-    assert added == sorted(preprocess.VOCAB_EXTENSIONS)
+    with monkeypatch.context() as patch:
+        patch.setattr(training.Wav2Vec2FeatureExtractor, "from_pretrained",
+                      lambda _: Wav2Vec2FeatureExtractor())
+        processor = training.load_processor("feature-extractor")
+    vocab = processor.tokenizer.get_vocab()
+    assert set(vocab) == preprocess.PHONEMES | {"<pad>", "<unk>"}
+    assert sorted(vocab.values()) == list(range(len(vocab)))
+    assert processor.tokenizer.pad_token_id == 0
+    assert preprocess.unknown_phonemes(["a", "tʃ", "??", "d[", "a1", "ʲ", "<pad>", "|"]) == {
+        "??", "d[", "a1", "ʲ", "<pad>", "|"}
+
+    # A checkpoint's mapping wins even if current fresh IDs differ at the same size.
+    processor.save_pretrained(tmp_path)
+    assert training.load_processor("unused", tmp_path).tokenizer.get_vocab() == vocab
+    saved = tmp_path / "vocab.json"
+    mapping = json.loads(saved.read_text())
+    mapping["a"], mapping["b"] = mapping["b"], mapping["a"]
+    saved.write_text(json.dumps(mapping))
+    expected = Wav2Vec2Processor.from_pretrained(tmp_path, local_files_only=True)
+    resumed = training.load_processor("unused", tmp_path)
+    assert resumed.tokenizer.get_vocab() == expected.tokenizer.get_vocab()
+    assert resumed.tokenizer.convert_tokens_to_ids("a") == vocab["b"]
 
 
 def import_staged(script):

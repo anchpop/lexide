@@ -136,3 +136,9 @@ def test_loader_uses_cer_and_wer_only_without_per(tmp_path):
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     result = load_asr_audit_exclusions(path, min_per=1e-12, min_cer=1e-12, min_wer=1e-12)
     assert set(result["hin"]) == {"1.wav", "2.wav"}
+
+
+@pytest.mark.parametrize("phone", ["??", "<pad>", "|"])
+def test_invalid_phone_is_not_silently_dropped(tmp_path, monkeypatch, phone):
+    with pytest.raises(ValueError, match="unsupported training phone"):
+        make_dataset(tmp_path, monkeypatch, [{"phonemes": ["a", phone], "stress": [1, 0]}])
