@@ -495,6 +495,7 @@ async fn arbitrary_batches_compact_failures_retry_and_keep_ids_and_metadata() {
                 }
                 Err(e) => panic!("{e}"),
             };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -544,7 +545,7 @@ async fn arbitrary_batches_compact_failures_retry_and_keep_ids_and_metadata() {
     let mut clips: Vec<_> = (0..130)
         .rev()
         .map(|id| AudioClip {
-            cache_key: None,
+            cache_context: None,
             id,
             duration: Duration::from_millis(id),
             audio: AudioInput::Request(PredictRequest {
@@ -554,7 +555,7 @@ async fn arbitrary_batches_compact_failures_retry_and_keep_ids_and_metadata() {
         })
         .collect();
     clips.push(AudioClip {
-        cache_key: None,
+        cache_context: None,
         id: 130,
         duration: Duration::ZERO,
         audio: AudioInput::File("/missing/lexide-batch-fixture.wav".into()),
@@ -618,8 +619,8 @@ fn file_and_byte_callers_share_the_individual_queue() {
 }
 
 // Exercise the same cache policy for an individual call and a batch, with a
-// real osmo store and a single loopback request. Missing paths prove cache hits
-// and cache-only misses never attempt audio preparation.
+// real osmo store and a single loopback request. Invalid encoded bytes prove
+// cache hits and cache-only misses never attempt audio decoding.
 #[test]
 fn cache_policy_preserves_raw_responses_and_controls_inference() {
     use base64::Engine;
@@ -649,7 +650,14 @@ fn cache_policy_preserves_raw_responses_and_controls_inference() {
                 let dir = tempfile::tempdir().unwrap();
                 let store = osmo::Store::open(dir.path());
                 let client = client.with_cache_directory(dir.path());
-                let key = "phoneme-response/test";
+                let key = format!(
+                    "request/{}",
+                    lexide::pronunciation::remote::audio_cache_key(
+                        xxhash_rust::xxh3::xxh3_64(&serde_json::to_vec(&request).unwrap()),
+                        None
+                    )
+                );
+                let key = key.as_str();
                 if refresh {
                     let old = RawPrediction {
                         item: serde_json::value::to_raw_value(&response).unwrap(),
@@ -672,8 +680,8 @@ fn cache_policy_preserves_raw_responses_and_controls_inference() {
                         .predict_many(vec![AudioClip {
                             id: 42,
                             duration: Duration::ZERO,
-                            audio: AudioInput::Request(request),
-                            cache_key: Some(key.into()),
+                            audio: AudioInput::Request(request.clone()),
+                            cache_context: None,
                         }])
                         .collect::<Vec<_>>()
                         .await
@@ -683,7 +691,7 @@ fn cache_policy_preserves_raw_responses_and_controls_inference() {
                         .unwrap()
                 } else {
                     fetching
-                        .predict_audio(AudioInput::Request(request), Some(key))
+                        .predict_audio(AudioInput::Request(request.clone()), None)
                         .await
                         .unwrap()
                 };
@@ -694,8 +702,8 @@ fn cache_policy_preserves_raw_responses_and_controls_inference() {
                     .with_identity_check()
                     .with_expected_deploy_marker("new-deployment")
                     .with_cached_only();
-                let missing = || AudioInput::File("/missing/cache-test.wav".into());
-                let hit = offline.predict_audio(missing(), Some(key)).await.unwrap();
+                let input = || AudioInput::Request(request.clone());
+                let hit = offline.predict_audio(input(), None).await.unwrap();
                 assert_eq!(
                     serde_json::to_vec(&hit).unwrap(),
                     store.read(key).await.unwrap()
@@ -705,14 +713,14 @@ fn cache_policy_preserves_raw_responses_and_controls_inference() {
                         AudioClip {
                             id: 0,
                             duration: Duration::ZERO,
-                            audio: missing(),
-                            cache_key: Some(key.into()),
+                            audio: input(),
+                            cache_context: None,
                         },
                         AudioClip {
                             id: 1,
                             duration: Duration::ZERO,
-                            audio: missing(),
-                            cache_key: Some("different-labels".into()),
+                            audio: input(),
+                            cache_context: Some("different-labels".into()),
                         },
                     ])
                     .collect::<Vec<_>>()
@@ -724,6 +732,45 @@ fn cache_policy_preserves_raw_responses_and_controls_inference() {
                     .unwrap_err()
                     .to_string()
                     .contains("cache-only"));
+                let mut changed = request.clone();
+                changed.sample_rate = 8000;
+                assert!(offline
+                    .predict_audio(AudioInput::Request(changed), None)
+                    .await
+                    .is_err());
+                // Files use their contents, matching Bytes and independent of name.
+                let bytes = b"not decodable audio";
+                let file_key = lexide::pronunciation::remote::audio_cache_key(
+                    xxhash_rust::xxh3::xxh3_64(bytes),
+                    None,
+                );
+                fetching
+                    .cache_response(Some(&file_key), hit.clone())
+                    .await
+                    .unwrap();
+                let path = dir.path().join("audio.wav");
+                std::fs::write(&path, bytes).unwrap();
+                for audio in [
+                    AudioInput::Bytes(bytes.to_vec()),
+                    AudioInput::File(path.clone()),
+                ] {
+                    assert!(offline.predict_audio(audio, None).await.is_ok());
+                }
+                let renamed = dir.path().join("renamed.wav");
+                std::fs::rename(&path, &renamed).unwrap();
+                assert!(offline
+                    .predict_audio(AudioInput::File(renamed.clone()), None)
+                    .await
+                    .is_ok());
+                std::fs::write(&renamed, b"different audio").unwrap();
+                assert!(offline
+                    .predict_audio(AudioInput::File(renamed), None)
+                    .await
+                    .is_err());
+                assert!(offline
+                    .predict_audio(AudioInput::Bytes(bytes.to_vec()), Some("new labels"))
+                    .await
+                    .is_err());
                 // Invalid live results cannot overwrite a valid cached signal.
                 let bad = RawPrediction {
                     item: serde_json::value::to_raw_value(&json!({"phonemes": []})).unwrap(),

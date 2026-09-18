@@ -17,8 +17,8 @@ pub struct AudioClip<I> {
     pub id: I,
     pub duration: Duration,
     pub audio: AudioInput,
-    /// Complete caller-owned identity. Required when a cache is configured.
-    pub cache_key: Option<String>,
+    /// Optional extra identity (e.g. expected phonemes). Audio is always hashed.
+    pub cache_context: Option<String>,
 }
 
 pub(super) struct QueuedClip {
@@ -44,7 +44,11 @@ impl PhonemizerClient {
         async_stream::stream! {
             let mut misses = Vec::new();
             for clip in clips {
-                if let Some(key) = clip.cache_key.as_deref() {
+                let key = match self.input_cache_key(&clip.audio, clip.cache_context.as_deref()).await {
+                    Ok(key) => key,
+                    Err(error) => { yield (clip.id, Err(error)); continue; }
+                };
+                if let Some(key) = key.as_deref() {
                     if let Some(Ok(raw)) = self.cached(key).await {
                         yield (clip.id, Ok(raw));
                         continue;
@@ -52,14 +56,12 @@ impl PhonemizerClient {
                 }
                 if self.cache_policy == CachePolicy::CachedOnly {
                     yield (clip.id, Err(anyhow::anyhow!("response cache miss; cache-only mode is enabled")));
-                } else if self.store.is_some() && clip.cache_key.is_none() {
-                    yield (clip.id, Err(anyhow::anyhow!("cache key required when caching is enabled")));
                 } else {
                     misses.push(AudioClip {
-                        id: (clip.id, clip.cache_key),
+                        id: (clip.id, key),
                         duration: clip.duration,
                         audio: clip.audio,
-                        cache_key: None,
+                        cache_context: None,
                     });
                 }
             }
@@ -132,9 +134,10 @@ impl PhonemizerClient {
     pub async fn predict_audio(
         &self,
         audio: AudioInput,
-        cache_key: Option<&str>,
+        cache_context: Option<&str>,
     ) -> Result<RawPrediction> {
-        if let Some(key) = cache_key {
+        let cache_key = self.input_cache_key(&audio, cache_context).await?;
+        if let Some(key) = cache_key.as_deref() {
             if let Some(Ok(raw)) = self.cached(key).await {
                 return Ok(raw);
             }
@@ -143,13 +146,9 @@ impl PhonemizerClient {
             self.cache_policy != CachePolicy::CachedOnly,
             "response cache miss; cache-only mode is enabled"
         );
-        anyhow::ensure!(
-            self.store.is_none() || cache_key.is_some(),
-            "cache key required when caching is enabled"
-        );
         let client = self.live_client().await?;
         let raw = self.queue_audio(audio).await?;
-        client.cache_response(cache_key, raw).await
+        client.cache_response(cache_key.as_deref(), raw).await
     }
 
     async fn queue_audio(&self, audio: AudioInput) -> Result<RawPrediction> {
@@ -184,7 +183,7 @@ impl PhonemizerClient {
                                     id: item.reply,
                                     duration: Duration::ZERO,
                                     audio: item.audio,
-                                    cache_key: None,
+                                    cache_context: None,
                                 })
                                 .collect();
                             let results = client.predict_many_uncached(clips);

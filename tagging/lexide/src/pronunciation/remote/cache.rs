@@ -1,4 +1,4 @@
-//! Client-owned raw response caching. Cache identity is supplied by the caller.
+//! Client-owned raw response caching. Audio identity is automatic; callers may add cache context.
 use super::PhonemizerClient;
 use crate::pronunciation::{
     FrameMatrixPayload, ModelIdentity, PredictResponse as ModalResponse, RawPrediction,
@@ -7,12 +7,26 @@ use crate::pronunciation::{
 use anyhow::{Context, Result};
 use std::path::Path;
 
+/// Reconstruct a file/bytes cache key from a previously recorded XXH3 hash.
+/// This is for cache-only exports that no longer have the original audio.
+/// Prediction callers supply audio directly and do not need to build keys.
+pub fn audio_cache_key(audio_hash: u64, cache_context: Option<&str>) -> String {
+    let base = format!("phoneme-response/{audio_hash:016x}");
+    match cache_context {
+        None => base,
+        Some(context) => format!(
+            "{base}/context/{:016x}",
+            xxhash_rust::xxh3::xxh3_64(context.as_bytes())
+        ),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CachePolicy {
     /// Reuse valid entries; infer and save misses.
     #[default]
     ReadThrough,
-    /// Never prepare audio, probe identity, or infer on a miss.
+    /// Never decode audio, probe identity, or infer on a miss.
     CachedOnly,
     /// Explicitly replace entries using live inference.
     Refresh,
@@ -66,6 +80,17 @@ impl PhonemizerClient {
             raw.frames()?;
             Ok(raw)
         })())
+    }
+
+    pub(super) async fn input_cache_key(
+        &self,
+        audio: &super::AudioInput,
+        context: Option<&str>,
+    ) -> Result<Option<String>> {
+        if self.store.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(audio.cache_key(context).await?))
     }
 
     pub(super) async fn live_client(&self) -> Result<Self> {

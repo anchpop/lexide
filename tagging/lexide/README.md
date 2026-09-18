@@ -139,7 +139,7 @@ use std::time::Duration;
 
 let results = client.predict_many(vec![AudioClip {
     id: "clip-1",
-    cache_key: Some("phoneme-response/my-audio-and-label-hash".into()),
+    cache_context: Some("expected phoneme sequence".into()),
     duration: Duration::from_secs(3),
     audio: AudioInput::File("clip-1.wav".into()),
 }]);
@@ -182,10 +182,16 @@ let offline = client.clone().with_cached_only();
 let refresh = client.clone().with_cache_policy(CachePolicy::Refresh);
 ```
 
-Caching is opt-in. Supply the complete key on each `AudioClip` or individual
-call; a cached client rejects missing keys. Yap uses audio content plus expected
-phonemes. Lexide adds no model, version, or endpoint to the key. A valid hit is
-returned before opening audio or contacting the server. Missing or malformed
+Caching is opt-in. Lexide hashes encoded audio contents automatically: identical
+file contents and `Bytes` share an entry, independent of filename. Files are
+hashed with a bounded streaming buffer. `AudioInput::Request` hashes the entire
+prepared request, including inference options, in a separate namespace.
+
+The optional `cache_context` argument/field adds identity, such as expected
+phonemes or an explicit cache-busting value. `None` caches by audio alone;
+context never replaces the audio identity. Lexide adds no model, version, or
+endpoint to the key. A valid hit skips ffmpeg, identity probes and inference,
+but file inputs must still be readable to compute their identity. Missing or malformed
 entries are inferred and replaced in normal read-through mode. `CachedOnly`
 returns a miss error without preparation, identity probes, or inference;
 `Refresh` deliberately ignores hits and writes successful new results.
@@ -193,7 +199,9 @@ returns a miss error without preparation, identity probes, or inference;
 The cached value is `RawPrediction`, preserving unknown item/envelope fields.
 Live responses are validated and must contain a decodable frame matrix before
 being stored. `cached(key)` supports inspection/export without audio or network
-and distinguishes missing from malformed entries. `with_identity_check()` lazily
+and distinguishes missing from malformed entries. `audio_cache_key(hash, context)`
+reconstructs an encoded-audio key for exports using an already recorded XXH3 hash;
+normal prediction callers never need to build keys. `with_identity_check()` lazily
 probes once on the first miss; explicit evaluation identities/markers can be set
 with `with_expected_identity` and `with_expected_deploy_marker`. These validate
 live responses, never invalidate historical cache hits. Low-level protocol methods

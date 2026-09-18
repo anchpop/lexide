@@ -16,6 +16,36 @@ pub enum AudioInput {
 }
 
 impl AudioInput {
+    /// Hash encoded file contents, not the path. Prepared requests include all
+    /// inference options and use a separate namespace from encoded audio.
+    pub(super) async fn cache_key(&self, context: Option<&str>) -> Result<String> {
+        use xxhash_rust::xxh3::{xxh3_64, Xxh3};
+        let hash = match self {
+            Self::Bytes(bytes) => xxh3_64(bytes),
+            Self::File(path) => {
+                use tokio::io::AsyncReadExt;
+                let mut file = tokio::fs::File::open(path)
+                    .await
+                    .context("open audio for cache identity")?;
+                let mut hash = Xxh3::new();
+                let mut buffer = [0; 64 * 1024];
+                loop {
+                    let len = file.read(&mut buffer).await.context("hash audio")?;
+                    if len == 0 {
+                        break;
+                    }
+                    hash.update(&buffer[..len]);
+                }
+                hash.digest()
+            }
+            Self::Request(request) => {
+                let hash = xxh3_64(&serde_json::to_vec(request)?);
+                return Ok(format!("request/{}", super::audio_cache_key(hash, context)));
+            }
+        };
+        Ok(super::audio_cache_key(hash, context))
+    }
+
     pub(super) async fn prepare(self) -> Result<PredictRequest> {
         if let Self::Request(request) = self {
             return Ok(request);

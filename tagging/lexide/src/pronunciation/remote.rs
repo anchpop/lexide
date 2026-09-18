@@ -1,6 +1,6 @@
 //! Async client for Modal's separate predict and predict-batch URLs.
 //! Owns bounded audio loading, request batching, coalescing and retries.
-//! Cache storage and policy are configured on the client; callers supply keys.
+//! Cache storage and policy are configured on the client; audio identity is automatic.
 
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
@@ -12,7 +12,7 @@ mod cache;
 pub use activity::{RequestActivity, RequestActivitySnapshot};
 pub use audio::{decode_audio_bytes, min_samples, request_from_samples, AudioInput};
 pub use batching::AudioClip;
-pub use cache::{response_identity, CachePolicy};
+pub use cache::{audio_cache_key, response_identity, CachePolicy};
 use std::sync::Arc;
 use tokio::sync::{mpsc, OnceCell, Semaphore};
 
