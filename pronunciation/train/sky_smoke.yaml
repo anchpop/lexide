@@ -16,7 +16,7 @@ file_mounts:
   # One-tarball dataset staging: ~450k loose wavs choke rsync, and the Hub's
   # 256-commits/hour ceiling makes a loose-file dataset repo a multi-day
   # upload. Rebuild after any data or label change with:
-  #   cargo run --release --manifest-path preprocess/Cargo.toml -- --skip-narrowing   (writes .work/pron_audio.tar)
+  #   cargo run --release --manifest-path preprocess/Cargo.toml -- pack   (writes .work/pron_audio.tar)
   ~/data.tar: .work/pron_audio.tar
 
 setup: |

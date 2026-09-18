@@ -164,18 +164,17 @@ containers do not keep serving old code (only when a deployment is authorized):
    *selected* sample, so check for pattern bias before leaning on them. Nobody
    has measured the equivalent for Thai/Mandarin tone.
 2. **Preprocess** (`preprocess/`, Rust): run `cargo run --release --manifest-path
-   preprocess/Cargo.toml -- --skip-narrowing` from pronunciation/. Rust calls g2p
-   directly and runs the Python audio/training-data stages, then the Rust VAD
-   binary, speaker clustering, and dataset packing. See `preprocess/README.md`.
+   preprocess/Cargo.toml -- run --skip-narrowing --skip-upload` from pronunciation/. Rust calls g2p
+   directly and runs the Python audio/training-data stages, native VAD, speaker clustering, measurements, narrowing, packing and optional upload. See `preprocess/README.md`.
 3. **Data-quality filters** → sidecar exclusion files the trainer reads:
-   - `scripts/audit_asr_groq.py --source {fleurs,tatoeba,tts}`: Groq-Whisper transcribe +
+   - `preprocess audit --sources fleurs tatoeba tts`: Groq-Whisper transcribe +
      phoneme-PER vs the label → `train/<source>_asr_exclusions.jsonl`. Run it on
      `tts` too: the Gemini backend is an LLM reading text, so unlike Chirp3 it
      *can* paraphrase or decline, and this is what catches a clip whose audio
      stopped matching its label. (Spot-checked 12/12 verbatim at introduction.)
-   - `train/lang-filter/` (Rust + tysm + gpt-5.4-nano): flag clips whose transcript
+   - `preprocess filter` (Rust + tysm + gpt-5.4-nano): flag clips whose transcript
      isn't entirely the target language → `train/lang_exclusions.jsonl`.
-   - `train/relabel-french/`: LLM rhythmic-group stress → `fra/stress_overrides.jsonl`.
+   - `preprocess stress`: LLM rhythmic-group stress → `fra/stress_overrides.jsonl`.
 4. **Narrow** (`espeak_audit/`, optional): `measure_corpus.py` force-aligns each clip
    on Modal (pinned model) and **measures locally** (parselmouth) → cache. (Modal does
    ONLY alignment — the GPU thing that can't run locally; all DSP is local, so any
@@ -192,7 +191,7 @@ containers do not keep serving old code (only when a deployment is authorized):
 5. **Train** (`train/src/train_unified.py`) on SkyPilot/Modal GPUs; push to HF.
 6. **Eval**: the isolated minimal-pair set (gold standard) + held-out clips.
 
-`scripts/preprocess_and_upload.sh` chains the audit → filter → preprocess → upload steps.
+`preprocess run` owns the full audit → stress/filter → labels → VAD/speakers → measurements/narrowing → pack → upload sequence. Use the Cargo commands in `preprocess/README.md`; deployment is a separate explicit stage.
 
 ## Speaker identity (every clip has one — the FIELD depends on source)
 
@@ -242,11 +241,11 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
 - `data/` — downloaders + `data/audio/<lang>/` (wavs, `manifest.jsonl`, `phonemes.jsonl`).
 - `preprocess/` — Rust pipeline driver; Python stages in `train/scripts/preprocess_support.py`.
 - `train/` — `src/` (model, dataset, training), the Rust
-  `lang-filter`/`relabel-french`/`speaker-embed` crates, exclusion sidecars.
+  stage helpers and exclusion sidecars; stress/filter Rust modules live in `preprocess/src/`.
 - `espeak_audit/` — the acoustics-as-arbiter pipeline: `phonetics.py` (parselmouth
   measures), `modal_aligner.py` (Modal forced-align+measure), `measure_corpus.py`,
   `narrow.py`, `nasal_acoustic.py`, `pitch_accent_audit.py`, REPORT*.md.
-- `vad_compare/` — Rust `vad_compute` (framewise VAD).
+- `vad_compare/` — standalone VAD comparison tool; production VAD lives in `preprocess/src/audio.rs`.
 - `inference/` — `infer.py`.
 - `modal/` — hosted pronunciation app, batching helper, API docs, and tests (moved from yap).
 - `scripts/` — orchestration + one-off audits/backfills.
@@ -256,8 +255,7 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
 - **G2P**: production preprocessing calls `g2p::phonemize(Language, text)` directly
   from Rust. g2p owns engine selection and structured pronunciation annotations.
   Python `corpus_labels.py` adapts recording metadata and training fields; there
-  is no preprocessing g2p response cache or g2p subprocess. Standalone audits
-  still use `g2p_client` and `g2p serve` pending YAP-26. Some g2p implementations
+  is no preprocessing g2p response cache or g2p subprocess. ASR audits also use Rust directly. Some g2p implementations
   need `uv`; g2p manages that dependency behind its API. See `preprocess/README.md`
   and `PHONEME_BACKENDS.md`.
   - Our patches live on branch **`french-phrase-stress-liaison`**
@@ -267,9 +265,9 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
     is **rebased onto upstream master `7d426728`** (tip `354bced1`), which is
     the commit g2p's submodule pins. To move to a new fork commit: update the
     submodule in the g2p repo, bump its version, then point this repo's
-    installed binary (and yap's `rev`) at it — each consumer pins its own
+    Cargo dependency (and yap's `rev`) at it — each consumer pins its own
     g2p rev, so yap can stay on the build matching the deployed model while
-    this repo relabels with a newer one. `g2p identity` names the build.
+    this repo relabels with a newer one. `g2p::identity()` names the build.
   - **The on-disk corpus labels reproduce at tag `corpus-v1-labels`
     (= `4dd31042`), NOT at the current branch tip.** To patch or reproduce
     existing labels, build the tag. The rebase (2026-08-23) pulled in

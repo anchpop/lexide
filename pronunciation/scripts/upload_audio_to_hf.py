@@ -119,6 +119,7 @@ def main() -> None:
             folder_path=str(args.audio_root),
             repo_id=args.repo,
             repo_type="dataset",
+            ignore_patterns=[".cache/**", "**/.cache/**"],
         )
     else:
         api.upload_folder(
@@ -126,6 +127,7 @@ def main() -> None:
             repo_id=args.repo,
             repo_type="dataset",
             commit_message=args.commit_message,
+            ignore_patterns=[".cache/**", "**/.cache/**"],
         )
     print("Done.")
 

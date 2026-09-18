@@ -46,20 +46,20 @@ pip install --quiet panphon
 # on purpose: ~450k loose wavs defeat every remote transport we tried — rsync
 # crawls on them, and the Hub's 256-commits/hour ceiling turned a loose-file
 # dataset repo into a multi-day upload that stalled outright. One rsync'd file
-# beats both. Build it with `cargo run --release --manifest-path preprocess/Cargo.toml -- --skip-narrowing`.
+# beats both. Build it with `cargo run --release --manifest-path preprocess/Cargo.toml -- pack`.
 #
 # Fail closed: a missing mount used to silently fall through to a slow
 # re-download, but the worse failure is training on a partial corpus.
 if ! compgen -G "$HOME/data/*/phonemes.jsonl" > /dev/null; then
   echo "ERROR: no dataset at ~/data (expected ~/data/<lang>/phonemes.jsonl)." >&2
   echo "  The calling sky_*.yaml should untar ~/data.tar into ~/data before this runs." >&2
-  echo "  Rebuild the tar locally with: cargo run --release --manifest-path preprocess/Cargo.toml -- --skip-narrowing" >&2
+  echo "  Rebuild the tar locally with: cargo run --release --manifest-path preprocess/Cargo.toml -- pack" >&2
   exit 1
 fi
 echo "Using dataset at ~/data: $(ls ~/data | tr '\n' ' ')"
 
 # Apply the data-quality exclusion sidecars that ship in the workdir. These
-# were ALWAYS meant to gate training (preprocess_and_upload.sh's whole
+# were ALWAYS meant to gate training (the Rust pipeline's whole
 # audit/filter phase writes them) but no launch path ever passed
 # --audit-path, so every run to date — champion included — silently trained
 # on the flagged clips (discovered in the 2026-08-24 data audit). The

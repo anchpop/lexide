@@ -120,3 +120,19 @@ def test_matching_boilerplate_hash_excludes_before_audio(tmp_path, monkeypatch, 
     })
     assert not ds.samples and not reads
     assert "'asr_audit': 1" in capsys.readouterr().out
+
+
+def test_loader_uses_cer_and_wer_only_without_per(tmp_path):
+    from src.train_unified import load_asr_audit_exclusions
+
+    rows = [dict(ok=True, lang="hin", file=f"{i}.wav", expected="text", **metrics)
+            for i, metrics in enumerate([
+                {"per": 0, "cer": 1, "wer": 1},
+                {"per": 1, "cer": 0, "wer": 0},
+                {"cer": 0.5, "wer": 0.5}, {"cer": 0, "wer": 1},
+                {"cer": 1, "wer": 0},
+            ])]
+    path = tmp_path / "audit.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    result = load_asr_audit_exclusions(path, min_per=1e-12, min_cer=1e-12, min_wer=1e-12)
+    assert set(result["hin"]) == {"1.wav", "2.wav"}

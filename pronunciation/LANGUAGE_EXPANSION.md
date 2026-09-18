@@ -183,11 +183,8 @@ gate with zero unknown tokens:
   phrase-level prominence and optional schwa realization must still be judged
   from audio rather than forced into this target.
 
-`scripts/validate_expansion_prosody.py` protects interpretable anchor cases:
-the five-way Thai and Mandarin /a/ tone series, Tokyo Japanese `箸/橋/端`
-(initial/final/heiban accent), and nasal-vowel participation in Hindi surface
-syllabification. These are semantic regression checks, not substitutes for the
-source-stratified acoustic audit.
+Pronunciation regression checks live in the g2p crate alongside the engines.
+They are not substitutes for the source-stratified acoustic audit.
 
 Commercial-safe `phonemes.jsonl` and `vad.jsonl` are now in lockstep for all
 four languages (2,764 Thai; 3,246 Mandarin; 3,696 Hindi; 2,319 Japanese), with

@@ -12,3 +12,16 @@ rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+dotenvy = "0.15"
+earshot = "=1.1.0"
+futures = "0.3"
+hound = "3.5"
+indicatif = "0.17"
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+schemars = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "time"] }
+tysm = "=0.18.0"
+unicode-normalization = "0.1"
+unicode-casefold = "0.2"
+unicode-general-category = "1"

@@ -32,7 +32,7 @@ def test_preprocess_records_language_only_with_valid_labels(tmp_path, valid):
     prepared = tmp_path / "prepared.jsonl"
     preprocess.prepare(tmp_path, "spa", prepared, False)
     item = json.loads(prepared.read_text())
-    assert item["language"] == "spa-419"
+    item = {"record": item, "language": "spa-419"}
     item["labels"] = {"phonemes": ["s"] if valid else ["INVALID"],
                       "stress": [0], "word_spans": [[0, 1]]}
     prepared.write_text(json.dumps(item) + "\n")

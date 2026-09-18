@@ -1,51 +1,6 @@
 """Corpus metadata and storage around g2p's language-independent response."""
 
 
-def _variety_for_record(rec: dict, lang: str) -> str:
-    """Read dataset variety, including historical manifest voice metadata.
-
-    Only Spanish and Portuguese had non-default varieties in the old corpus.
-    This decodes saved metadata; it never chooses a phonemization engine.
-    """
-    if rec.get("variety"):
-        return rec["variety"]
-    legacy_voice = rec.get("espeak_voice")
-    if lang == "spa":
-        if legacy_voice:
-            return {"es": "european", "es-419": "latin_american"}[legacy_voice]
-        if rec.get("source") == "fleurs":
-            return "latin_american"
-        if rec.get("source") == "tts" and rec.get("tts_backend") in (None, "chirp3"):
-            voice = rec.get("voice") or ""
-            if voice.startswith("es-US-Chirp3-HD-"):
-                return "latin_american"
-            if voice.startswith("es-ES-Chirp3-HD-"):
-                return "european"
-    if lang == "por" and legacy_voice:
-        return {"pt": "european", "pt-br": "brazilian"}[legacy_voice]
-    return "default"
-
-
-def language_for_record(rec: dict, lang: str) -> str:
-    """Select g2p's combined language from recording metadata.
-
-    Historical voice/variety fields are decoded here, never sent to g2p.
-    Ordinary language codes already match the shared enum's wire values.
-    """
-    if rec.get("g2p_language"):
-        return rec["g2p_language"]
-    variety = _variety_for_record(rec, lang)
-    if lang == "spa":
-        return {"default": "spa-ES", "european": "spa-ES",
-                "latin_american": "spa-419"}[variety]
-    if lang == "por":
-        return {"default": "por-BR", "brazilian": "por-BR",
-                "european": "por-PT"}[variety]
-    if variety != "default":
-        raise ValueError(f"unsupported historical variety {variety!r} for {lang}")
-    return lang
-
-
 def training_fields(out: dict, rec: dict) -> dict:
     """Translate shared response fields to the training file's schema.
 
