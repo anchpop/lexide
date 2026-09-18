@@ -331,6 +331,18 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    // Stages run Python from different working directories (deploy-aligner runs
+    // inside espeak_audit/), so pin an explicit relative interpreter such as
+    // `scripts/py-linux.sh` to where it was given. A bare name stays a PATH lookup.
+    // Not canonicalize: a venv's python3 is a symlink whose venv identity comes
+    // from the unresolved location, so only the working directory is joined.
+    if args
+        .python
+        .parent()
+        .is_some_and(|p| !p.as_os_str().is_empty())
+    {
+        args.python = std::path::absolute(&args.python)?;
+    }
     // Load before constructing worker threads; match the former shell's local override.
     let env_files = args
         .env_file

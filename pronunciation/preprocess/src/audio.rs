@@ -1,6 +1,6 @@
 use anyhow::{Result, ensure};
 use hound::{SampleFormat, WavReader};
-use std::path::Path;
+use std::{path::Path, sync::Mutex};
 
 pub fn read(path: &Path) -> Result<(hound::WavSpec, Vec<f32>)> {
     let mut reader = WavReader::open(path)?;
@@ -32,24 +32,27 @@ pub fn vad(data_dir: &Path, lang: &str) -> Result<()> {
     use rayon::prelude::*;
     let dir = data_dir.join(lang);
     let rows = crate::corpus::read(&dir.join("phonemes.jsonl"))?;
-    let outputs = rows
-        .par_iter()
-        .map(|row| -> Result<serde_json::Value> {
-            let file = crate::corpus::text(row, "file")?;
-            let (spec, samples) = read(&dir.join(file))?;
-            ensure!(
-                spec.sample_rate == 16_000 && spec.channels == 1,
-                "{lang}/{file}: VAD requires 16 kHz mono audio"
-            );
-            let mut detector = earshot::Detector::default_boxed();
-            let probs: Vec<_> = samples
-                .as_chunks::<256>()
-                .0
-                .iter()
-                .map(|frame| detector.predict_f32(frame))
-                .collect();
-            Ok(serde_json::json!({"file": file, "vad_probs": probs}))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    crate::corpus::write(&dir.join("vad.jsonl"), &outputs)
+    // Rows stream to disk as each clip finishes: a whole language's frame
+    // probabilities (62.5 per second of audio) do not belong in memory at once.
+    let writer = Mutex::new(crate::corpus::Writer::create(&dir.join("vad.jsonl"))?);
+    rows.par_iter().try_for_each(|row| -> Result<()> {
+        let file = crate::corpus::text(row, "file")?;
+        let (spec, samples) = read(&dir.join(file))?;
+        ensure!(
+            spec.sample_rate == 16_000 && spec.channels == 1,
+            "{lang}/{file}: VAD requires 16 kHz mono audio"
+        );
+        let mut detector = earshot::Detector::default_boxed();
+        let probs: Vec<_> = samples
+            .as_chunks::<256>()
+            .0
+            .iter()
+            .map(|frame| detector.predict_f32(frame))
+            .collect();
+        writer
+            .lock()
+            .unwrap()
+            .row(&serde_json::json!({"file": file, "vad_probs": probs}))
+    })?;
+    writer.into_inner().unwrap().finish()
 }

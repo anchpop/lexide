@@ -1,8 +1,13 @@
 use anyhow::{Context, Result, bail};
 use g2p::Language;
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{fs, io::Write, path::Path};
+use std::{
+    fs,
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+};
 
 pub fn read(path: &Path) -> Result<Vec<Value>> {
     fs::read_to_string(path)
@@ -13,15 +18,42 @@ pub fn read(path: &Path) -> Result<Vec<Value>> {
         .collect()
 }
 
-pub fn write(path: &Path, rows: &[Value]) -> Result<()> {
-    fs::create_dir_all(path.parent().context("missing output directory")?)?;
-    let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
-    for row in rows {
-        serde_json::to_writer(&mut temp, row)?;
-        writeln!(temp)?;
+/// Streams JSONL rows into a buffered temp file beside `path`, which only
+/// replaces the previous file on `finish`. A failed run drops the temp file,
+/// so readers never see a partial output.
+pub struct Writer {
+    path: PathBuf,
+    temp: BufWriter<tempfile::NamedTempFile>,
+}
+
+impl Writer {
+    pub fn create(path: &Path) -> Result<Self> {
+        let parent = path.parent().context("missing output directory")?;
+        fs::create_dir_all(parent)?;
+        Ok(Self {
+            path: path.to_owned(),
+            temp: BufWriter::new(tempfile::NamedTempFile::new_in(parent)?),
+        })
     }
-    temp.persist(path)?;
-    Ok(())
+
+    pub fn row(&mut self, row: &impl Serialize) -> Result<()> {
+        serde_json::to_writer(&mut self.temp, row)?;
+        writeln!(self.temp)?;
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<()> {
+        self.temp.into_inner()?.persist(&self.path)?;
+        Ok(())
+    }
+}
+
+pub fn write(path: &Path, rows: &[Value]) -> Result<()> {
+    let mut writer = Writer::create(path)?;
+    for row in rows {
+        writer.row(row)?;
+    }
+    writer.finish()
 }
 
 /// A subset run replaces only those languages, retaining other exclusion rows.
