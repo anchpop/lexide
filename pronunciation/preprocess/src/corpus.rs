@@ -18,6 +18,39 @@ pub fn read(path: &Path) -> Result<Vec<Value>> {
         .collect()
 }
 
+/// Validate Python-produced training rows against the same inventory as G2P
+/// and inference. Keep the rest of the row opaque, including acoustic metadata.
+pub fn validate_phonemes(path: &Path) -> Result<()> {
+    use std::io::BufRead;
+    #[derive(serde::Deserialize)]
+    struct Labels {
+        phonemes: Vec<g2p::Phoneme>,
+    }
+    for (index, line) in std::io::BufReader::new(fs::File::open(path)?)
+        .lines()
+        .enumerate()
+    {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row: Labels = serde_json::from_str(&line).with_context(|| {
+            format!(
+                "invalid phoneme inventory in {} line {}",
+                path.display(),
+                index + 1
+            )
+        })?;
+        anyhow::ensure!(
+            !row.phonemes.is_empty(),
+            "empty phonemes in {} line {}",
+            path.display(),
+            index + 1
+        );
+    }
+    Ok(())
+}
+
 /// Streams JSONL rows into a buffered temp file beside `path`, which only
 /// replaces the previous file on `finish`. A failed run drops the temp file,
 /// so readers never see a partial output.

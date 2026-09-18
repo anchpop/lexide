@@ -41,9 +41,9 @@ Deserialize the endpoint's `frame_matrix` object into
 `lexide::pronunciation::FrameMatrixPayload`, then decode and rescore locally:
 
 ```rust
-use lexide::pronunciation::{FrameMatrix, FrameMatrixPayload};
+use lexide::pronunciation::{FrameMatrix, FrameMatrixPayload, Phoneme};
 
-fn rescore(payload: &FrameMatrixPayload, target: &[String]) -> anyhow::Result<()> {
+fn rescore(payload: &FrameMatrixPayload, target: &[Phoneme]) -> anyhow::Result<()> {
     let matrix = FrameMatrix::decode(payload)?;
     let decoded = matrix.decode_path()?;
     for run in &decoded.runs {
@@ -53,6 +53,36 @@ fn rescore(payload: &FrameMatrixPayload, target: &[String]) -> anyhow::Result<()
     Ok(())
 }
 ```
+
+Scoring uses shared `g2p_types::Phoneme` values. `Phonemized` carries a
+`Vec<Phoneme>` plus word boundaries and optional prosody; both are reexported here.
+Pass g2p's output directly, or import existing tokenized dictionary IPA with
+`Phonemized::from_ipa_tokens("b ɔ̃ ʒ u ʁ | m a d a m")?`.
+This conversion rejects unknown tokens. `Phonemized::from_words` assembles
+already-typed words without a string round trip.
+
+`PredictResponse::score(&[Phonemized], Option<Language>)` compares accepted
+readings by normalized edit distance and returns the closest reading, alignment,
+error ratio and missing-word diagnostic. `None` selects generic normalization;
+`Some(Language::French)` or `Some(Language::German)` also applies that language's
+comparison rules. Ties preserve input order, an empty candidate list returns
+`None`, and malformed word spans return an error. `score.failure_reason(threshold)`
+applies the empty-output, missing-word and mismatch gates.
+
+`FrameMatrix::score_target(&[Phoneme])` uses exact supplied tokens for CTC.
+`FrameMatrix::align_segments(&[Phonemized])` returns half-open frame ranges.
+These methods currently score segmental phones, not stress/tone/pitch. Lexide
+never calls a g2p engine; targets do not trigger model/build identity checks.
+
+`FrameMatrix::phonemes()` and `PredictResponse::phonemes()` return
+`Result<Vec<Phoneme>>`. They reject unsupported emitted labels rather than
+choosing a different sound. The response accessor separates the service's stress
+prefix from the segmental token; the original wire response still retains it.
+Raw payloads and response DTOs intentionally retain strings, control tokens and
+future fields. The stored raw response remains the lossless source of truth.
+Alignment operations and comparison results contain typed phones and serialize
+as the same IPA strings as before. Remote `PredictRequest::target_phonemes` is
+also typed. Model vocabulary indices remain checkpoint-specific.
 
 The wire format is row-major `[T, V]`, little-endian float16, zlib + base64,
 with tokenizer vocabulary labels and a blank ID. Decoding validates dimensions,
@@ -72,7 +102,8 @@ per-frame IDs including blanks and `PhoneRun`s with **exclusive** end frames.
 collapsed phone IDs; `id` looks up exact wire labels; `log_probs` exposes unchanged
 joint log-probabilities; `speech_fraction` measures nonblank frames in a range.
 `force_align` retains the original **inclusive** `AlignedPhoneme::end_frame`.
-`score_target` reports unknown/special target tokens in `oov` and scores the rest;
+`score_target` reports recognized phonemes absent from this checkpoint in `oov`
+and scores the rest;
 impossible or empty targets have no likelihood. All payload/score/path types
 support serde serialization.
 
