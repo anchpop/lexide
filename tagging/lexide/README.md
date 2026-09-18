@@ -119,8 +119,8 @@ predict URL**, not a nonexistent GET health route. It rejects any response
 containing `load_error`, even alongside valid model fields, and includes the
 error value in its diagnostic. `check_identity(expected)`
 returns that identity only if its deploy marker matches. This is a one-shot
-probe, not a guarantee about later containers: validate each prediction's marker
-(or the batch envelope's marker) before caching.
+probe, not a guarantee about later containers. Configure
+`with_expected_deploy_marker(expected)` to check every live response before caching.
 
 `predict_many(Vec<AudioClip<Id>>)` accepts any number of clips and streams
 `(Id, Result<RawPrediction>)` as work completes. Give each clip an ID, a duration
@@ -139,6 +139,7 @@ use std::time::Duration;
 
 let results = client.predict_many(vec![AudioClip {
     id: "clip-1",
+    cache_context: Some("expected phoneme sequence".into()),
     duration: Duration::from_secs(3),
     audio: AudioInput::File("clip-1.wav".into()),
 }]);
@@ -156,7 +157,7 @@ five attempts with 5/10/15/20-second delays for transport/decode failures and
 408/425/429/500/502/503/504 statuses. Other statuses and per-item failures are
 not retried. Results retain unknown item and envelope fields for caching.
 
-For concurrent individual callers, `predict_audio(AudioInput)` coalesces work
+For concurrent individual callers, `predict_audio(AudioInput, Option<&str>)` coalesces work
 for 200 ms through a bounded queue shared by client clones. Both paths share
 the HTTP concurrency limit. Dropping a batch stream stops scheduling further
 clips; already-started blocking audio decodes may finish. Dropping all client
@@ -170,7 +171,42 @@ retries and time without an active request. It does not measure GPU utilization.
 Modal's batch URL is derived from the `-predict.modal.run` suffix; use
 `with_endpoints(http_client, predict_url, batch_url)` for custom URLs or
 `with_http_client` for authentication/timeouts. Native callers supply a Tokio
-runtime. Caching and response freshness policy stay with the caller.
+runtime.
+
+Configure caching on the client, following tysm's builder pattern:
+
+```rust,ignore
+let client = PhonemizerClient::new(endpoint)?
+    .with_cache_directory(".cache"); // or .with_cache(shared_osmo_store)
+let offline = client.clone().with_cached_only();
+let refresh = client.clone().with_cache_policy(CachePolicy::Refresh);
+```
+
+Caching is opt-in. Lexide hashes encoded audio contents automatically: identical
+file contents and `Bytes` share an entry, independent of filename. Files are
+hashed with a bounded streaming buffer. `AudioInput::Request` hashes the entire
+prepared request, including inference options, in a separate namespace.
+
+The optional `cache_context` argument/field adds identity, such as expected
+phonemes or an explicit cache-busting value. `None` caches by audio alone;
+context never replaces the audio identity. Lexide adds no model, version, or
+endpoint to the key. A valid hit skips ffmpeg, identity probes and inference,
+but file inputs must still be readable to compute their identity. Missing or malformed
+entries are inferred and replaced in normal read-through mode. `CachedOnly`
+returns a miss error without preparation, identity probes, or inference;
+`Refresh` deliberately ignores hits and writes successful new results.
+
+The cached value is `RawPrediction`, preserving unknown item/envelope fields.
+Live responses are validated and must contain a decodable frame matrix before
+being stored. `cached(key)` supports inspection/export without audio or network
+and distinguishes missing from malformed entries. `audio_cache_key(hash, context)`
+reconstructs an encoded-audio key for exports using an already recorded XXH3 hash;
+normal prediction callers never need to build keys. `with_identity_check()` lazily
+probes once on the first miss; explicit evaluation identities/markers can be set
+with `with_expected_identity` and `with_expected_deploy_marker`. These validate
+live responses, never invalidate historical cache hits. Low-level protocol methods
+(`predict`, `predict_raw`, `predict_batch`, `predict_batch_raw`, `identity`) bypass
+the high-level cache policy. osmo sync remains an explicit caller operation.
 
 `cache_version(&identity)` yields
 `<model_id with '/' replaced by '_'>@<first 12 revision chars>__nonblank_v1`, e.g.

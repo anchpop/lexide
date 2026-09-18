@@ -1,4 +1,4 @@
-use super::{AudioInput, PhonemizerClient, RequestActivity};
+use super::{AudioInput, CachePolicy, PhonemizerClient, RequestActivity};
 use crate::pronunciation::{PredictRequest, RawPrediction};
 use anyhow::{Context, Result};
 use futures::{Stream, StreamExt};
@@ -17,6 +17,8 @@ pub struct AudioClip<I> {
     pub id: I,
     pub duration: Duration,
     pub audio: AudioInput,
+    /// Optional extra identity (e.g. expected phonemes). Audio is always hashed.
+    pub cache_context: Option<String>,
 }
 
 pub(super) struct QueuedClip {
@@ -36,6 +38,55 @@ impl PhonemizerClient {
     /// per-item errors affect one clip; exhausted HTTP failures affect one batch.
     /// Dropping the stream stops scheduling further clips.
     pub fn predict_many<'a, I: 'a>(
+        &'a self,
+        clips: Vec<AudioClip<I>>,
+    ) -> impl Stream<Item = (I, Result<RawPrediction>)> + 'a {
+        async_stream::stream! {
+            let mut misses = Vec::new();
+            for clip in clips {
+                let key = match self.input_cache_key(&clip.audio, clip.cache_context.as_deref()).await {
+                    Ok(key) => key,
+                    Err(error) => { yield (clip.id, Err(error)); continue; }
+                };
+                if let Some(key) = key.as_deref() {
+                    if let Some(Ok(raw)) = self.cached(key).await {
+                        yield (clip.id, Ok(raw));
+                        continue;
+                    }
+                }
+                if self.cache_policy == CachePolicy::CachedOnly {
+                    yield (clip.id, Err(anyhow::anyhow!("response cache miss; cache-only mode is enabled")));
+                } else {
+                    misses.push(AudioClip {
+                        id: (clip.id, key),
+                        duration: clip.duration,
+                        audio: clip.audio,
+                        cache_context: None,
+                    });
+                }
+            }
+            if !misses.is_empty() {
+                match self.live_client().await {
+                    Ok(client) => {
+                        let results = client.predict_many_uncached(misses);
+                        futures::pin_mut!(results);
+                        while let Some(((id, key), result)) = results.next().await {
+                            let result = match result {
+                                Ok(raw) => client.cache_response(key.as_deref(), raw).await,
+                                Err(error) => Err(error),
+                            };
+                            yield (id, result);
+                        }
+                    }
+                    Err(error) => for clip in misses {
+                        yield (clip.id.0, Err(anyhow::anyhow!("{error:#}")));
+                    },
+                }
+            }
+        }
+    }
+
+    fn predict_many_uncached<'a, I: 'a>(
         &'a self,
         mut clips: Vec<AudioClip<I>>,
     ) -> impl Stream<Item = (I, Result<RawPrediction>)> + 'a {
@@ -80,7 +131,27 @@ impl PhonemizerClient {
 
     /// Pool simultaneous individual callers into batch requests on this client.
     /// Clones share the queue; the caller supplies a Tokio runtime.
-    pub async fn predict_audio(&self, audio: AudioInput) -> Result<RawPrediction> {
+    pub async fn predict_audio(
+        &self,
+        audio: AudioInput,
+        cache_context: Option<&str>,
+    ) -> Result<RawPrediction> {
+        let cache_key = self.input_cache_key(&audio, cache_context).await?;
+        if let Some(key) = cache_key.as_deref() {
+            if let Some(Ok(raw)) = self.cached(key).await {
+                return Ok(raw);
+            }
+        }
+        anyhow::ensure!(
+            self.cache_policy != CachePolicy::CachedOnly,
+            "response cache miss; cache-only mode is enabled"
+        );
+        let client = self.live_client().await?;
+        let raw = self.queue_audio(audio).await?;
+        client.cache_response(cache_key.as_deref(), raw).await
+    }
+
+    async fn queue_audio(&self, audio: AudioInput) -> Result<RawPrediction> {
         let queue = self
             .queue
             .get_or_init(|| async {
@@ -112,9 +183,10 @@ impl PhonemizerClient {
                                     id: item.reply,
                                     duration: Duration::ZERO,
                                     audio: item.audio,
+                                    cache_context: None,
                                 })
                                 .collect();
-                            let results = client.predict_many(clips);
+                            let results = client.predict_many_uncached(clips);
                             futures::pin_mut!(results);
                             while let Some((reply, result)) = results.next().await {
                                 let _ = reply.send(result);
