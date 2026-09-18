@@ -27,6 +27,9 @@ use std::collections::HashMap;
 
 /// Cache-key decoder revision. Any change to decoding must bump this version.
 pub const DECODER_VERSION: &str = "nonblank_v1";
+mod scoring;
+pub use g2p_types::Phonemized;
+pub use scoring::{normalize_phonemes, AlignmentOp, PronunciationScore};
 mod frame_matrix;
 pub use frame_matrix::*;
 
@@ -722,12 +725,43 @@ impl FrameMatrix {
         Some(spans)
     }
 
+    /// Force-align supplied segments, returning half-open frame ranges.
+    /// Unknown tokens are omitted, as in target scoring. Every segment must
+    /// retain at least one model token. An empty segment list returns no spans.
+    pub fn align_segments(&self, targets: &[Phonemized]) -> Result<Vec<(usize, usize)>> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut ids = Vec::new();
+        let mut spans = Vec::with_capacity(targets.len());
+        for (index, target) in targets.iter().enumerate() {
+            let start = ids.len();
+            ids.extend(target.phonemes.iter().filter_map(|p| self.id(p)));
+            anyhow::ensure!(
+                ids.len() > start,
+                "no phonemes the model knows for segment {index}"
+            );
+            spans.push((start, ids.len()));
+        }
+        let aligned = self.force_align(&ids).with_context(|| {
+            format!(
+                "no alignment of {} phonemes over {} frames",
+                ids.len(),
+                self.frames
+            )
+        })?;
+        Ok(spans
+            .into_iter()
+            .map(|(start, end)| (aligned[start].start_frame, aligned[end - 1].end_frame + 1))
+            .collect())
+    }
+
     /// Score `target` using joint CTC likelihood and a nonblank-first free decode.
     /// Unknown and special tokens are reported in `oov` and omitted.
-    pub fn score_target(&self, target: &[String]) -> TargetScore {
-        let mut ids = Vec::with_capacity(target.len());
+    pub fn score_target(&self, target: &Phonemized) -> TargetScore {
+        let mut ids = Vec::with_capacity(target.phonemes.len());
         let mut oov = Vec::new();
-        for tok in target {
+        for tok in &target.phonemes {
             match self.id(tok) {
                 Some(id) if id != self.blank_id && is_phone_token(tok) => ids.push(id),
                 _ => oov.push(tok.clone()),
@@ -862,7 +896,10 @@ mod tests {
         let m = matrix(&["<pad>", "a", "b", "c"], 0, &[&speech]);
         assert!((m.log_likelihood(&[1]).unwrap() - 0.24f64.ln()).abs() < 1e-6);
         assert!((m.force_align(&[1]).unwrap()[0].logp_mean - 0.24f64.ln()).abs() < 1e-6);
-        assert_eq!(m.score_target(&["a".into()]).ratio, Some(0.0));
+        assert_eq!(
+            m.score_target(&Phonemized::from_ipa_tokens("a")).ratio,
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -921,7 +958,8 @@ mod tests {
         assert!(is_phone_token("tʃ"));
         assert_eq!(m.id("<unk>"), Some(1)); // lookup preserves wire vocab
         assert_eq!(
-            m.score_target(&["<unk>".into(), "<pad>".into()]).oov,
+            m.score_target(&Phonemized::from_ipa_tokens("<unk> <pad>"))
+                .oov,
             ["<unk>", "<pad>"]
         );
         for target in [vec![], vec![0], vec![1], vec![5], vec![usize::MAX], vec![2]] {
@@ -953,7 +991,10 @@ mod tests {
         assert_eq!(empty.speech_fraction(0, 1), None);
         assert!(empty.force_align(&[1]).is_none());
         assert!(empty.log_likelihood(&[1]).is_none());
-        assert_eq!(empty.score_target(&[]).ratio, None);
+        assert_eq!(
+            empty.score_target(&Phonemized::from_ipa_tokens("")).ratio,
+            None
+        );
     }
 
     fn payload(rows: &[f32], frames: usize, vocab: &[&str]) -> LegacyFrameMatrixPayload {
@@ -1059,15 +1100,15 @@ mod tests {
         let blank = lp(&[0.8, 0.1, 0.1]);
         let m = matrix(&["<pad>", "a", "b"], 0, &[&a, &a, &blank, &a, &b, &b]);
         assert_eq!(m.greedy_ids(), vec![1, 1, 2]);
-        let s = m.score_target(&["a".into(), "a".into(), "b".into()]);
+        let s = m.score_target(&Phonemized::from_ipa_tokens("a a b"));
         assert_eq!(s.free_len, 3);
         assert_eq!(s.target_len, 3);
         // The greedy path is the model's preferred reading: ratio is ≈ 0.
         assert!(s.ratio.unwrap().abs() < 1e-9, "{s:?}");
-        let worse = m.score_target(&["b".into(), "a".into()]);
+        let worse = m.score_target(&Phonemized::from_ipa_tokens("b a"));
         assert!(worse.ratio.unwrap() < s.ratio.unwrap());
         assert_eq!(
-            m.score_target(&["zz".into(), "a".into()]).oov,
+            m.score_target(&Phonemized::from_ipa_tokens("zz a")).oov,
             vec!["zz".to_string()]
         );
     }

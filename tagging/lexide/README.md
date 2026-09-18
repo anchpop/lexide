@@ -41,9 +41,9 @@ Deserialize the endpoint's `frame_matrix` object into
 `lexide::pronunciation::FrameMatrixPayload`, then decode and rescore locally:
 
 ```rust
-use lexide::pronunciation::{FrameMatrix, FrameMatrixPayload};
+use lexide::pronunciation::{FrameMatrix, FrameMatrixPayload, Phonemized};
 
-fn rescore(payload: &FrameMatrixPayload, target: &[String]) -> anyhow::Result<()> {
+fn rescore(payload: &FrameMatrixPayload, target: &Phonemized) -> anyhow::Result<()> {
     let matrix = FrameMatrix::decode(payload)?;
     let decoded = matrix.decode_path()?;
     for run in &decoded.runs {
@@ -53,6 +53,23 @@ fn rescore(payload: &FrameMatrixPayload, target: &[String]) -> anyhow::Result<()
     Ok(())
 }
 ```
+
+Scoring accepts the shared `g2p_types::Phonemized` (also reexported here).
+Pass g2p's output directly, or import existing tokenized dictionary IPA with
+`Phonemized::from_ipa_tokens("b ɔ̃ ʒ u ʁ | m a d a m")`.
+
+`PredictResponse::score(&[Phonemized], Option<Language>)` compares accepted
+readings by normalized edit distance and returns the closest reading, alignment,
+error ratio and missing-word diagnostic. `None` selects generic normalization;
+`Some(Language::French)` or `Some(Language::German)` also applies that language's
+comparison rules. Ties preserve input order, an empty candidate list returns
+`None`, and malformed word spans return an error. `score.failure_reason(threshold)`
+applies the empty-output, missing-word and mismatch gates.
+
+`FrameMatrix::score_target(&Phonemized)` uses exact supplied tokens for CTC.
+`FrameMatrix::align_segments(&[Phonemized])` returns half-open frame ranges.
+These methods currently score segmental phones, not stress/tone/pitch. Lexide
+never calls a g2p engine; targets do not trigger model/build identity checks.
 
 The wire format is row-major `[T, V]`, little-endian float16, zlib + base64,
 with tokenizer vocabulary labels and a blank ID. Decoding validates dimensions,

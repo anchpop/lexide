@@ -698,7 +698,7 @@ dependencies = [
 [[package]]
 name = "g2p-types"
 version = "0.4.0"
-source = "git+https://github.com/anchpop/g2p?rev=2eec7e1affb49ba1af91844039299730dd1d954e#2eec7e1affb49ba1af91844039299730dd1d954e"
+source = "git+https://github.com/anchpop/g2p?rev=f946b19424f92556f62a5ec0844e5fef87b4a7d7#f946b19424f92556f62a5ec0844e5fef87b4a7d7"
 dependencies = [
  "serde",
 ]

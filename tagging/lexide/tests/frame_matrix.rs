@@ -78,8 +78,10 @@ fn legacy_has_no_fabricated_provenance_or_timebase() {
     assert!(m.schema_version.is_none() && m.producer.is_none() && m.trained_against_g2p.is_none());
     assert!(m.sample_rate.is_none() && m.frame_rate_ms.is_none() && m.heads.is_empty());
     assert_eq!(
-        m.score_target(&["a".into()]),
-        decode(raw).unwrap().score_target(&["a".into()])
+        m.score_target(&lexide::pronunciation::Phonemized::from_ipa_tokens("a")),
+        decode(raw)
+            .unwrap()
+            .score_target(&lexide::pronunciation::Phonemized::from_ipa_tokens("a"))
     );
     for version in [json!(2), json!(null), json!("1"), json!(true), json!(1.0)] {
         let mut invalid = legacy.clone();
