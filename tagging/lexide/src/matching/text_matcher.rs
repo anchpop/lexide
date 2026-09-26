@@ -75,7 +75,7 @@ impl<K: Clone> TextMatcher<K> {
     /// A vector of matches, where each match contains the pattern index and token positions.
     pub fn find_all<'a>(&'a self, tokenization: &'a Tokenization) -> Vec<Match<'a, Text, K>> {
         let text_sequence: Vec<Text> = tokenization
-            .tokens
+            .tokens()
             .iter()
             .map(|token| token.text.clone())
             .collect();
@@ -97,7 +97,7 @@ impl<K: Clone> TextMatcher<K> {
     /// `true` if any pattern is found, `false` otherwise.
     pub fn contains(&self, tokenization: &Tokenization) -> bool {
         let text_sequence: Vec<Text> = tokenization
-            .tokens
+            .tokens()
             .iter()
             .map(|token| token.text.clone())
             .collect();

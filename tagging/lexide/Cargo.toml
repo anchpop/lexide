@@ -1,6 +1,6 @@
 [package]
 name = "lexide"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Multilingual text analysis and pronunciation decoding, CTC scoring, and forced alignment"
 license = "MIT OR Apache-2.0"
@@ -42,6 +42,7 @@ name = "matching"
 required-features = ["local"]
 
 [dependencies]
+lexide-types = { path = "../lexide-types", version = "0.1.0" }
 g2p-types = { git = "https://github.com/anchpop/g2p", rev = "ef90533979a537469a2dc03546cb5d5c5d208c77" }
 # Async runtime shared by the local and remote backends only.
 tokio = { version = "1.42", features = ["full"], optional = true }

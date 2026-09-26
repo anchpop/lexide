@@ -309,6 +309,6 @@ impl RemoteClient {
                 head: pt.head,
             })
             .collect();
-        Ok(tokens_from_raw(&rtoks, sentence))
+        Ok(tokens_from_raw(&rtoks, sentence)?)
     }
 }

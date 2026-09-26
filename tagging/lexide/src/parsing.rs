@@ -2,6 +2,16 @@
 use crate::{Lemma, Text, Token, Tokenization};
 use anyhow::{Context, Result};
 
+// Model output stays unvalidated until reconstruction repair finishes.
+struct ModelToken {
+    text: Text,
+    whitespace: String,
+    pos: crate::PartOfSpeech,
+    lemma: Lemma,
+    dep: crate::DependencyRelation,
+    head: i32,
+}
+
 /// Create the prompt in the expected format
 pub fn create_prompt(sentence: &str, language: crate::Language) -> String {
     format!(
@@ -84,7 +94,7 @@ pub fn parse_response(response: &str, sentence: &str) -> Result<Tokenization> {
             let dep = serde_plain::from_str(&dep)
                 .context(format!("Failed to parse dependency in line: {}", line))?;
 
-            tokens.push(Token {
+            tokens.push(ModelToken {
                 text,
                 whitespace,
                 pos,
@@ -128,7 +138,26 @@ pub fn parse_response(response: &str, sentence: &str) -> Result<Tokenization> {
         );
     }
 
-    Ok(Tokenization { tokens })
+    let tokens = tokens
+        .into_iter()
+        .enumerate()
+        .map(|(index, token)| {
+            Ok(Token {
+                text: token.text,
+                whitespace: token.whitespace.parse().map_err(|_| {
+                    crate::TokenizationError::InvalidGap {
+                        index,
+                        gap: token.whitespace,
+                    }
+                })?,
+                pos: token.pos,
+                lemma: token.lemma,
+                dep: token.dep,
+                head: token.head,
+            })
+        })
+        .collect::<Result<Vec<_>, crate::TokenizationError>>()?;
+    Ok(Tokenization::new(sentence, tokens)?)
 }
 
 /// Normalize Unicode characters for comparison (remove accents, normalize punctuation)
@@ -150,7 +179,7 @@ fn normalize_unicode(s: &str) -> String {
 }
 
 /// Attempt to fix reconstruction mismatches
-fn fix_reconstruction(tokens: &mut Vec<Token>, sentence: &str) -> bool {
+fn fix_reconstruction(tokens: &mut Vec<ModelToken>, sentence: &str) -> bool {
     let reconstructed: String = tokens
         .iter()
         .map(|token| format!("{}{}", token.text.text, token.whitespace))
@@ -295,6 +324,17 @@ mod tests {
     use super::*;
     use crate::{dep::DependencyRelation, pos::PartOfSpeech};
 
+    #[test]
+    fn repair_precedes_strict_validation() {
+        let response = "0\tBonjour\tthinsp\tINTJ\tbonjour\troot\t0\n1\t!\tnone\tPUNCT\t!\tpunct\t1";
+        let parsed = parse_response(response, "Bonjour !").unwrap();
+        assert_eq!(parsed.tokens()[0].whitespace, crate::Whitespace::Space);
+        assert!(parse_response(response, "Bonjour\u{2009}!").is_err());
+        assert!(parse_response(response, "Bonjour  !").is_err());
+        assert!(parse_response(response, " Bonjour !").is_err());
+        assert!(parse_response("0\ta b\tnone\tNOUN\ta b\troot\t0", "a b").is_err());
+    }
+
     /// Helper function to create a test token
     fn create_test_token(
         text: &str,
@@ -303,8 +343,8 @@ mod tests {
         lemma: &str,
         dep: DependencyRelation,
         head: i32,
-    ) -> Token {
-        Token {
+    ) -> ModelToken {
+        ModelToken {
             text: Text {
                 text: text.to_string(),
             },
