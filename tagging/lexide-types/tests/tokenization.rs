@@ -69,16 +69,21 @@ fn constructor_and_accessors_preserve_sentence_and_tokens() {
 }
 
 #[test]
-fn constructor_rejects_empty_or_whitespace_containing_tokens() {
-    for text in [
-        "",
-        "a b",
-        "a\tb",
-        "a\nb",
-        "a\u{a0}b",
-        "a\u{202f}b",
-        "\u{3000}",
-    ] {
+fn constructor_allows_internal_but_not_edge_whitespace_in_tokens() {
+    // Multiword names are deliberately single tokens.
+    for text in ["a b", "New York", "a\u{a0}b", "a\u{202f}b"] {
+        assert!(
+            Tokenization::new(
+                format!("ok {text}"),
+                vec![
+                    token("ok", Whitespace::Space),
+                    token(text, Whitespace::None)
+                ]
+            )
+            .is_ok()
+        );
+    }
+    for text in ["", " a", "a ", "\ta", "a\n", "\u{3000}"] {
         assert_eq!(
             Tokenization::new(
                 format!("ok {text}"),
@@ -118,7 +123,7 @@ fn serde_enforces_constructor_and_requires_sentence() {
             .tokens(),
         valid.tokens()
     );
-    for text in ["", "hello world"] {
+    for text in ["", " hello", "hello "] {
         let mut invalid = wire.clone();
         invalid["tokens"][0]["text"]["text"] = json!(text);
         invalid["sentence"] = json!(text);

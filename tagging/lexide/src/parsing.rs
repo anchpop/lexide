@@ -332,7 +332,7 @@ mod tests {
         assert!(parse_response(response, "Bonjour\u{2009}!").is_err());
         assert!(parse_response(response, "Bonjour  !").is_err());
         assert!(parse_response(response, " Bonjour !").is_err());
-        assert!(parse_response("0\ta b\tnone\tNOUN\ta b\troot\t0", "a b").is_err());
+        assert!(parse_response("0\ta b\tnone\tNOUN\ta b\troot\t0", "a b").is_ok());
     }
 
     /// Helper function to create a test token

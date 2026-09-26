@@ -1,6 +1,6 @@
 [package]
 name = "lexide"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "Multilingual text analysis and pronunciation decoding, CTC scoring, and forced alignment"
 license = "MIT OR Apache-2.0"
