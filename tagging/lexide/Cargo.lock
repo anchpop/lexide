@@ -698,7 +698,7 @@ dependencies = [
 [[package]]
 name = "g2p-types"
 version = "0.4.0"
-source = "git+https://github.com/anchpop/g2p?rev=db3cc12b4f2cf916342304c83314f4cabc8993f7#db3cc12b4f2cf916342304c83314f4cabc8993f7"
+source = "git+https://github.com/anchpop/g2p?rev=ef90533979a537469a2dc03546cb5d5c5d208c77#ef90533979a537469a2dc03546cb5d5c5d208c77"
 dependencies = [
  "serde",
  "unicode-normalization",

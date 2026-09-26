@@ -42,7 +42,7 @@ name = "matching"
 required-features = ["local"]
 
 [dependencies]
-g2p-types = { git = "https://github.com/anchpop/g2p", rev = "db3cc12b4f2cf916342304c83314f4cabc8993f7" }
+g2p-types = { git = "https://github.com/anchpop/g2p", rev = "ef90533979a537469a2dc03546cb5d5c5d208c77" }
 # Async runtime shared by the local and remote backends only.
 tokio = { version = "1.42", features = ["full"], optional = true }
 # Core dependencies (serde also supports the always-available text types).
