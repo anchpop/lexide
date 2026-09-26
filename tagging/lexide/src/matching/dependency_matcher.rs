@@ -229,20 +229,20 @@ impl TryFrom<Tokenization> for TreeNode {
     fn try_from(value: Tokenization) -> Result<Self, Self::Error> {
         // Find the root token (where dep == "root" or head points to itself in 1-indexed terms)
         let root_idx = value
-            .tokens
+            .tokens()
             .iter()
             .enumerate()
             .position(|(idx, t)| t.dep == DependencyRelation::Root || t.head as usize == idx + 1)
             .ok_or("No root token found in tokenization")?;
 
-        let tree = build_tree_node(&value.tokens, root_idx);
+        let tree = build_tree_node(value.tokens(), root_idx);
 
         // Validate that all tokens ended up in the tree. Tokens with out-of-bounds
         // head indices become orphaned and produce overly broad patterns that match
         // far too many sentences (e.g. a bare "être" root matching every sentence
         // containing "être").
         let node_count = count_nodes(&tree);
-        if node_count != value.tokens.len() {
+        if node_count != value.tokens().len() {
             return Err("Tree has orphaned tokens (likely due to invalid head indices)");
         }
 
@@ -503,58 +503,56 @@ mod tests {
     #[test]
     fn test_tree_node_from_tokenization() {
         // Test with: "I love programming."
-        let tokenization = Tokenization {
-            tokens: vec![
-                Token {
-                    text: Text {
-                        text: "I".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Pron,
-                    lemma: Lemma {
-                        lemma: "I".to_string(),
-                    },
-                    dep: DependencyRelation::Nsubj,
-                    head: 2,
+        let tokenization = crate::matching::tokenization(vec![
+            Token {
+                text: Text {
+                    text: "I".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "love".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Verb,
-                    lemma: Lemma {
-                        lemma: "love".to_string(),
-                    },
-                    dep: DependencyRelation::Root,
-                    head: 0,
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Pron,
+                lemma: Lemma {
+                    lemma: "I".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "programming".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Noun,
-                    lemma: Lemma {
-                        lemma: "programming".to_string(),
-                    },
-                    dep: DependencyRelation::Obj,
-                    head: 2,
+                dep: DependencyRelation::Nsubj,
+                head: 2,
+            },
+            Token {
+                text: Text {
+                    text: "love".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: ".".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Punct,
-                    lemma: Lemma {
-                        lemma: ".".to_string(),
-                    },
-                    dep: DependencyRelation::Punct,
-                    head: 2,
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Verb,
+                lemma: Lemma {
+                    lemma: "love".to_string(),
                 },
-            ],
-        };
+                dep: DependencyRelation::Root,
+                head: 0,
+            },
+            Token {
+                text: Text {
+                    text: "programming".to_string(),
+                },
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Noun,
+                lemma: Lemma {
+                    lemma: "programming".to_string(),
+                },
+                dep: DependencyRelation::Obj,
+                head: 2,
+            },
+            Token {
+                text: Text {
+                    text: ".".to_string(),
+                },
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Punct,
+                lemma: Lemma {
+                    lemma: ".".to_string(),
+                },
+                dep: DependencyRelation::Punct,
+                head: 2,
+            },
+        ]);
 
         let tree: TreeNode = tokenization.try_into().unwrap();
 
@@ -600,7 +598,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: " ".to_string(),
+                whitespace: crate::Whitespace::Space,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -617,7 +615,7 @@ mod tests {
                             text: Text {
                                 text: "I".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "I".to_string(),
@@ -636,7 +634,7 @@ mod tests {
                             text: Text {
                                 text: "programming".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Noun,
                             lemma: Lemma {
                                 lemma: "programming".to_string(),
@@ -657,7 +655,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -675,7 +673,7 @@ mod tests {
                 text: Text {
                     text: "programming".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Noun,
                 lemma: Lemma {
                     lemma: "programming".to_string(),
@@ -693,7 +691,7 @@ mod tests {
                 text: Text {
                     text: "I".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Pron,
                 lemma: Lemma {
                     lemma: "I".to_string(),
@@ -723,7 +721,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: " ".to_string(),
+                whitespace: crate::Whitespace::Space,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -740,7 +738,7 @@ mod tests {
                             text: Text {
                                 text: "I".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "I".to_string(),
@@ -759,7 +757,7 @@ mod tests {
                             text: Text {
                                 text: "programming".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Noun,
                             lemma: Lemma {
                                 lemma: "programming".to_string(),
@@ -780,7 +778,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -796,7 +794,7 @@ mod tests {
                         text: Text {
                             text: "programming".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Noun,
                         lemma: Lemma {
                             lemma: "programming".to_string(),
@@ -816,7 +814,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -832,7 +830,7 @@ mod tests {
                         text: Text {
                             text: "I".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Pron,
                         lemma: Lemma {
                             lemma: "I".to_string(),
@@ -852,7 +850,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -868,7 +866,7 @@ mod tests {
                         text: Text {
                             text: "coding".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Noun,
                         lemma: Lemma {
                             lemma: "coding".to_string(),
@@ -899,7 +897,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -923,7 +921,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -940,7 +938,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -957,7 +955,7 @@ mod tests {
                 text: Text {
                     text: "walk".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "walk".to_string(),
@@ -984,7 +982,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -1001,7 +999,7 @@ mod tests {
                 text: Text {
                     text: "walk".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "walk".to_string(),
@@ -1018,7 +1016,7 @@ mod tests {
                 text: Text {
                     text: "jump".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "jump".to_string(),
@@ -1045,7 +1043,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: " ".to_string(),
+                whitespace: crate::Whitespace::Space,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -1062,7 +1060,7 @@ mod tests {
                             text: Text {
                                 text: "I".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "I".to_string(),
@@ -1081,7 +1079,7 @@ mod tests {
                             text: Text {
                                 text: "programming".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Noun,
                             lemma: Lemma {
                                 lemma: "programming".to_string(),
@@ -1100,7 +1098,7 @@ mod tests {
                             text: Text {
                                 text: "love".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Verb,
                             lemma: Lemma {
                                 lemma: "love".to_string(),
@@ -1116,7 +1114,7 @@ mod tests {
                                     text: Text {
                                         text: "coding".to_string(),
                                     },
-                                    whitespace: "".to_string(),
+                                    whitespace: crate::Whitespace::None,
                                     pos: PartOfSpeech::Noun,
                                     lemma: Lemma {
                                         lemma: "coding".to_string(),
@@ -1139,7 +1137,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -1155,7 +1153,7 @@ mod tests {
                         text: Text {
                             text: "programming".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Noun,
                         lemma: Lemma {
                             lemma: "programming".to_string(),
@@ -1175,7 +1173,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -1191,7 +1189,7 @@ mod tests {
                         text: Text {
                             text: "coding".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Noun,
                         lemma: Lemma {
                             lemma: "coding".to_string(),
@@ -1221,7 +1219,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -1238,7 +1236,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -1268,7 +1266,7 @@ mod tests {
                 text: Text {
                     text: "think".to_string(),
                 },
-                whitespace: " ".to_string(),
+                whitespace: crate::Whitespace::Space,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "think".to_string(),
@@ -1285,7 +1283,7 @@ mod tests {
                             text: Text {
                                 text: "I".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "I".to_string(),
@@ -1304,7 +1302,7 @@ mod tests {
                             text: Text {
                                 text: "said".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Verb,
                             lemma: Lemma {
                                 lemma: "say".to_string(),
@@ -1321,7 +1319,7 @@ mod tests {
                                         text: Text {
                                             text: "you".to_string(),
                                         },
-                                        whitespace: " ".to_string(),
+                                        whitespace: crate::Whitespace::Space,
                                         pos: PartOfSpeech::Pron,
                                         lemma: Lemma {
                                             lemma: "you".to_string(),
@@ -1340,7 +1338,7 @@ mod tests {
                                         text: Text {
                                             text: "loves".to_string(),
                                         },
-                                        whitespace: " ".to_string(),
+                                        whitespace: crate::Whitespace::Space,
                                         pos: PartOfSpeech::Verb,
                                         lemma: Lemma {
                                             lemma: "love".to_string(),
@@ -1357,7 +1355,7 @@ mod tests {
                                                     text: Text {
                                                         text: "he".to_string(),
                                                     },
-                                                    whitespace: " ".to_string(),
+                                                    whitespace: crate::Whitespace::Space,
                                                     pos: PartOfSpeech::Pron,
                                                     lemma: Lemma {
                                                         lemma: "he".to_string(),
@@ -1376,7 +1374,7 @@ mod tests {
                                                     text: Text {
                                                         text: "programming".to_string(),
                                                     },
-                                                    whitespace: "".to_string(),
+                                                    whitespace: crate::Whitespace::None,
                                                     pos: PartOfSpeech::Noun,
                                                     lemma: Lemma {
                                                         lemma: "programming".to_string(),
@@ -1403,7 +1401,7 @@ mod tests {
                 text: Text {
                     text: "programming".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Noun,
                 lemma: Lemma {
                     lemma: "programming".to_string(),
@@ -1421,7 +1419,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -1437,7 +1435,7 @@ mod tests {
                         text: Text {
                             text: "he".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Pron,
                         lemma: Lemma {
                             lemma: "he".to_string(),
@@ -1457,7 +1455,7 @@ mod tests {
                 text: Text {
                     text: "say".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "say".to_string(),
@@ -1487,7 +1485,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: " ".to_string(),
+                whitespace: crate::Whitespace::Space,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -1504,7 +1502,7 @@ mod tests {
                             text: Text {
                                 text: "I".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "I".to_string(),
@@ -1523,7 +1521,7 @@ mod tests {
                             text: Text {
                                 text: "marathon".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Noun,
                             lemma: Lemma {
                                 lemma: "marathon".to_string(),
@@ -1544,7 +1542,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -1562,7 +1560,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -1578,7 +1576,7 @@ mod tests {
                         text: Text {
                             text: "I".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Pron,
                         lemma: Lemma {
                             lemma: "I".to_string(),
@@ -1598,7 +1596,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -1615,7 +1613,7 @@ mod tests {
                             text: Text {
                                 text: "I".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "I".to_string(),
@@ -1634,7 +1632,7 @@ mod tests {
                             text: Text {
                                 text: "marathon".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Noun,
                             lemma: Lemma {
                                 lemma: "marathon".to_string(),
@@ -1666,7 +1664,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -1682,7 +1680,7 @@ mod tests {
                         text: Text {
                             text: "I".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Pron,
                         lemma: Lemma {
                             lemma: "I".to_string(),
@@ -1702,7 +1700,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -1718,7 +1716,7 @@ mod tests {
                         text: Text {
                             text: "marathon".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Noun,
                         lemma: Lemma {
                             lemma: "marathon".to_string(),
@@ -1747,7 +1745,7 @@ mod tests {
                 text: Text {
                     text: "think".to_string(),
                 },
-                whitespace: " ".to_string(),
+                whitespace: crate::Whitespace::Space,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "think".to_string(),
@@ -1764,7 +1762,7 @@ mod tests {
                             text: Text {
                                 text: "I".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "I".to_string(),
@@ -1783,7 +1781,7 @@ mod tests {
                             text: Text {
                                 text: "know".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Verb,
                             lemma: Lemma {
                                 lemma: "know".to_string(),
@@ -1800,7 +1798,7 @@ mod tests {
                                         text: Text {
                                             text: "I".to_string(),
                                         },
-                                        whitespace: " ".to_string(),
+                                        whitespace: crate::Whitespace::Space,
                                         pos: PartOfSpeech::Pron,
                                         lemma: Lemma {
                                             lemma: "I".to_string(),
@@ -1819,7 +1817,7 @@ mod tests {
                                         text: Text {
                                             text: "you".to_string(),
                                         },
-                                        whitespace: "".to_string(),
+                                        whitespace: crate::Whitespace::None,
                                         pos: PartOfSpeech::Pron,
                                         lemma: Lemma {
                                             lemma: "you".to_string(),
@@ -1843,7 +1841,7 @@ mod tests {
                 text: Text {
                     text: "I".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Pron,
                 lemma: Lemma {
                     lemma: "I".to_string(),
@@ -1865,46 +1863,44 @@ mod tests {
     // Tests for DependencyMatcher interface
     #[test]
     fn test_dependency_matcher_basic() {
-        let tokenization = Tokenization {
-            tokens: vec![
-                Token {
-                    text: Text {
-                        text: "I".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Pron,
-                    lemma: Lemma {
-                        lemma: "I".to_string(),
-                    },
-                    dep: DependencyRelation::Nsubj,
-                    head: 2,
+        let tokenization = crate::matching::tokenization(vec![
+            Token {
+                text: Text {
+                    text: "I".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "love".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Verb,
-                    lemma: Lemma {
-                        lemma: "love".to_string(),
-                    },
-                    dep: DependencyRelation::Root,
-                    head: 0,
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Pron,
+                lemma: Lemma {
+                    lemma: "I".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "programming".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Noun,
-                    lemma: Lemma {
-                        lemma: "programming".to_string(),
-                    },
-                    dep: DependencyRelation::Obj,
-                    head: 2,
+                dep: DependencyRelation::Nsubj,
+                head: 2,
+            },
+            Token {
+                text: Text {
+                    text: "love".to_string(),
                 },
-            ],
-        };
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Verb,
+                lemma: Lemma {
+                    lemma: "love".to_string(),
+                },
+                dep: DependencyRelation::Root,
+                head: 0,
+            },
+            Token {
+                text: Text {
+                    text: "programming".to_string(),
+                },
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Noun,
+                lemma: Lemma {
+                    lemma: "programming".to_string(),
+                },
+                dep: DependencyRelation::Obj,
+                head: 2,
+            },
+        ]);
 
         // Pattern: "love"
         let pattern = TreeNode {
@@ -1913,7 +1909,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -1936,46 +1932,44 @@ mod tests {
 
     #[test]
     fn test_dependency_matcher_multiple_patterns() {
-        let tokenization = Tokenization {
-            tokens: vec![
-                Token {
-                    text: Text {
-                        text: "I".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Pron,
-                    lemma: Lemma {
-                        lemma: "I".to_string(),
-                    },
-                    dep: DependencyRelation::Nsubj,
-                    head: 2,
+        let tokenization = crate::matching::tokenization(vec![
+            Token {
+                text: Text {
+                    text: "I".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "love".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Verb,
-                    lemma: Lemma {
-                        lemma: "love".to_string(),
-                    },
-                    dep: DependencyRelation::Root,
-                    head: 0,
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Pron,
+                lemma: Lemma {
+                    lemma: "I".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "programming".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Noun,
-                    lemma: Lemma {
-                        lemma: "programming".to_string(),
-                    },
-                    dep: DependencyRelation::Obj,
-                    head: 2,
+                dep: DependencyRelation::Nsubj,
+                head: 2,
+            },
+            Token {
+                text: Text {
+                    text: "love".to_string(),
                 },
-            ],
-        };
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Verb,
+                lemma: Lemma {
+                    lemma: "love".to_string(),
+                },
+                dep: DependencyRelation::Root,
+                head: 0,
+            },
+            Token {
+                text: Text {
+                    text: "programming".to_string(),
+                },
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Noun,
+                lemma: Lemma {
+                    lemma: "programming".to_string(),
+                },
+                dep: DependencyRelation::Obj,
+                head: 2,
+            },
+        ]);
 
         // Pattern 1: "love"
         let pattern1 = TreeNode {
@@ -1984,7 +1978,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -2002,7 +1996,7 @@ mod tests {
                 text: Text {
                     text: "programming".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Noun,
                 lemma: Lemma {
                     lemma: "programming".to_string(),
@@ -2031,46 +2025,44 @@ mod tests {
 
     #[test]
     fn test_dependency_matcher_contains() {
-        let tokenization = Tokenization {
-            tokens: vec![
-                Token {
-                    text: Text {
-                        text: "I".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Pron,
-                    lemma: Lemma {
-                        lemma: "I".to_string(),
-                    },
-                    dep: DependencyRelation::Nsubj,
-                    head: 2,
+        let tokenization = crate::matching::tokenization(vec![
+            Token {
+                text: Text {
+                    text: "I".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "love".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Verb,
-                    lemma: Lemma {
-                        lemma: "love".to_string(),
-                    },
-                    dep: DependencyRelation::Root,
-                    head: 0,
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Pron,
+                lemma: Lemma {
+                    lemma: "I".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "programming".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Noun,
-                    lemma: Lemma {
-                        lemma: "programming".to_string(),
-                    },
-                    dep: DependencyRelation::Obj,
-                    head: 2,
+                dep: DependencyRelation::Nsubj,
+                head: 2,
+            },
+            Token {
+                text: Text {
+                    text: "love".to_string(),
                 },
-            ],
-        };
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Verb,
+                lemma: Lemma {
+                    lemma: "love".to_string(),
+                },
+                dep: DependencyRelation::Root,
+                head: 0,
+            },
+            Token {
+                text: Text {
+                    text: "programming".to_string(),
+                },
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Noun,
+                lemma: Lemma {
+                    lemma: "programming".to_string(),
+                },
+                dep: DependencyRelation::Obj,
+                head: 2,
+            },
+        ]);
 
         // Pattern that exists
         let pattern_exists = TreeNode {
@@ -2079,7 +2071,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -2097,7 +2089,7 @@ mod tests {
                 text: Text {
                     text: "hate".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "hate".to_string(),
@@ -2126,7 +2118,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -2143,7 +2135,7 @@ mod tests {
                 text: Text {
                     text: "run".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "run".to_string(),
@@ -2160,7 +2152,7 @@ mod tests {
                 text: Text {
                     text: "walk".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "walk".to_string(),
@@ -2191,7 +2183,7 @@ mod tests {
                 text: Text {
                     text: "E".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "E".to_string(),
@@ -2207,7 +2199,7 @@ mod tests {
                         text: Text {
                             text: "B".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Verb,
                         lemma: Lemma {
                             lemma: "B".to_string(),
@@ -2223,7 +2215,7 @@ mod tests {
                                 text: Text {
                                     text: "C".to_string(),
                                 },
-                                whitespace: "".to_string(),
+                                whitespace: crate::Whitespace::None,
                                 pos: PartOfSpeech::Verb,
                                 lemma: Lemma {
                                     lemma: "C".to_string(),
@@ -2239,7 +2231,7 @@ mod tests {
                                         text: Text {
                                             text: "D".to_string(),
                                         },
-                                        whitespace: "".to_string(),
+                                        whitespace: crate::Whitespace::None,
                                         pos: PartOfSpeech::Verb,
                                         lemma: Lemma {
                                             lemma: "D".to_string(),
@@ -2255,7 +2247,7 @@ mod tests {
                                                 text: Text {
                                                     text: "A".to_string(),
                                                 },
-                                                whitespace: "".to_string(),
+                                                whitespace: crate::Whitespace::None,
                                                 pos: PartOfSpeech::Pron,
                                                 lemma: Lemma {
                                                     lemma: "A".to_string(),
@@ -2281,7 +2273,7 @@ mod tests {
                 text: Text {
                     text: "E".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "E".to_string(),
@@ -2297,7 +2289,7 @@ mod tests {
                         text: Text {
                             text: "A".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Pron,
                         lemma: Lemma {
                             lemma: "A".to_string(),
@@ -2334,7 +2326,7 @@ mod tests {
                 text: Text {
                     text: "E".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "E".to_string(),
@@ -2351,7 +2343,7 @@ mod tests {
                             text: Text {
                                 text: "A".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "A".to_string(),
@@ -2370,7 +2362,7 @@ mod tests {
                             text: Text {
                                 text: "B".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Noun,
                             lemma: Lemma {
                                 lemma: "B".to_string(),
@@ -2391,7 +2383,7 @@ mod tests {
                 text: Text {
                     text: "E".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "E".to_string(),
@@ -2407,7 +2399,7 @@ mod tests {
                         text: Text {
                             text: "A".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Pron,
                         lemma: Lemma {
                             lemma: "A".to_string(),
@@ -2447,7 +2439,7 @@ mod tests {
                 text: Text {
                     text: "Contrôlez".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "contrôler".to_string(),
@@ -2464,7 +2456,7 @@ mod tests {
                             text: Text {
                                 text: "-".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Punct,
                             lemma: Lemma {
                                 lemma: "-".to_string(),
@@ -2483,7 +2475,7 @@ mod tests {
                             text: Text {
                                 text: "vous".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "vous".to_string(),
@@ -2502,7 +2494,7 @@ mod tests {
                             text: Text {
                                 text: ".".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Punct,
                             lemma: Lemma {
                                 lemma: ".".to_string(),
@@ -2523,7 +2515,7 @@ mod tests {
                 text: Text {
                     text: "logiciel".to_string(),
                 },
-                whitespace: " ".to_string(),
+                whitespace: crate::Whitespace::Space,
                 pos: PartOfSpeech::Noun,
                 lemma: Lemma {
                     lemma: "logiciel".to_string(),
@@ -2539,7 +2531,7 @@ mod tests {
                         text: Text {
                             text: "rançonneur".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Adj,
                         lemma: Lemma {
                             lemma: "rançonneur".to_string(),
@@ -2568,130 +2560,128 @@ mod tests {
         // Test with: "qu'est-ce qu'il ne faut pas entendre"
         // This is a regression test for a bug where the wrong token was selected as root
         // Token at index 2 ("-") has head:2, which incorrectly matched idx==2 in 0-indexed
-        let tokenization = Tokenization {
-            tokens: vec![
-                Token {
-                    text: Text {
-                        text: "qu'".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Pron,
-                    lemma: Lemma {
-                        lemma: "que".to_string(),
-                    },
-                    dep: DependencyRelation::Obj,
-                    head: 8,
+        let tokenization = crate::matching::tokenization(vec![
+            Token {
+                text: Text {
+                    text: "qu'".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "est".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Aux,
-                    lemma: Lemma {
-                        lemma: "être".to_string(),
-                    },
-                    dep: DependencyRelation::Aux,
-                    head: 8,
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Pron,
+                lemma: Lemma {
+                    lemma: "que".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "-".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Punct,
-                    lemma: Lemma {
-                        lemma: "-".to_string(),
-                    },
-                    dep: DependencyRelation::Punct,
-                    head: 2,
+                dep: DependencyRelation::Obj,
+                head: 8,
+            },
+            Token {
+                text: Text {
+                    text: "est".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "ce".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Pron,
-                    lemma: Lemma {
-                        lemma: "ce".to_string(),
-                    },
-                    dep: DependencyRelation::Expl,
-                    head: 2,
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Aux,
+                lemma: Lemma {
+                    lemma: "être".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "qu'".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Sconj,
-                    lemma: Lemma {
-                        lemma: "que".to_string(),
-                    },
-                    dep: DependencyRelation::Mark,
-                    head: 8,
+                dep: DependencyRelation::Aux,
+                head: 8,
+            },
+            Token {
+                text: Text {
+                    text: "-".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "il".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Pron,
-                    lemma: Lemma {
-                        lemma: "il".to_string(),
-                    },
-                    dep: DependencyRelation::ExplImpers,
-                    head: 8,
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Punct,
+                lemma: Lemma {
+                    lemma: "-".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "ne".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Part,
-                    lemma: Lemma {
-                        lemma: "ne".to_string(),
-                    },
-                    dep: DependencyRelation::Advmod,
-                    head: 8,
+                dep: DependencyRelation::Punct,
+                head: 2,
+            },
+            Token {
+                text: Text {
+                    text: "ce".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "faut".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Aux,
-                    lemma: Lemma {
-                        lemma: "falloir".to_string(),
-                    },
-                    dep: DependencyRelation::Root,
-                    head: 0,
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Pron,
+                lemma: Lemma {
+                    lemma: "ce".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "pas".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Adv,
-                    lemma: Lemma {
-                        lemma: "pas".to_string(),
-                    },
-                    dep: DependencyRelation::Advmod,
-                    head: 8,
+                dep: DependencyRelation::Expl,
+                head: 2,
+            },
+            Token {
+                text: Text {
+                    text: "qu'".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "entendre".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Verb,
-                    lemma: Lemma {
-                        lemma: "entendre".to_string(),
-                    },
-                    dep: DependencyRelation::Xcomp,
-                    head: 8,
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Sconj,
+                lemma: Lemma {
+                    lemma: "que".to_string(),
                 },
-            ],
-        };
+                dep: DependencyRelation::Mark,
+                head: 8,
+            },
+            Token {
+                text: Text {
+                    text: "il".to_string(),
+                },
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Pron,
+                lemma: Lemma {
+                    lemma: "il".to_string(),
+                },
+                dep: DependencyRelation::ExplImpers,
+                head: 8,
+            },
+            Token {
+                text: Text {
+                    text: "ne".to_string(),
+                },
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Part,
+                lemma: Lemma {
+                    lemma: "ne".to_string(),
+                },
+                dep: DependencyRelation::Advmod,
+                head: 8,
+            },
+            Token {
+                text: Text {
+                    text: "faut".to_string(),
+                },
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Aux,
+                lemma: Lemma {
+                    lemma: "falloir".to_string(),
+                },
+                dep: DependencyRelation::Root,
+                head: 0,
+            },
+            Token {
+                text: Text {
+                    text: "pas".to_string(),
+                },
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Adv,
+                lemma: Lemma {
+                    lemma: "pas".to_string(),
+                },
+                dep: DependencyRelation::Advmod,
+                head: 8,
+            },
+            Token {
+                text: Text {
+                    text: "entendre".to_string(),
+                },
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Verb,
+                lemma: Lemma {
+                    lemma: "entendre".to_string(),
+                },
+                dep: DependencyRelation::Xcomp,
+                head: 8,
+            },
+        ]);
 
         let tree: TreeNode = tokenization.try_into().unwrap();
 
@@ -2731,7 +2721,7 @@ mod tests {
                 text: Text {
                     text: "faut".to_string(),
                 },
-                whitespace: " ".to_string(),
+                whitespace: crate::Whitespace::Space,
                 pos: PartOfSpeech::Aux,
                 lemma: Lemma {
                     lemma: "falloir".to_string(),
@@ -2748,7 +2738,7 @@ mod tests {
                             text: Text {
                                 text: "qu'".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "que".to_string(),
@@ -2767,7 +2757,7 @@ mod tests {
                             text: Text {
                                 text: "est".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Aux,
                             lemma: Lemma {
                                 lemma: "être".to_string(),
@@ -2784,7 +2774,7 @@ mod tests {
                                         text: Text {
                                             text: "-".to_string(),
                                         },
-                                        whitespace: "".to_string(),
+                                        whitespace: crate::Whitespace::None,
                                         pos: PartOfSpeech::Punct,
                                         lemma: Lemma {
                                             lemma: "-".to_string(),
@@ -2803,7 +2793,7 @@ mod tests {
                                         text: Text {
                                             text: "ce".to_string(),
                                         },
-                                        whitespace: " ".to_string(),
+                                        whitespace: crate::Whitespace::Space,
                                         pos: PartOfSpeech::Pron,
                                         lemma: Lemma {
                                             lemma: "ce".to_string(),
@@ -2825,7 +2815,7 @@ mod tests {
                             text: Text {
                                 text: "qu'".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Sconj,
                             lemma: Lemma {
                                 lemma: "que".to_string(),
@@ -2844,7 +2834,7 @@ mod tests {
                             text: Text {
                                 text: "il".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "il".to_string(),
@@ -2863,7 +2853,7 @@ mod tests {
                             text: Text {
                                 text: "ne".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Part,
                             lemma: Lemma {
                                 lemma: "ne".to_string(),
@@ -2882,7 +2872,7 @@ mod tests {
                             text: Text {
                                 text: "pas".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Adv,
                             lemma: Lemma {
                                 lemma: "pas".to_string(),
@@ -2901,7 +2891,7 @@ mod tests {
                             text: Text {
                                 text: "entendre".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Verb,
                             lemma: Lemma {
                                 lemma: "entendre".to_string(),
@@ -2922,7 +2912,7 @@ mod tests {
                 text: Text {
                     text: "logiciel".to_string(),
                 },
-                whitespace: " ".to_string(),
+                whitespace: crate::Whitespace::Space,
                 pos: PartOfSpeech::Noun,
                 lemma: Lemma {
                     lemma: "logiciel".to_string(),
@@ -2938,7 +2928,7 @@ mod tests {
                         text: Text {
                             text: "rançonneur".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Adj,
                         lemma: Lemma {
                             lemma: "rançonneur".to_string(),
@@ -2972,7 +2962,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: " ".to_string(),
+                whitespace: crate::Whitespace::Space,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -2989,7 +2979,7 @@ mod tests {
                             text: Text {
                                 text: "I".to_string(),
                             },
-                            whitespace: " ".to_string(),
+                            whitespace: crate::Whitespace::Space,
                             pos: PartOfSpeech::Pron,
                             lemma: Lemma {
                                 lemma: "I".to_string(),
@@ -3008,7 +2998,7 @@ mod tests {
                             text: Text {
                                 text: "programming".to_string(),
                             },
-                            whitespace: "".to_string(),
+                            whitespace: crate::Whitespace::None,
                             pos: PartOfSpeech::Noun,
                             lemma: Lemma {
                                 lemma: "programming".to_string(),
@@ -3029,7 +3019,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -3045,7 +3035,7 @@ mod tests {
                         text: Text {
                             text: "programming".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Noun,
                         lemma: Lemma {
                             lemma: "programming".to_string(),
@@ -3065,7 +3055,7 @@ mod tests {
                 text: Text {
                     text: "hate".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "hate".to_string(),
@@ -3081,7 +3071,7 @@ mod tests {
                         text: Text {
                             text: "programming".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Noun,
                         lemma: Lemma {
                             lemma: "programming".to_string(),
@@ -3101,7 +3091,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -3117,7 +3107,7 @@ mod tests {
                         text: Text {
                             text: "coding".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Noun,
                         lemma: Lemma {
                             lemma: "coding".to_string(),
@@ -3137,7 +3127,7 @@ mod tests {
                 text: Text {
                     text: "love".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Verb,
                 lemma: Lemma {
                     lemma: "love".to_string(),
@@ -3153,7 +3143,7 @@ mod tests {
                         text: Text {
                             text: "you".to_string(),
                         },
-                        whitespace: "".to_string(),
+                        whitespace: crate::Whitespace::None,
                         pos: PartOfSpeech::Pron,
                         lemma: Lemma {
                             lemma: "you".to_string(),
@@ -3173,7 +3163,7 @@ mod tests {
                 text: Text {
                     text: "I".to_string(),
                 },
-                whitespace: "".to_string(),
+                whitespace: crate::Whitespace::None,
                 pos: PartOfSpeech::Pron,
                 lemma: Lemma {
                     lemma: "I".to_string(),
@@ -3241,58 +3231,56 @@ mod tests {
     fn test_tree_node_rejects_orphaned_tokens() {
         // Simulates the "être sur son 31" bug: tokens 1-3 have head=5 (out of bounds),
         // so they become orphaned and the tree only contains the root "être".
-        let tokenization = Tokenization {
-            tokens: vec![
-                Token {
-                    text: Text {
-                        text: "être".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Aux,
-                    lemma: Lemma {
-                        lemma: "être".to_string(),
-                    },
-                    dep: DependencyRelation::Root,
-                    head: 0,
+        let tokenization = crate::matching::tokenization(vec![
+            Token {
+                text: Text {
+                    text: "être".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "sur".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Adp,
-                    lemma: Lemma {
-                        lemma: "sur".to_string(),
-                    },
-                    dep: DependencyRelation::Case,
-                    head: 5, // Out of bounds! Only 4 tokens.
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Aux,
+                lemma: Lemma {
+                    lemma: "être".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "son".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Det,
-                    lemma: Lemma {
-                        lemma: "son".to_string(),
-                    },
-                    dep: DependencyRelation::Det,
-                    head: 5, // Out of bounds!
+                dep: DependencyRelation::Root,
+                head: 0,
+            },
+            Token {
+                text: Text {
+                    text: "sur".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "31".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Num,
-                    lemma: Lemma {
-                        lemma: "31".to_string(),
-                    },
-                    dep: DependencyRelation::Nummod,
-                    head: 5, // Out of bounds!
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Adp,
+                lemma: Lemma {
+                    lemma: "sur".to_string(),
                 },
-            ],
-        };
+                dep: DependencyRelation::Case,
+                head: 5, // Out of bounds! Only 4 tokens.
+            },
+            Token {
+                text: Text {
+                    text: "son".to_string(),
+                },
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Det,
+                lemma: Lemma {
+                    lemma: "son".to_string(),
+                },
+                dep: DependencyRelation::Det,
+                head: 5, // Out of bounds!
+            },
+            Token {
+                text: Text {
+                    text: "31".to_string(),
+                },
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Num,
+                lemma: Lemma {
+                    lemma: "31".to_string(),
+                },
+                dep: DependencyRelation::Nummod,
+                head: 5, // Out of bounds!
+            },
+        ]);
 
         let result = TreeNode::try_from(tokenization);
         assert!(
@@ -3304,34 +3292,32 @@ mod tests {
     #[test]
     fn test_tree_node_accepts_valid_tokenization() {
         // A valid tokenization where all tokens are reachable
-        let tokenization = Tokenization {
-            tokens: vec![
-                Token {
-                    text: Text {
-                        text: "I".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Pron,
-                    lemma: Lemma {
-                        lemma: "I".to_string(),
-                    },
-                    dep: DependencyRelation::Nsubj,
-                    head: 2,
+        let tokenization = crate::matching::tokenization(vec![
+            Token {
+                text: Text {
+                    text: "I".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "run".to_string(),
-                    },
-                    whitespace: "".to_string(),
-                    pos: PartOfSpeech::Verb,
-                    lemma: Lemma {
-                        lemma: "run".to_string(),
-                    },
-                    dep: DependencyRelation::Root,
-                    head: 0,
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Pron,
+                lemma: Lemma {
+                    lemma: "I".to_string(),
                 },
-            ],
-        };
+                dep: DependencyRelation::Nsubj,
+                head: 2,
+            },
+            Token {
+                text: Text {
+                    text: "run".to_string(),
+                },
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Verb,
+                lemma: Lemma {
+                    lemma: "run".to_string(),
+                },
+                dep: DependencyRelation::Root,
+                head: 0,
+            },
+        ]);
 
         let result = TreeNode::try_from(tokenization);
         assert!(result.is_ok(), "Should accept valid tokenization");
@@ -3352,7 +3338,7 @@ mod tests {
             text: Text {
                 text: text.to_string(),
             },
-            whitespace: " ".to_string(),
+            whitespace: crate::Whitespace::Space,
             pos,
             lemma: Lemma {
                 lemma: lemma.to_string(),
@@ -3365,56 +3351,52 @@ mod tests {
     /// "Ce qui leur est arrive" style tree: arriver(root) with an iobj PRON child.
     fn clitic_sentence_tree() -> TreeNode {
         // qui(nsubj) leur(iobj) est(aux) arriver(root)
-        let tokenization = Tokenization {
-            tokens: vec![
-                tok(
-                    "qui",
-                    "qui",
-                    PartOfSpeech::Pron,
-                    DependencyRelation::Nsubj,
-                    4,
-                ),
-                tok(
-                    "leur",
-                    "leur",
-                    PartOfSpeech::Pron,
-                    DependencyRelation::Iobj,
-                    4,
-                ),
-                tok("est", "etre", PartOfSpeech::Aux, DependencyRelation::Aux, 4),
-                tok(
-                    "arrive",
-                    "arriver",
-                    PartOfSpeech::Verb,
-                    DependencyRelation::Root,
-                    0,
-                ),
-            ],
-        };
+        let tokenization = crate::matching::tokenization(vec![
+            tok(
+                "qui",
+                "qui",
+                PartOfSpeech::Pron,
+                DependencyRelation::Nsubj,
+                4,
+            ),
+            tok(
+                "leur",
+                "leur",
+                PartOfSpeech::Pron,
+                DependencyRelation::Iobj,
+                4,
+            ),
+            tok("est", "etre", PartOfSpeech::Aux, DependencyRelation::Aux, 4),
+            tok(
+                "arrive",
+                "arriver",
+                PartOfSpeech::Verb,
+                DependencyRelation::Root,
+                0,
+            ),
+        ]);
         tokenization.try_into().unwrap()
     }
 
     /// "arrive a Jean" style tree: arriver(root) -> obl(Jean) -> case(a).
     fn filled_sentence_tree() -> TreeNode {
-        let tokenization = Tokenization {
-            tokens: vec![
-                tok(
-                    "arrive",
-                    "arriver",
-                    PartOfSpeech::Verb,
-                    DependencyRelation::Root,
-                    0,
-                ),
-                tok("à", "à", PartOfSpeech::Adp, DependencyRelation::Case, 3),
-                tok(
-                    "Jean",
-                    "Jean",
-                    PartOfSpeech::Propn,
-                    DependencyRelation::Obl,
-                    1,
-                ),
-            ],
-        };
+        let tokenization = crate::matching::tokenization(vec![
+            tok(
+                "arrive",
+                "arriver",
+                PartOfSpeech::Verb,
+                DependencyRelation::Root,
+                0,
+            ),
+            tok("à", "à", PartOfSpeech::Adp, DependencyRelation::Case, 3),
+            tok(
+                "Jean",
+                "Jean",
+                PartOfSpeech::Propn,
+                DependencyRelation::Obl,
+                1,
+            ),
+        ]);
         tokenization.try_into().unwrap()
     }
 
@@ -3483,57 +3465,53 @@ mod tests {
 
         // An iobj PRON whose lemma is outside the clitic set must not match —
         // this is what pins the LemmaSet lemma filtering itself.
-        let wrong_lemma = Tokenization {
-            tokens: vec![
-                tok(
-                    "qui",
-                    "qui",
-                    PartOfSpeech::Pron,
-                    DependencyRelation::Nsubj,
-                    4,
-                ),
-                tok(
-                    "moi",
-                    "moi",
-                    PartOfSpeech::Pron,
-                    DependencyRelation::Iobj,
-                    4,
-                ),
-                tok("est", "etre", PartOfSpeech::Aux, DependencyRelation::Aux, 4),
-                tok(
-                    "arrive",
-                    "arriver",
-                    PartOfSpeech::Verb,
-                    DependencyRelation::Root,
-                    0,
-                ),
-            ],
-        };
+        let wrong_lemma = crate::matching::tokenization(vec![
+            tok(
+                "qui",
+                "qui",
+                PartOfSpeech::Pron,
+                DependencyRelation::Nsubj,
+                4,
+            ),
+            tok(
+                "moi",
+                "moi",
+                PartOfSpeech::Pron,
+                DependencyRelation::Iobj,
+                4,
+            ),
+            tok("est", "etre", PartOfSpeech::Aux, DependencyRelation::Aux, 4),
+            tok(
+                "arrive",
+                "arriver",
+                PartOfSpeech::Verb,
+                DependencyRelation::Root,
+                0,
+            ),
+        ]);
         let wrong_lemma: TreeNode = wrong_lemma.try_into().unwrap();
         assert!(matcher.find_all(&wrong_lemma).is_empty());
 
         // A clitic-set lemma on the wrong relation (nsubj rather than
         // iobj/obj) must not match either — this pins the dependency-set
         // filtering.
-        let wrong_relation = Tokenization {
-            tokens: vec![
-                tok(
-                    "leur",
-                    "leur",
-                    PartOfSpeech::Pron,
-                    DependencyRelation::Nsubj,
-                    3,
-                ),
-                tok("est", "etre", PartOfSpeech::Aux, DependencyRelation::Aux, 3),
-                tok(
-                    "arrive",
-                    "arriver",
-                    PartOfSpeech::Verb,
-                    DependencyRelation::Root,
-                    0,
-                ),
-            ],
-        };
+        let wrong_relation = crate::matching::tokenization(vec![
+            tok(
+                "leur",
+                "leur",
+                PartOfSpeech::Pron,
+                DependencyRelation::Nsubj,
+                3,
+            ),
+            tok("est", "etre", PartOfSpeech::Aux, DependencyRelation::Aux, 3),
+            tok(
+                "arrive",
+                "arriver",
+                PartOfSpeech::Verb,
+                DependencyRelation::Root,
+                0,
+            ),
+        ]);
         let wrong_relation: TreeNode = wrong_relation.try_into().unwrap();
         assert!(matcher.find_all(&wrong_relation).is_empty());
     }
@@ -3548,25 +3526,23 @@ mod tests {
     #[test]
     fn test_slot_pattern_filled_requires_case_marker() {
         // arriver -> obl(Jean) but with case "de" instead of "a"
-        let tokenization = Tokenization {
-            tokens: vec![
-                tok(
-                    "arrive",
-                    "arriver",
-                    PartOfSpeech::Verb,
-                    DependencyRelation::Root,
-                    0,
-                ),
-                tok("de", "de", PartOfSpeech::Adp, DependencyRelation::Case, 3),
-                tok(
-                    "Jean",
-                    "Jean",
-                    PartOfSpeech::Propn,
-                    DependencyRelation::Obl,
-                    1,
-                ),
-            ],
-        };
+        let tokenization = crate::matching::tokenization(vec![
+            tok(
+                "arrive",
+                "arriver",
+                PartOfSpeech::Verb,
+                DependencyRelation::Root,
+                0,
+            ),
+            tok("de", "de", PartOfSpeech::Adp, DependencyRelation::Case, 3),
+            tok(
+                "Jean",
+                "Jean",
+                PartOfSpeech::Propn,
+                DependencyRelation::Obl,
+                1,
+            ),
+        ]);
         let tree: TreeNode = tokenization.try_into().unwrap();
         let matcher = DependencyMatcher::new(&[("arriver_a_qqn".to_string(), filled_pattern())]);
         assert!(matcher.find_all(&tree).is_empty());
@@ -3604,53 +3580,49 @@ mod tests {
         let matcher = DependencyMatcher::new(&[("two_conj".to_string(), pattern)]);
 
         // One "pomme" conj child: must NOT match.
-        let one = Tokenization {
-            tokens: vec![
-                tok(
-                    "aime",
-                    "aimer",
-                    PartOfSpeech::Verb,
-                    DependencyRelation::Root,
-                    0,
-                ),
-                tok(
-                    "pomme",
-                    "pomme",
-                    PartOfSpeech::Noun,
-                    DependencyRelation::Conj,
-                    1,
-                ),
-            ],
-        };
+        let one = crate::matching::tokenization(vec![
+            tok(
+                "aime",
+                "aimer",
+                PartOfSpeech::Verb,
+                DependencyRelation::Root,
+                0,
+            ),
+            tok(
+                "pomme",
+                "pomme",
+                PartOfSpeech::Noun,
+                DependencyRelation::Conj,
+                1,
+            ),
+        ]);
         let one: TreeNode = one.try_into().unwrap();
         assert!(matcher.find_all(&one).is_empty());
 
         // Two "pomme" conj children: matches, binding both.
-        let two = Tokenization {
-            tokens: vec![
-                tok(
-                    "aime",
-                    "aimer",
-                    PartOfSpeech::Verb,
-                    DependencyRelation::Root,
-                    0,
-                ),
-                tok(
-                    "pomme",
-                    "pomme",
-                    PartOfSpeech::Noun,
-                    DependencyRelation::Conj,
-                    1,
-                ),
-                tok(
-                    "pomme",
-                    "pomme",
-                    PartOfSpeech::Noun,
-                    DependencyRelation::Conj,
-                    1,
-                ),
-            ],
-        };
+        let two = crate::matching::tokenization(vec![
+            tok(
+                "aime",
+                "aimer",
+                PartOfSpeech::Verb,
+                DependencyRelation::Root,
+                0,
+            ),
+            tok(
+                "pomme",
+                "pomme",
+                PartOfSpeech::Noun,
+                DependencyRelation::Conj,
+                1,
+            ),
+            tok(
+                "pomme",
+                "pomme",
+                PartOfSpeech::Noun,
+                DependencyRelation::Conj,
+                1,
+            ),
+        ]);
         let two: TreeNode = two.try_into().unwrap();
         let matches = matcher.find_all(&two);
         assert_eq!(matches.len(), 1);
@@ -3683,29 +3655,27 @@ mod tests {
         };
         let matcher = DependencyMatcher::new(&[("donner".to_string(), pattern)]);
 
-        let sentence = Tokenization {
-            tokens: vec![
-                tok(
-                    "donne",
-                    "donner",
-                    PartOfSpeech::Verb,
-                    DependencyRelation::Root,
-                    0,
-                ),
-                // Iobj comes first, so the wildcard requirement greedily claims
-                // it and has to give it back once the "lui" requirement finds
-                // nothing left. Ordering these the other way round would let a
-                // matcher with no backtracking pass.
-                tok(
-                    "lui",
-                    "lui",
-                    PartOfSpeech::Pron,
-                    DependencyRelation::Iobj,
-                    1,
-                ),
-                tok("le", "le", PartOfSpeech::Pron, DependencyRelation::Obj, 1),
-            ],
-        };
+        let sentence = crate::matching::tokenization(vec![
+            tok(
+                "donne",
+                "donner",
+                PartOfSpeech::Verb,
+                DependencyRelation::Root,
+                0,
+            ),
+            // Iobj comes first, so the wildcard requirement greedily claims
+            // it and has to give it back once the "lui" requirement finds
+            // nothing left. Ordering these the other way round would let a
+            // matcher with no backtracking pass.
+            tok(
+                "lui",
+                "lui",
+                PartOfSpeech::Pron,
+                DependencyRelation::Iobj,
+                1,
+            ),
+            tok("le", "le", PartOfSpeech::Pron, DependencyRelation::Obj, 1),
+        ]);
         let tree: TreeNode = sentence.try_into().unwrap();
         let matches = matcher.find_all(&tree);
         assert_eq!(matches.len(), 1);

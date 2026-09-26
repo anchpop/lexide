@@ -86,12 +86,15 @@ fn local_pipeline_matches_parsley_server() {
             .unwrap_or_else(|e| panic!("analyze failed for {text:?}: {e:#}"));
 
         assert_eq!(
-            got.tokens.len(),
+            got.tokens().len(),
             want.len(),
             "token count diverges for {lang:?} {text:?}: got {:?}",
-            got.tokens.iter().map(|t| &t.text.text).collect::<Vec<_>>()
+            got.tokens()
+                .iter()
+                .map(|t| &t.text.text)
+                .collect::<Vec<_>>()
         );
-        for (i, (g, w)) in got.tokens.iter().zip(want).enumerate() {
+        for (i, (g, w)) in got.tokens().iter().zip(want).enumerate() {
             let ctx = format!("{lang:?} {text:?} token {i} ({:?})", w["text"]);
             assert_eq!(g.text.text, w["text"].as_str().unwrap(), "text: {ctx}");
             // Map the recorded strings through the same serde funnel the remote client

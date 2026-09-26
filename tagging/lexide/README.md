@@ -34,7 +34,7 @@ token-for-token against the parsley serve (`tests/parsley_parity.rs`).
 
 ```toml
 [dependencies]
-lexide = { version = "0.3", features = ["pronunciation"] }
+lexide = { version = "0.4", features = ["pronunciation"] }
 ```
 
 Deserialize the endpoint's `frame_matrix` object into
@@ -278,7 +278,7 @@ Gaps between sentences (whitespace, headings, separators) are dropped; punctuati
 
 ```toml
 [dependencies]
-lexide = { version = "0.3", features = ["remote"] }
+lexide = { version = "0.4", features = ["remote"] }
 ```
 
 ```rust
@@ -294,7 +294,7 @@ async fn main() -> anyhow::Result<()> {
     // let lexide = Lexide::from_pretrained(lexide::LocalConfig::default()).await?;
 
     let result = lexide.analyze("The cats were sleeping.", Language::English).await?;
-    for token in &result.tokens {
+    for token in result.tokens() {
         println!("{} [{}] lemma={} dep={} head={}",
                  token.text, token.pos, token.lemma, token.dep, token.head);
     }
@@ -360,6 +360,24 @@ cargo run --release --features local --example simple
 
 The parity test (`tests/parsley_parity.rs`) replays recorded parsley responses across all
 10 languages and asserts the local pipeline reproduces them exactly.
+
+## Standalone tokenization types
+
+Use `lexide-types = "0.1"` for `Text`, `Lemma`, `LemmaPos`, `Token`,
+`Tokenization`, `PartOfSpeech`/`pos`, and `DependencyRelation`/`dep` without
+inference, async, or networking dependencies. `lexide` reexports these types.
+The optional `lexide-types/rkyv` feature archives only `Whitespace`.
+
+`Tokenization::new(sentence, tokens)` validates nonempty, whitespace-free token
+text and exact reconstruction of the original sentence. JSON carries both
+`sentence` and `tokens`, and deserialization applies the same validation.
+Read via `sentence()` and `tokens()`, or consume via `into_tokens()` / `into_parts()`.
+
+`Token::whitespace` is a `Whitespace`: `None` (`""`), `Space` (`" "`), `Nbsp`
+(U+00A0), or `NarrowNbsp` (U+202F). It serializes as the literal string, not the
+variant name. Other gaps (including repeated spaces or skipped punctuation)
+are errors; punctuation must be represented in token text, not hidden in a gap.
+Gemma reconstruction repair runs before validation of the final tokens.
 
 ## License
 

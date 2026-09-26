@@ -39,13 +39,13 @@ async fn main() -> Result<()> {
     println!("Tokenization: {:?}", result);
 
     // Print results
-    println!("\nFound {} tokens:", result.tokens.len());
-    if result.tokens.is_empty() {
+    println!("\nFound {} tokens:", result.tokens().len());
+    if result.tokens().is_empty() {
         println!(
             "\nNo tokens parsed! This might mean the model output is not in the expected format."
         );
     } else {
-        for token in &result.tokens {
+        for token in result.tokens() {
             println!(
                 "{} [{}] -> lemma: {}, dep: {}, head: {}",
                 token.text, token.pos, token.lemma, token.dep, token.head

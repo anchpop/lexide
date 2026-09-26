@@ -229,6 +229,6 @@ impl LocalLexide {
                 }
             })
             .collect();
-        Ok(tokens_from_raw(&rtoks, sentence))
+        Ok(tokens_from_raw(&rtoks, sentence)?)
     }
 }

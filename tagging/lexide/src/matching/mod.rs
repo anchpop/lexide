@@ -19,6 +19,15 @@ pub use lemma_matcher::LemmaMatcher;
 pub use text_matcher::TextMatcher;
 
 #[cfg(test)]
+fn tokenization(tokens: Vec<crate::Token>) -> crate::Tokenization {
+    let sentence: String = tokens
+        .iter()
+        .map(|t| format!("{}{}", t.text, t.whitespace))
+        .collect();
+    crate::Tokenization::new(sentence, tokens).unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::dep::DependencyRelation;
@@ -26,58 +35,56 @@ mod tests {
     use crate::{Lemma, Text, Token, Tokenization};
 
     fn create_test_tokenization() -> Tokenization {
-        Tokenization {
-            tokens: vec![
-                Token {
-                    text: Text {
-                        text: "The".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Det,
-                    lemma: Lemma {
-                        lemma: "the".to_string(),
-                    },
-                    dep: DependencyRelation::Det,
-                    head: 1,
+        crate::matching::tokenization(vec![
+            Token {
+                text: Text {
+                    text: "The".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "cats".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Noun,
-                    lemma: Lemma {
-                        lemma: "cat".to_string(),
-                    },
-                    dep: DependencyRelation::Nsubj,
-                    head: 2,
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Det,
+                lemma: Lemma {
+                    lemma: "the".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "are".to_string(),
-                    },
-                    whitespace: " ".to_string(),
-                    pos: PartOfSpeech::Aux,
-                    lemma: Lemma {
-                        lemma: "be".to_string(),
-                    },
-                    dep: DependencyRelation::Aux,
-                    head: 3,
+                dep: DependencyRelation::Det,
+                head: 1,
+            },
+            Token {
+                text: Text {
+                    text: "cats".to_string(),
                 },
-                Token {
-                    text: Text {
-                        text: "sleeping".to_string(),
-                    },
-                    whitespace: ".".to_string(),
-                    pos: PartOfSpeech::Verb,
-                    lemma: Lemma {
-                        lemma: "sleep".to_string(),
-                    },
-                    dep: DependencyRelation::Root,
-                    head: 3,
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Noun,
+                lemma: Lemma {
+                    lemma: "cat".to_string(),
                 },
-            ],
-        }
+                dep: DependencyRelation::Nsubj,
+                head: 2,
+            },
+            Token {
+                text: Text {
+                    text: "are".to_string(),
+                },
+                whitespace: crate::Whitespace::Space,
+                pos: PartOfSpeech::Aux,
+                lemma: Lemma {
+                    lemma: "be".to_string(),
+                },
+                dep: DependencyRelation::Aux,
+                head: 3,
+            },
+            Token {
+                text: Text {
+                    text: "sleeping".to_string(),
+                },
+                whitespace: crate::Whitespace::None,
+                pos: PartOfSpeech::Verb,
+                lemma: Lemma {
+                    lemma: "sleep".to_string(),
+                },
+                dep: DependencyRelation::Root,
+                head: 3,
+            },
+        ])
     }
 
     #[test]

@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
             Ok(tokenization) => {
                 let rec = TokenizedSentence {
                     sentence,
-                    tokens: tokenization.tokens,
+                    tokens: tokenization.into_tokens(),
                 };
                 writeln!(writer, "{}", serde_json::to_string(&rec)?)?;
                 ok += 1;

@@ -118,7 +118,7 @@ impl<K: Clone> DiscontinuousLemmaMatcher<K> {
     /// match per pattern (if any).
     pub fn find_all(&self, tokenization: &Tokenization) -> Vec<DiscontinuousMatch<K>> {
         let lemma_seq: Vec<&str> = tokenization
-            .tokens
+            .tokens()
             .iter()
             .map(|t| t.lemma.lemma.as_str())
             .collect();
@@ -152,7 +152,7 @@ impl<K: Clone> DiscontinuousLemmaMatcher<K> {
                         if lemma_seq[i] == anchors[anchor_idx].lemma {
                             // Check gap constraint
                             if let Some(ref constraint) = anchors[anchor_idx].gap_constraint {
-                                let gap_tokens = &tokenization.tokens[(prev_pos + 1)..i];
+                                let gap_tokens = &tokenization.tokens()[(prev_pos + 1)..i];
                                 if !check_gap_constraint(gap_tokens, constraint) {
                                     continue;
                                 }
@@ -206,7 +206,7 @@ mod tests {
             text: Text {
                 text: lemma.to_string(),
             },
-            whitespace: " ".to_string(),
+            whitespace: crate::Whitespace::Space,
             pos,
             lemma: Lemma {
                 lemma: lemma.to_string(),
@@ -217,12 +217,12 @@ mod tests {
     }
 
     fn make_tokenization(lemmas_and_pos: &[(&str, PartOfSpeech)]) -> Tokenization {
-        Tokenization {
-            tokens: lemmas_and_pos
+        crate::matching::tokenization(
+            lemmas_and_pos
                 .iter()
                 .map(|(l, pos)| make_token_with_pos(l, *pos))
                 .collect(),
-        }
+        )
     }
 
     #[test]
@@ -404,24 +404,20 @@ mod tests {
         let matcher = DiscontinuousLemmaMatcher::with_constraints(&patterns, None);
 
         // Gap contains a verb — should match
-        let tokenization = Tokenization {
-            tokens: vec![
-                make_token_with_pos("ne", PartOfSpeech::Part),
-                make_token_with_pos("soit", PartOfSpeech::Verb),
-                make_token_with_pos("que", PartOfSpeech::Sconj),
-            ],
-        };
+        let tokenization = crate::matching::tokenization(vec![
+            make_token_with_pos("ne", PartOfSpeech::Part),
+            make_token_with_pos("soit", PartOfSpeech::Verb),
+            make_token_with_pos("que", PartOfSpeech::Sconj),
+        ]);
         let matches = matcher.find_all(&tokenization);
         assert_eq!(matches.len(), 1);
 
         // Gap contains only a noun — should not match
-        let tokenization = Tokenization {
-            tokens: vec![
-                make_token_with_pos("ne", PartOfSpeech::Part),
-                make_token_with_pos("chat", PartOfSpeech::Noun),
-                make_token_with_pos("que", PartOfSpeech::Sconj),
-            ],
-        };
+        let tokenization = crate::matching::tokenization(vec![
+            make_token_with_pos("ne", PartOfSpeech::Part),
+            make_token_with_pos("chat", PartOfSpeech::Noun),
+            make_token_with_pos("que", PartOfSpeech::Sconj),
+        ]);
         let matches = matcher.find_all(&tokenization);
         assert_eq!(matches.len(), 0);
     }
@@ -439,14 +435,12 @@ mod tests {
         let matcher = DiscontinuousLemmaMatcher::with_constraints(&patterns, None);
 
         // First "b" has no verb in gap, but second "b" does
-        let tokenization = Tokenization {
-            tokens: vec![
-                make_token_with_pos("a", PartOfSpeech::Noun),
-                make_token_with_pos("b", PartOfSpeech::Noun), // gap is empty — no verb
-                make_token_with_pos("run", PartOfSpeech::Verb),
-                make_token_with_pos("b", PartOfSpeech::Noun), // gap has a verb
-            ],
-        };
+        let tokenization = crate::matching::tokenization(vec![
+            make_token_with_pos("a", PartOfSpeech::Noun),
+            make_token_with_pos("b", PartOfSpeech::Noun), // gap is empty — no verb
+            make_token_with_pos("run", PartOfSpeech::Verb),
+            make_token_with_pos("b", PartOfSpeech::Noun), // gap has a verb
+        ]);
         let matches = matcher.find_all(&tokenization);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].positions, vec![0, 3]);
