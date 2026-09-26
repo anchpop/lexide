@@ -159,7 +159,7 @@ impl fmt::Display for TokenizationError {
             ),
             Self::InvalidTokenText { index, text } => write!(
                 f,
-                "token {index} has empty or whitespace-containing text {text:?}"
+                "token {index} has empty text or whitespace at its edge {text:?}"
             ),
             Self::InvalidGap { index, gap } => {
                 write!(f, "token {index} has unsupported whitespace gap {gap:?}")
@@ -202,7 +202,11 @@ impl TryFrom<RawTokenization> for Tokenization {
 impl Tokenization {
     pub fn new(sentence: impl Into<String>, tokens: Vec<Token>) -> Result<Self, TokenizationError> {
         for (index, token) in tokens.iter().enumerate() {
-            if token.text.text.is_empty() || token.text.text.chars().any(char::is_whitespace) {
+            // Leading or trailing whitespace belongs in the gap, never in the
+            // token. Internal whitespace is allowed: multiword names such as
+            // "New York" are deliberately single tokens.
+            let text = &token.text.text;
+            if text.is_empty() || text.trim() != text {
                 return Err(TokenizationError::InvalidTokenText {
                     index,
                     text: token.text.text.clone(),
