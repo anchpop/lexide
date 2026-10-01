@@ -113,7 +113,7 @@ def write_tar(home, files):
     return hashlib.sha256((home / "data.tar").read_bytes()).hexdigest()
 
 
-@pytest.fixture(params=["sky_train.yaml", "sky_train_merged.yaml", "sky_smoke.yaml"])
+@pytest.fixture(params=["sky_train.yaml", "sky_train_merged.yaml", "sky_train_film.yaml", "sky_smoke.yaml"])
 def stage(request, tmp_path):
     yaml = (TRAIN / request.param).read_text()
     assert "preprocess/Cargo.toml -- pack" in yaml

@@ -5,7 +5,7 @@
 //! mix in foreign example phrases or instructions (e.g. Korean/Cantonese text +
 //! "Listen and repeat."). espeak then phonemizes the foreign part as if it were
 //! the target language → silently wrong labels (no error; Whisper still tags the
-//! dominant language). This catches them by asking GPT-5.4-nano whether each
+//! dominant language). This catches them by asking the model in llm::MODEL whether each
 //! transcript is entirely <Language>.
 //!
 //! Output: train/lang_exclusions.jsonl, in the same schema the training loader
@@ -91,7 +91,7 @@ pub async fn run(data_dir: &Path, train_dir: &Path, langs: &[String]) -> Result<
     }
     let cache = crate::root().join("train/lang-filter/.cache");
     std::fs::create_dir_all(&cache)?;
-    let client = &ChatClient::from_env("gpt-5.4-nano")?.with_cache_directory(cache);
+    let client = &ChatClient::from_env(crate::llm::MODEL)?.with_cache_directory(cache);
     let out_path = train_dir.join("lang_exclusions.jsonl");
     // The judge is not deterministic across reruns, and a false negative
     // puts wrongly-phonemized foreign text back into training. Exclusions are

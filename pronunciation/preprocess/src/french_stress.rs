@@ -6,7 +6,7 @@
 //!
 //! This binary:
 //! 1. Reads pronunciation/data/audio/fra/manifest.jsonl
-//! 2. Calls GPT-5.4-nano (with tysm's prompt-aware caching) to get the
+//! 2. Calls the model in llm::MODEL (with tysm's prompt-aware caching) to get the
 //!    rhythmic-group-final words (verbatim) for each sentence
 //! 3. Writes pronunciation/data/audio/fra/stress_overrides.jsonl
 //!
@@ -128,7 +128,7 @@ async fn process_record(client: &ChatClient, record: ManifestRecord) -> Result<S
 pub async fn run(data_dir: &Path) -> Result<()> {
     let cache = crate::root().join("train/relabel-french/.cache");
     std::fs::create_dir_all(&cache)?;
-    let client = &ChatClient::from_env("gpt-5.4-nano")?.with_cache_directory(cache);
+    let client = &ChatClient::from_env(crate::llm::MODEL)?.with_cache_directory(cache);
     let input = data_dir.join("fra/manifest.jsonl");
     let output = data_dir.join("fra/stress_overrides.jsonl");
 

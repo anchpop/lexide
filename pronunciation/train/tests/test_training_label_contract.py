@@ -54,7 +54,7 @@ def import_staged(script):
     return module
 
 
-@pytest.mark.parametrize("recipe", ["sky_train.yaml", "sky_train_merged.yaml", "sky_smoke.yaml"])
+@pytest.mark.parametrize("recipe", ["sky_train.yaml", "sky_train_merged.yaml", "sky_train_film.yaml", "sky_smoke.yaml"])
 def test_sky_mount_and_pronunciation_only_import(recipe, tmp_path):
     config = yaml.safe_load((ROOT / "pronunciation/train" / recipe).read_text())
     assert config["workdir"] == "."

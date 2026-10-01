@@ -4,6 +4,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+/// The judge behind the French stress and language-filter sidecars. Switching
+/// it re-judges everything: tysm's cache is keyed by model.
+pub const MODEL: &str = "gpt-6-luna";
+
 /// Retry a transient OpenAI failure (5xx, rate limit, network) a few times
 /// before failing the stage: one bad response must not kill a 100k-request run.
 pub async fn retry<T, F, Fut>(mut call: F) -> Result<T>
