@@ -74,9 +74,12 @@ part of the snippet is not {language}, respond with `{{\"is_target_language\": f
 
 async fn check(client: &ChatClient, language: &str, sentence: &str) -> Result<LangCheck> {
     let user = format!("snippet: {sentence:?}"); // {:?} => snippet: "..."
-    Ok(client
-        .chat_with_system_prompt(system_prompt(language), user)
-        .await?)
+    crate::llm::retry(|| async {
+        Ok(client
+            .chat_with_system_prompt(system_prompt(language), user.clone())
+            .await?)
+    })
+    .await
 }
 
 pub async fn run(data_dir: &Path, train_dir: &Path, langs: &[String]) -> Result<()> {

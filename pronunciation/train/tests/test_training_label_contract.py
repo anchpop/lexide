@@ -81,3 +81,13 @@ def test_full_checkout_prefers_canonical_over_stale_adjacent_copy(tmp_path):
     shutil.copyfile(DEFINITION, canonical)
     script.with_name("training_labels.json").write_text("{}")
     assert import_staged(script)._TRAINING_LABELS == preprocess._TRAINING_LABELS
+
+
+def test_vocabulary_entries_are_unique_and_canonical():
+    import unicodedata
+
+    phonemes = json.loads(DEFINITION.read_text(encoding="utf-8"))["phonemes"]
+    # A repeated spelling silently collapses in the tokenizer's set, so the
+    # JSON must already be a set. Every spelling must be its own NFC form.
+    assert len(phonemes) == len(set(phonemes))
+    assert [p for p in phonemes if unicodedata.normalize("NFC", p) != p] == []

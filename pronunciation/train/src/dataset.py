@@ -337,7 +337,9 @@ def collate_fn_augment(batch):
 
 def make_train_collate(degrade_prob: float | None = None, keep_clean: bool = False,
                        pad_audio_multiple: int | None = None,
-                       noise_dir: Path | None = None):
+                       noise_dir: Path | None = None,
+                       speed_prob: float = 0.0, speed_min: float = 0.85,
+                       speed_max: float = 1.3):
     """Training collate carrying the audio-degradation probability explicitly.
 
     Returns a picklable functools.partial (module-level _collate + simple args),
@@ -346,15 +348,16 @@ def make_train_collate(degrade_prob: float | None = None, keep_clean: bool = Fal
     degrade_prob=None → no degradation (the plain augment path).
 
     keep_clean=True additionally returns an `audio_clean` batch tensor holding
-    each clip's padded-but-UN-degraded waveform (same shape/mask as `audio`,
-    since every degrade op is length-preserving). Used by distillation: the
+    each clip's speed-perturbed, padded-but-UN-degraded waveform (same shape/mask
+    as `audio`, since every degrade op is length-preserving). Used by distillation: the
     teacher transcribes the clean clip (best-quality soft targets) while the
     student sees the degraded one, and the shared 50 fps frame grid keeps the
     per-frame KD aligned.
     """
     return partial(_collate, augment=True, degrade_prob=degrade_prob,
                    keep_clean=keep_clean, pad_audio_multiple=pad_audio_multiple,
-                   noise_dir=noise_dir)
+                   noise_dir=noise_dir, speed_prob=speed_prob,
+                   speed_min=speed_min, speed_max=speed_max)
 
 
 def _match_vad_length(vad: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -568,7 +571,9 @@ def degrade_waveform(audio: torch.Tensor, sr: int = 16000, rng=random,
 
 def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
              keep_clean: bool = False, pad_audio_multiple: int | None = None,
-             noise_dir: Path | None = None):
+             noise_dir: Path | None = None,
+             speed_prob: float = 0.0, speed_min: float = 0.85,
+             speed_max: float = 1.3):
     sr = 16000
     augmented = []
     for item in batch:
@@ -576,6 +581,25 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
         vad = item["vad_probs"]
         audio_clean = None
         if augment:
+            if (speed_prob > 0 and (speed_min != 1 or speed_max != 1)
+                    and random.random() < speed_prob):
+                # Hundredth-speed resolution bounds torchaudio's sinc kernel.
+                # Round upward so slowdown never exceeds the sampler allowance.
+                import math
+                import torchaudio.functional as AF
+
+                rate = math.ceil(random.uniform(speed_min, speed_max) * 100)
+                new_len = (audio.numel() * 100 + rate - 1) // rate
+                phones = item["phoneme_ids"]
+                # Phone-only warmup needs a blank between repeated targets.
+                required_frames = len(phones) + (phones[1:] == phones[:-1]).sum().item()
+                if rate != 100 and required_frames <= (new_len - 400) // 320 + 1:
+                    audio = AF.resample(audio, rate, 100)
+                    if vad.numel() > 0:
+                        vad = torch.nn.functional.interpolate(
+                            vad[None, None], size=new_len // VAD_FRAME_SAMPLES,
+                            mode="linear", align_corners=False,
+                        )[0, 0]
             # Quantize synthetic silence to VAD frames so the precomputed VAD
             # grid remains aligned after prepending silence.
             head_frames = random.randint(

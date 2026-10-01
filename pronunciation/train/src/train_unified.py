@@ -866,6 +866,11 @@ def main():
                         help="Make the nonblank + phoneme heads 2-layer MLPs "
                              "(din→din→GELU→dout) instead of single linears. A cheap "
                              "'bigger head' on top of the 2B encoder.")
+    parser.add_argument("--speed-perturb", action=argparse.BooleanOptionalAction,
+                        default=True, help="Resample training audio to vary pitch and tempo.")
+    parser.add_argument("--speed-perturb-prob", type=float, default=0.6)
+    parser.add_argument("--speed-min", type=float, default=0.85)
+    parser.add_argument("--speed-max", type=float, default=1.3)
     parser.add_argument("--audio-degrade", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Training-time audio degradation augmentation (noise/music/"
@@ -1046,6 +1051,10 @@ def main():
     parser.add_argument("--resume-optimizer-steps", type=int, default=None,
                         help="Completed updates for legacy checkpoints without training_state.json.")
     args = parser.parse_args()
+    if not 0 <= args.speed_perturb_prob <= 1:
+        parser.error("--speed-perturb-prob must be between 0 and 1")
+    if not 0 < args.speed_min <= args.speed_max < float("inf"):
+        parser.error("speed range must be finite with 0 < --speed-min <= --speed-max")
     if args.stress_warmup_steps < 0:
         parser.error("--stress-warmup-steps must be nonnegative")
 
@@ -1332,15 +1341,18 @@ def main():
         # count, so short clips (the bulk of the corpus) ride in far bigger
         # batches and actually fill the GPU. Budget is padded seconds:
         # max_clip_len * batch_size. The fixed-16 recipe averages ~43s.
+        budget_scale = min(args.speed_min, 1.0) if args.speed_perturb else 1.0
+        if budget_scale < 1:
+            print(f"Token budget scaled by {budget_scale:g} for maximum speed slowdown")
         train_batch_sampler = TokenBudgetBatchSampler(
             train_lengths,
-            token_budget=int(args.max_batch_audio_sec * 16000),
+            token_budget=int(args.max_batch_audio_sec * 16000 * budget_scale),
             max_batch_size=args.max_batch_size,
             bucket_size=args.batch_size * 100,
             seed=42,
         )
         st = train_batch_sampler.stats()
-        print(f"Token-budget batching ON ({args.max_batch_audio_sec:.0f}s padded "
+        print(f"Token-budget batching ON ({args.max_batch_audio_sec * budget_scale:.0f}s padded "
               f"audio/step, cap {args.max_batch_size} clips): "
               f"{st['n_batches']:,} batches/epoch, "
               f"size min/mean/max {st['batch_size_min']}/"
@@ -1368,7 +1380,12 @@ def main():
         keep_clean=keep_clean,
         pad_audio_multiple=args.pad_audio_multiple,
         noise_dir=noise_dir if degrade_prob is not None else None,
+        speed_prob=args.speed_perturb_prob if args.speed_perturb else 0.0,
+        speed_min=args.speed_min, speed_max=args.speed_max,
     )
+    print(f"Speed perturbation {'ON' if args.speed_perturb else 'OFF'} "
+          f"(per-clip prob={args.speed_perturb_prob}, "
+          f"speed={args.speed_min}–{args.speed_max}, rounded up to 0.01)")
     if args.audio_degrade:
         pool_state = "found" if noise_dir.is_dir() else "MISSING (synthetic noise only)"
         print(f"Audio degradation augmentation ON (per-clip prob={args.audio_degrade_prob}, "

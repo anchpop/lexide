@@ -108,9 +108,12 @@ Input: "peine de mort"
 Output: stressed_words = ["mort"]"#;
 
 async fn get_stressed_words(client: &ChatClient, sentence: &str) -> Result<Vec<String>> {
-    let response: RhythmicGroupResponse = client
-        .chat_with_system_prompt(SYSTEM_PROMPT.to_string(), sentence.to_string())
-        .await?;
+    let response: RhythmicGroupResponse = crate::llm::retry(|| async {
+        Ok(client
+            .chat_with_system_prompt(SYSTEM_PROMPT.to_string(), sentence.to_string())
+            .await?)
+    })
+    .await?;
     Ok(response.stressed_words)
 }
 

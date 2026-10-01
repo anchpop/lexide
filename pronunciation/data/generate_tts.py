@@ -4,8 +4,8 @@
 Two backends, both writing into the same ``data/audio/<lang>/`` layout:
 
 ``chirp3``
-    Google Cloud Text-to-Speech Chirp3-HD voices. One synthetic speaker per
-    request, drawn from the language's Chirp3-HD roster.
+    Google Cloud Text-to-Speech voices (Chirp3-HD by default). One synthetic
+    speaker per request; --voice-filter and --language-code select other rosters.
 
 ``gemini``
     Gemini's TTS model (``gemini-3.1-flash-tts-preview``) over the Generative
@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import threading
 import time
 import urllib.error
@@ -114,10 +115,10 @@ def make_client():
     return texttospeech.TextToSpeechClient()
 
 
-def get_chirp3_voices(client, language_code: str) -> list[str]:
-    """Get available Chirp3-HD voice names for a language."""
+def get_chirp3_voices(client, language_code: str, voice_filter: str = "Chirp3-HD") -> list[str]:
+    """Get available Cloud TTS voices matching a roster substring."""
     response = client.list_voices(language_code=language_code)
-    return [v.name for v in response.voices if "Chirp3-HD" in v.name]
+    return [v.name for v in response.voices if voice_filter in v.name]
 
 
 def load_sentences(lang: str) -> list[str]:
@@ -142,6 +143,16 @@ def load_sentences(lang: str) -> list[str]:
 def sentence_hash(sentence: str) -> str:
     """First 16 hex chars of SHA256."""
     return hashlib.sha256(sentence.encode()).hexdigest()[:16]
+
+
+def cloud_clip_hash(sentence: str, language_code: str, lang: str) -> str:
+    """Keep default locale stems; namespace dialect additions to avoid collisions."""
+    key = sentence if language_code == LANG_CONFIG[lang] else f"{language_code}:{sentence}"
+    return sentence_hash(key)
+
+
+CLOUD_ESPEAK_VOICES = {"pt-PT": "pt", "pt-BR": "pt-br", "es-ES": "es", "es-US": "es-419"}
+PT_PT_EXCLUSIONS = re.compile(r"[ôê][mn]|\b(?:ônibus|celular(?:es)?|trem|trens|banheiros?)\b", re.IGNORECASE)
 
 
 def gemini_clip_hash(lang: str, voice: str, sentence: str) -> str:
@@ -267,11 +278,11 @@ def synthesize_one_gemini(api_key, sentence, voice, lang, model, style, out_dir)
     }, audio_tokens
 
 
-def synthesize_one(client, sentence, voice_name, language_code, audio_config, out_dir):
+def synthesize_one(client, sentence, voice_name, language_code, audio_config, out_dir, lang):
     """Synthesize a single sentence. Returns (hash, record) or None on error."""
     from google.cloud import texttospeech
 
-    h = sentence_hash(sentence)
+    h = cloud_clip_hash(sentence, language_code, lang)
     voice_params = texttospeech.VoiceSelectionParams(
         language_code=language_code,
         name=voice_name,
@@ -310,11 +321,14 @@ def synthesize_one(client, sentence, voice_name, language_code, audio_config, ou
         "sentence": sentence,
         "source": "tts",
         "voice": voice_name,
+        **({"espeak_voice": CLOUD_ESPEAK_VOICES[language_code]}
+           if language_code in CLOUD_ESPEAK_VOICES else {}),
     }
 
 
 def select_sentences(
     lang: str, max_sentences: int | None, offset: int, extremes: int, seed: int,
+    sentence_filter: str | None = None,
 ) -> tuple[list[str], random.Random]:
     """Pick this run's sentences and return the RNG that drew them.
 
@@ -326,6 +340,10 @@ def select_sentences(
     what the first one already recorded.
     """
     all_sentences = load_sentences(lang)
+    if sentence_filter == "pt-pt":
+        original_count = len(all_sentences)
+        all_sentences = [s for s in all_sentences if not PT_PT_EXCLUSIONS.search(s)]
+        print(f"{lang}: pt-pt sentence filter kept {len(all_sentences):,} / {original_count:,}")
     rng = random.Random(seed)
     shuffled = all_sentences.copy()
     rng.shuffle(shuffled)
@@ -409,19 +427,22 @@ def generate_chirp3(
     rps: float,
     extremes: int,
     offset: int,
+    language_code: str | None = None,
+    voice_filter: str = "Chirp3-HD",
+    sentence_filter: str | None = None,
 ):
     from google.cloud import texttospeech
 
     client = make_client()
-    language_code = LANG_CONFIG[lang]
-    voices = get_chirp3_voices(client, language_code)
+    language_code = language_code or LANG_CONFIG[lang]
+    voices = get_chirp3_voices(client, language_code, voice_filter)
     if not voices:
-        print(f"No Chirp3-HD voices found for {language_code}, skipping {lang}")
+        print(f"No {voice_filter} voices found for {language_code}, skipping {lang}")
         return
 
-    print(f"{lang}: found {len(voices)} Chirp3-HD voices, using {workers} workers")
+    print(f"{lang}: found {len(voices)} {voice_filter} voices for {language_code}, using {workers} workers")
 
-    sentences, rng = select_sentences(lang, max_sentences, offset, extremes, seed)
+    sentences, rng = select_sentences(lang, max_sentences, offset, extremes, seed, sentence_filter)
     out_dir = output_root / lang
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out_dir / "manifest.jsonl"
@@ -442,19 +463,26 @@ def generate_chirp3(
     todo = []
     queued = set()
     for sentence in sentences:
-        h = sentence_hash(sentence)
+        h = cloud_clip_hash(sentence, language_code, lang)
         voice_name = rng.choice(voices)  # drawn either way, to keep determinism
         if h not in existing and h not in queued:
             queued.add(h)
-            todo.append((client, sentence, voice_name, language_code, audio_config, out_dir))
+            todo.append((client, sentence, voice_name, language_code, audio_config, out_dir, lang))
 
     if not todo:
         print(f"{lang}: all sentences already generated, skipping")
         return
 
     chars = sum(len(item[1]) for item in todo)
-    print(f"{lang}: {len(todo)} sentences to generate ({len(existing)} already done), "
-          f"{chars:,} chars ≈ ${chars / 1e6 * 30:.2f} at Chirp3-HD list price")
+    prices = {"Chirp3-HD": 30, "Wavenet": 16, "Neural2": 16}
+    rates = [next((price for family, price in prices.items() if family in item[2]), None)
+             for item in todo]
+    print(f"{lang}: {len(todo)} sentences to generate ({len(existing)} already done), {chars:,} chars")
+    if all(rate is not None for rate in rates):
+        cost = sum(len(item[1]) * rate for item, rate in zip(todo, rates)) / 1e6
+        print(f"{lang}: estimated cost ${cost:.2f} at selected voice list prices")
+    else:
+        print(f"{lang}: cost estimate unavailable for selected voice family")
 
     run_pool(todo, synthesize_one, manifest_path, lang, workers, rps)
 
@@ -547,6 +575,12 @@ def main():
     parser.add_argument("--rps", type=float, default=5, help="Max requests per second")
     parser.add_argument("--extremes", type=int, default=0,
                         help="Also include N longest and N shortest sentences per language")
+    parser.add_argument("--voice-filter", default="Chirp3-HD",
+                        help="Cloud voice-name substring (chirp3 backend only)")
+    parser.add_argument("--language-code",
+                        help="Cloud locale override, e.g. pt-PT (chirp3 backend only)")
+    parser.add_argument("--sentence-filter", choices=["pt-pt"],
+                        help="Exclude Brazilian spellings/terms before shuffling Portuguese")
     parser.add_argument("--gemini-model", default=GEMINI_MODEL,
                         help="Gemini TTS model id")
     parser.add_argument("--gemini-style", default=GEMINI_STYLE,
@@ -555,12 +589,20 @@ def main():
                         help="$ per 1M output audio tokens, for the cost readout only "
                              "(list price as of 2026-08; audio bills at ~25 tok/s)")
     args = parser.parse_args()
+    if args.backend != "chirp3" and (args.language_code or args.voice_filter != "Chirp3-HD"
+                                     or args.sentence_filter):
+        parser.error("--language-code, --voice-filter and --sentence-filter require --backend chirp3")
+    if args.language_code and len(args.langs) != 1:
+        parser.error("--language-code requires exactly one --langs entry")
+    if args.sentence_filter and args.langs != ["por"]:
+        parser.error("--sentence-filter pt-pt requires --langs por")
 
     for lang in args.langs:
         if args.backend == "chirp3":
             generate_chirp3(
                 lang, args.max_sentences, args.output, args.seed,
                 args.workers, args.rps, args.extremes, args.sentence_offset,
+                args.language_code, args.voice_filter, args.sentence_filter,
             )
         else:
             generate_gemini(

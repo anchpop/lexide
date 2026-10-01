@@ -15,6 +15,7 @@ mod audit;
 mod corpus;
 mod french_stress;
 mod language_filter;
+mod llm;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Stage {
@@ -156,6 +157,13 @@ impl Args {
                     value
                 }
                 Err(g2p::Error::Unlabelable(reason)) => json!({"exclude_reason": reason}),
+                // espeak can emit a token the shared inventory cannot represent
+                // (pt-PT "sri-lankês" → ʁʲ). That is the same "cannot label what
+                // was spoken" case as a refusal: exclude the row, keep the token
+                // in the reason so finalize's exclusion counts stay loud.
+                Err(g2p::Error::UnknownPhoneme(unknown)) => {
+                    json!({"exclude_reason": format!("unknown_phoneme:{}", unknown.0)})
+                }
                 Err(error) => {
                     return Err(error).with_context(|| format!("{lang}: {}", record["file"]));
                 }

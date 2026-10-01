@@ -4,6 +4,7 @@ import argparse
 import ast
 import hashlib
 import json
+from collections import Counter
 import re
 import os
 import sqlite3
@@ -625,8 +626,16 @@ def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str, 
         # proceeds with slightly less data. Count them here and report at
         # the end of the language, so the failure is attributable to its
         # cause instead of showing up as an unexplained row-count drift.
-        if not phonemes and any(ch.isalpha() for ch in rec["sentence"]):
-            empty_phoneme_examples.append(rec["sentence"])
+        if not phonemes:
+            # An empty target cannot train and fails Rust's phoneme validation;
+            # exclude it like any other unlabelable row. Letters that phonemize
+            # to nothing still get the loud report below (a g2p problem), while
+            # punctuation-only text is simply not speech.
+            if any(ch.isalpha() for ch in rec["sentence"]):
+                empty_phoneme_examples.append(rec["sentence"])
+            labels["exclude_reason"] = "empty_phonemes"
+            g2p_excluded += 1
+            continue
         entry = {
             "file": rec["file"],
             "lang": lang,
@@ -660,9 +669,8 @@ def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str, 
         # the file would block a whole language over a handful of rows, so
         # report precisely instead and let the operator judge.
         print(f"\nWARNING: {lang} has {len(empty_phoneme_examples):,} "
-              f"sentence(s) with letters that phonemized to NOTHING. "
-              f"These rows are written but dataset.py will drop them as "
-              f"`no_phonemes`, so they are silently absent from training.")
+              f"sentence(s) with letters that phonemized to NOTHING; "
+              f"excluded as empty_phonemes.")
         for example in empty_phoneme_examples[:5]:
             print(f"    {example[:100]!r}")
         if len(empty_phoneme_examples) > 5:
@@ -699,8 +707,10 @@ def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str, 
                 }, ensure_ascii=False) + "\n")
     print(f"{lang}: wrote {len(entries)} entries to {phonemes_path}")
     if g2p_excluded:
-        print(f"{lang}: g2p explicitly excluded "
-              f"{g2p_excluded} recording(s)")
+        reasons = Counter(labels["exclude_reason"] for _, _, labels in dispositions
+                          if labels.get("exclude_reason"))
+        print(f"{lang}: g2p explicitly excluded {g2p_excluded} recording(s): "
+              + ", ".join(f"{reason} ×{n}" for reason, n in reasons.most_common()))
     if lang in OVERRIDE_LANGS and stress_overrides:
         print(f"{lang}: applied stress override to {override_applied} records, "
               f"{override_align_failures} alignment failures "

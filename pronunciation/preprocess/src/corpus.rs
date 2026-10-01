@@ -162,6 +162,16 @@ pub fn language(row: &Value, code: &str) -> Result<Language> {
                     variety = "european";
                 }
             }
+        } else if code == "por"
+            && row["source"] == "tts"
+            && (row["tts_backend"].is_null() || row["tts_backend"] == "chirp3")
+        {
+            let voice = row["voice"].as_str().unwrap_or("");
+            if voice.starts_with("pt-PT-Chirp3-HD-") || voice.starts_with("pt-PT-Wavenet-") {
+                variety = "european";
+            } else if voice.starts_with("pt-BR-Chirp3-HD-") || voice.starts_with("pt-BR-Wavenet-") {
+                variety = "brazilian";
+            }
         }
     }
     Ok(match (code, variety) {
@@ -212,6 +222,51 @@ mod tests {
                 Language::SpanishLatinAmerica,
             ),
             (json!({"source":"tatoeba"}), "spa", Language::SpanishEuro),
+            (
+                json!({"source":"tts","voice":"pt-PT-Wavenet-E"}),
+                "por",
+                Language::PortugueseEuro,
+            ),
+            (
+                json!({"source":"tts","voice":"pt-PT-Chirp3-HD-Kore","tts_backend":"chirp3"}),
+                "por",
+                Language::PortugueseEuro,
+            ),
+            (
+                json!({"source":"tts","voice":"pt-BR-Wavenet-F"}),
+                "por",
+                Language::PortugueseBrazil,
+            ),
+            (
+                json!({"source":"tts","voice":"pt-PT-Wavenet-E","tts_backend":"gemini"}),
+                "por",
+                Language::PortugueseBrazil,
+            ),
+            (
+                json!({"source":"tatoeba","voice":"pt-PT-Wavenet-E"}),
+                "por",
+                Language::PortugueseBrazil,
+            ),
+            (
+                json!({"source":"tts","voice":"pt-PT-Wavenet-E","espeak_voice":"pt-br"}),
+                "por",
+                Language::PortugueseBrazil,
+            ),
+            (
+                json!({"source":"tts","voice":"pt-PT-Wavenet-E","variety":"default"}),
+                "por",
+                Language::PortugueseBrazil,
+            ),
+            (
+                json!({"source":"tts","voice":"pt-PT-Wavenet-E","espeak_voice":"pt","variety":"brazilian"}),
+                "por",
+                Language::PortugueseBrazil,
+            ),
+            (
+                json!({"source":"tts","voice":"pt-BR-Wavenet-E","espeak_voice":"pt-br","g2p_language":"por-PT"}),
+                "por",
+                Language::PortugueseEuro,
+            ),
             (
                 json!({"espeak_voice":"pt"}),
                 "por",

@@ -69,6 +69,8 @@ run: |
   #   backbone  xls-r-2b @ lr 1e-5, processor wav2vec2-xlsr-53-espeak-cv-ft
   #   heads     mlp_heads, head_lr 1e-3, regularized_heads off
   #   input     mel side-channel on; audio_degrade on @ p=0.6
+  #             speed_perturb on @ p=0.6, speed 0.85–1.3 (pitch + tempo)
+  #             token-budget allowance scaled by 0.85 for maximum slowdown
   #   data      narrowed labels, source_cap_second, min_rms 0.005,
   #             min_whisper_logprob -0.7, max_audio_sec 16, val_split 0.05
   #   loss      stress 0.3 (warmup 400), vad 0.05, invalid_mass 0.05
