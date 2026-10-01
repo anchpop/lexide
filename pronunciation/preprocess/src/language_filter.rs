@@ -47,7 +47,7 @@ struct ManifestRecord {
     sentence: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Exclusion {
     lang: String,
     file: String,
@@ -93,6 +93,17 @@ pub async fn run(data_dir: &Path, train_dir: &Path, langs: &[String]) -> Result<
     std::fs::create_dir_all(&cache)?;
     let client = &ChatClient::from_env("gpt-5.4-nano")?.with_cache_directory(cache);
     let out_path = train_dir.join("lang_exclusions.jsonl");
+    // The judge is not deterministic across reruns, and a false negative
+    // puts wrongly-phonemized foreign text back into training. Exclusions are
+    // therefore monotonic: a prior flag stays while its sentence is unchanged.
+    let prior: Vec<Exclusion> = if out_path.exists() {
+        crate::corpus::read(&out_path)?
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<_, _>>()?
+    } else {
+        vec![]
+    };
     let mut all_exclusions: Vec<Exclusion> = vec![];
     let mut totals: BTreeMap<String, (usize, usize)> = BTreeMap::new(); // lang -> (checked, flagged)
 
@@ -178,6 +189,32 @@ pub async fn run(data_dir: &Path, train_dir: &Path, langs: &[String]) -> Result<
                 }
             }
         }
+        let flagged_now: std::collections::HashSet<&str> = all_exclusions
+            .iter()
+            .filter(|e| e.lang == *code)
+            .map(|e| e.file.as_str())
+            .collect();
+        let current: BTreeMap<&str, String> = records
+            .iter()
+            .map(|r| (r.file.as_str(), crate::corpus::hash(r.sentence.as_bytes())))
+            .collect();
+        let kept: Vec<Exclusion> = prior
+            .iter()
+            .filter(|e| {
+                e.lang == *code
+                    && !flagged_now.contains(e.file.as_str())
+                    && current.get(e.file.as_str()) == Some(&e.expected_sha256)
+            })
+            .cloned()
+            .collect();
+        if !kept.is_empty() {
+            println!(
+                "{code}: kept {} prior exclusion(s) the judge no longer flags",
+                kept.len()
+            );
+        }
+        flagged += kept.len();
+        all_exclusions.extend(kept);
         totals.insert(code.to_string(), (checked, flagged));
     }
 
