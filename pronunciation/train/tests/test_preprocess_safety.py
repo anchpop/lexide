@@ -76,7 +76,7 @@ def test_new_aligner_pin_not_blocked(tmp_path, model, revision):
     ("bonjour", ["bonjour", "absent"], "g2p", [2]),
     ("bonjour", ["bonjour", "bonjour"], "g2p", [2]),
     ("bonjour", [""], "g2p", [2]),
-    ("bonjour", [], "override", [0]),
+    ("bonjour", [], "override", [1]),  # the final word always ends a group
 ])
 def test_written_stress_provenance(tmp_path, monkeypatch, sentence, targets,
                                    expected_source, expected_stress):

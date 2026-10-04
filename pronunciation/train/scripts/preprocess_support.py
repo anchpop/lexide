@@ -102,8 +102,9 @@ def apply_stress_override(
     marks the LAST vowel in the corresponding IPA span as primary stress.
     Returns None if word alignment fails or any requested stress cannot be
     placed on a matching word's vowel — caller should fall back to espeak's
-    stress, not mark a partial/failed override as trusted. An empty sidecar
-    list deliberately supplies all-zero stress.
+    stress, not mark a partial/failed override as trusted. The sentence-final
+    word always ends a rhythmic group, so it is stressed whatever the sidecar
+    says; an empty list therefore means final stress only, never no stress.
     """
     text_words = _atomic_words(sentence)
     aligned_spans = _merge_vowelless_spans(phonemes, word_spans)
@@ -137,6 +138,15 @@ def apply_stress_override(
             break
         else:
             return None
+
+    # The utterance's last word closes its final rhythmic group. The judge
+    # sometimes omits it (543/62,598 luna answers were empty for short
+    # sentences like "Avec qui ?"), which must not become zero stress.
+    start, end = aligned_spans[-1]
+    for j in range(end - 1, start - 1, -1):
+        if phonemes[j][:1] in IPA_VOWELS:
+            stress[j] = STRESS_PRIMARY
+            break
 
     return stress
 
