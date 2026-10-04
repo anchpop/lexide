@@ -95,3 +95,7 @@ pronunciation-remote = ["pronunciation", "dep:reqwest", "dep:http", "dep:tokio",
 [[example]]
 name = "verify_frame_matrix"
 required-features = ["pronunciation"]
+
+[[example]]
+name = "tag_jsonl"
+required-features = ["local"]

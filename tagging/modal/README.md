@@ -1,6 +1,7 @@
 # Lexide Modal Deployment
 
-Two serves live here: the **legacy Gemma 4 31B vLLM serve** (`modal_serve.py` — replaced
+Three serves live here: **parsley-joint** (`modal_serve_joint.py`, L4; see below),
+the **legacy Gemma 4 31B vLLM serve** (`modal_serve.py` — replaced
 online by parsley, but kept as the silver-data teacher and the Japanese fallback; see
 `../train/README.md`) and **parsley 🌿**, the small CPU tagger (`modal_serve_tagger.py`,
 second half of this file).
@@ -119,3 +120,38 @@ reliable fix, at the cost of one ~$/hr container running 24/7). The deeper way t
   drops it to ~280MB and speeds CPU load/inference (also shrinks the cold-start floor).
 - **Output format:** returns structured JSON. If the consumer expects the old Gemma tab-separated
   text (`idx⇥token⇥ws⇥POS⇥lemma⇥dep⇥head` with `-----`), add a formatter in `tag()`.
+
+---
+
+# parsley-joint — joint tokenizer/tagger on L4
+
+App **lexide-parsley-joint** (`modal_serve_joint.py`), separate from the older parsley app.
+Endpoint: `https://anchpop--lexide-parsley-joint-joint-tag.modal.run`. Serves
+`training-runs/joint-v2-24L/best` at HF revision `09a1f8b32248cc303132026ec488f4ad65085ecb`.
+Same contract as parsley's `/tag`, so `Lexide::from_parsley_server(url)` works unchanged
+(`lexide/examples/parsley_remote.rs` checks this).
+
+Deploy a checkpoint (revision and path are image env layers, so changing either rebuilds the
+baked weights):
+
+```bash
+JOINT_HF_PATH=training-runs/joint-v2-24L/best JOINT_HF_REVISION=<hf-commit-sha> \
+  ~/.modal-venv/bin/modal deploy modal/modal_serve_joint.py
+```
+
+(If `~/.modal-venv` is broken by a system Python upgrade, run its packages with the Python
+3.13 it was built for: `PYTHONPATH=~/.modal-venv/lib/python3.13/site-packages python3.13 -m modal deploy ...`.)
+
+One L4, scale-to-zero after 300s, up to 4 containers. Concurrent requests share a batching
+queue (up to 256 sentences / 32k padded chars per forward), bf16 with the char BiLSTM in fp32.
+Lemmas are the model's edit scripts only (no Wiktionary override). Empty strings return `[]`.
+
+Measured 2026-10-04 (`bench_joint.py`, 16 clients x 100-sentence requests, test sentences):
+
+| | sentences/s | GPU $/1M sentences |
+|---|---:|---:|
+| parsley-joint, 1 L4 ($0.80/h) | 850 | $0.26 |
+| Gemma 4 31B serve, A100-80GB, 600 in flight | 7.5 | ~$90 |
+
+Cold start ~45-50s (Gemma: 317s). The endpoint matches A100 batch predictions on 234/240
+test sentences; the rest differ by a label or two from bf16 drift.

@@ -1,0 +1,43 @@
+# Run from /data/coding/lexide/tagging. Prepare the explicit mount first:
+# tar -C data -czf data/processed-joint.tar.gz processed-joint/{train,val,test}.jsonl processed-joint/vocab.json processed-joint/prep_counts.json
+# sky launch tagger/sky_joint.yaml --secret HF_TOKEN   (DO NOT launch automatically)
+name: parsley-joint
+resources:
+  cloud: lambda
+  ordered:
+    - accelerators: GH200:1
+    - accelerators: H100:1
+    - accelerators: A100:1
+  disk_size: 100
+  autostop:
+    idle_minutes: 20
+    down: true
+# Workdir is code-only; tagger/.skyignore excludes local checkpoints.
+workdir: /data/coding/lexide/tagging/tagger
+file_mounts:
+  ~/processed-joint.tar.gz: /data/coding/lexide/tagging/data/processed-joint.tar.gz
+setup: |
+  set -euo pipefail
+  # Same CUDA 12.8 wheel source as pronunciation's working GH200 recipe.
+  # The index has current CUDA aarch64 wheels (verified 2.11.0+cu128 on 2026-10-04).
+  # No stale version pin; reject a CPU-only ARM wheel before spending any GPU time.
+  pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu128
+  pip install --upgrade transformers tokenizers sentencepiece protobuf huggingface_hub numpy wandb
+  python3 -c "import torch; assert torch.version.cuda and torch.cuda.is_available(), 'CUDA wheel required, including on aarch64'; print(torch.__version__, torch.cuda.get_device_name())"
+run: |
+  set -euo pipefail
+  cd ~/sky_workdir
+  mkdir -p ~/data
+  tar -xzf ~/processed-joint.tar.gz -C ~/data
+  JOINT_DATA="$HOME/data/processed-joint" bash run_joint.sh
+envs:
+  RUN_NAME: joint-v2-24L
+  EPOCHS: "3"
+  LANG_CAP: "600000"
+  TOKEN_BUDGET: "4096"
+  ENCODER: BAAI/bge-m3
+  ENCODER_LAYERS: "24"
+  EVAL_EVERY: "3000"
+  WANDB_PROJECT: ""
+secrets:
+  HF_TOKEN: null

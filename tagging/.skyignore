@@ -3,6 +3,10 @@
 tagger/.venv
 tagger/output
 data/big
+data/export-*
+# Joint data is mounted as one compressed archive, never workdir-synced.
+*.tar.gz
+.work
 data/priors
 # kept locally so a new model can be scored on the corpus the previous one was
 # trained and evaluated on; the node only ever needs the current data/processed

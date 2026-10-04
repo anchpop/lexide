@@ -4,6 +4,9 @@ Goal: replace the expensive autoregressive Gemma 4 31B tagger with a small, chea
 that does the same job — **tokenization + POS + lemma + dependency (head & relation)**
 across 12 languages (deu, eng, fra, hin, ita, jpn, kor, por, rus, spa, tha, zho-hans).
 
+The sections below describe shipped v1; the [parsley-joint successor](#parsley-joint-successor-to-v1)
+uses joint character-resolved tokenization/tagging and a separate training recipe.
+
 ## Why this design
 
 The old pipeline makes a decoder re-emit the whole analysis as text, paying
@@ -222,6 +225,37 @@ Prereqs on the box: `~/.modal-venv` (Modal CLI), cargo (direnv exec of the yap f
 auto-detected), a write-role `HF_TOKEN` in the repo-root `.env`, and — for the priors
 step — `data/processed/` + `data/lemma_tables/` (it warns and keeps existing priors if
 the training data isn't present).
+
+## Parsley-joint (successor to v1)
+
+One model does tokenization and tagging: bge-m3 (yap's embedding model) → a char-level
+BiLSTM over the encoder states → a per-char B/I/O boundary head plus POS, lemma-script and
+biaffine heads on each word's [start char, end char, start subword] states. Trees are decoded
+with single-root Chu-Liu-Edmonds (`mst.py`). Training pools words over gold spans; inference
+over predicted spans. Results and the reasoning are in `../OVERVIEW.md`.
+
+```bash
+# from tagging/
+python3 tagger/data_prep_joint.py          # data/export-2026-10 -> data/processed-joint
+python3 -m unittest discover -s tagger -p test_joint.py
+tar -C data -czf data/processed-joint.tar.gz processed-joint/{train,val,test}.jsonl processed-joint/vocab.json processed-joint/prep_counts.json
+sky launch -c parsley-joint tagger/sky_joint.yaml --secret HF_TOKEN   # defaults = shipped 24-layer recipe
+```
+
+`run_joint.sh` runs a smoke phase, trains, predicts the test split, scores it, and pushes
+everything to HF `anchpop/lexide-parsley/training-runs/$RUN_NAME/` (it also pushes `best/`
+during training, since autodown wipes the disk).
+
+- **Data.** `data_prep_joint.py` reads yap's `export-training-data` output, dedups by
+  (lang, text), and holds out up to 1000 test / 400 val sentences per language drawn only
+  from text that appears nowhere in v1's data (`data/big`, `train/data/cleaned_*`), so v1 can
+  be scored on the same split. Splits are by text, so a sentence duplicated across files
+  cannot straddle train and test.
+- **Sampling.** Each epoch draws min(n, `--lang-cap`) sentences per language afresh, always
+  including all gold.
+- **Scoring.** `eval_e2e.py` is a pure scorer over predicted spans: token, POS, lemma, UAS and
+  LAS F1, where an arc only counts if both its span and its head's span match. Score v1 with
+  `lexide/examples/tag_jsonl.rs` (the shipped Rust local pipeline) and the same scorer.
 
 ## Choices worth revisiting
 

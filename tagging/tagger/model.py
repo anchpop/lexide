@@ -10,9 +10,9 @@ Two independently-trainable components make up the deployable pipeline:
    multilingual subword encoder with offset-based subword->word pooling, then a POS
    head, a lemma edit-script classifier, and a Dozat-Manning biaffine dependency head.
 
-Splitting the two lets each train on the signal it needs and keeps the tagger's
-per-token heads operating on exactly one vector per *our* token, regardless of how
-the encoder's own subword tokenizer split the string.
+JointTagger adds character-resolved representations and jointly learns boundaries
+and word tasks. Unlike first-subword pooling, distinct words sharing one encoder
+piece receive distinct character states.
 """
 from dataclasses import dataclass
 
@@ -240,3 +240,144 @@ class MultiTaskTagger(nn.Module):
                      "arc": arc_l.item(), "rel": rel_l.item()}
 
         return TaggerOutput(loss, pos_logits, lemma_logits, arc_scores, rel_scores, parts)
+
+
+class JointTagger(nn.Module):
+    """One encoder/character pass, followed by gold- or predicted-span word heads."""
+
+    def __init__(self, encoder_name, n_pos, n_dep, n_lemma, n_langs=12,
+                 encoder_layers=18, encoder_revision=None, char_dim=256,
+                 char_hidden=256, char_buckets=65536, word_dim=768,
+                 arc_dim=256, rel_dim=128, dropout=0.2, lang_dropout=0.15,
+                 loss_weights=None, encoder_config=None):
+        super().__init__()
+        from transformers import AutoConfig, AutoModel
+        if encoder_config is None:
+            self.encoder = AutoModel.from_pretrained(encoder_name, revision=encoder_revision)
+        else:
+            cfg = dict(encoder_config)
+            model_type = cfg.pop("model_type")
+            self.encoder = AutoModel.from_config(AutoConfig.for_model(model_type, **cfg))
+        if encoder_layers:
+            layers = self.encoder.encoder.layer
+            self.encoder.encoder.layer = nn.ModuleList(layers[:encoder_layers])
+            self.encoder.config.num_hidden_layers = len(self.encoder.encoder.layer)
+        self.encoder.pooler = None
+        hidden = self.encoder.config.hidden_size
+        self.char_buckets = char_buckets
+        self.lang_dropout = lang_dropout
+        self.sub_projection = nn.Linear(hidden, char_dim)
+        self.char_embedding = nn.Embedding(char_buckets + 1, char_dim, padding_idx=0)
+        # Three binary features packed into one small (8-entry) table.
+        self.feature_embedding = nn.Embedding(8, char_dim)
+        self.lang_embedding = nn.Embedding(n_langs + 1, char_dim)
+        self.char_lstm = nn.LSTM(char_dim, char_hidden, num_layers=2,
+                                 batch_first=True, bidirectional=True, dropout=dropout)
+        self.char_norm = nn.LayerNorm(char_hidden * 2)
+        self.boundary_head = nn.Linear(char_hidden * 2, 3)
+        self.word_projection = nn.Linear(char_hidden * 4 + hidden, word_dim)
+        self.drop = nn.Dropout(dropout)
+        self.pos_head = nn.Sequential(MLP(word_dim, word_dim, dropout), nn.Linear(word_dim, n_pos))
+        self.lemma_head = nn.Sequential(MLP(word_dim, word_dim, dropout), nn.Linear(word_dim, n_lemma))
+        self.root = nn.Parameter(torch.empty(1, 1, word_dim))
+        nn.init.normal_(self.root, std=0.02)
+        self.arc_dep = MLP(word_dim, arc_dim, dropout)
+        self.arc_head = MLP(word_dim, arc_dim, dropout)
+        self.rel_dep = MLP(word_dim, rel_dim, dropout)
+        self.rel_head = MLP(word_dim, rel_dim, dropout)
+        self.arc_biaf = Biaffine(arc_dim, bias_y=False)
+        self.rel_biaf = Biaffine(rel_dim, n_out=n_dep)
+        self.lw = {name: 1. for name in ("boundary", "pos", "lemma", "arc", "rel")}
+        self.lw.update(loss_weights or {})
+
+    def encode_chars(self, batch):
+        from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+        ids, attention = batch["input_ids"], batch["attention_mask"]
+        limit = self.encoder.config.max_position_embeddings - 2
+        if ids.size(1) <= limit:
+            sub = self.encoder(input_ids=ids, attention_mask=attention).last_hidden_state
+        else:
+            # Long inference: encode all pieces in windows, then run ONE full
+            # character LSTM and ONE sentence-level dependency tree. No lost tail
+            # or multiple artificial roots. Training stays within max_subwords.
+            rows = []
+            for row, mask in zip(ids, attention):
+                length = int(mask.sum())
+                pieces = []
+                for start in range(1, length - 1, limit - 2):
+                    end = min(start + limit - 2, length - 1)
+                    window = torch.cat([row[:1], row[start:end], row[length - 1:length]])
+                    states = self.encoder(input_ids=window[None], attention_mask=torch.ones_like(window)[None]).last_hidden_state[0]
+                    pieces.append(states[0:1] if start == 1 else states[:0])
+                    pieces.append(states[1:-1])
+                    if end == length - 1:
+                        pieces.append(states[-1:])
+                if not pieces:  # Empty sentence alongside a long sentence.
+                    pieces = [self.encoder(input_ids=row[:length][None]).last_hidden_state[0]]
+                hidden = torch.cat(pieces)
+                rows.append(F.pad(hidden, (0, 0, 0, ids.size(1) - length)))
+            sub = torch.stack(rows)
+        mapping = batch["char_to_sub"]
+        covered = mapping >= 0
+        at_char = sub.gather(1, mapping.clamp(min=0).unsqueeze(-1).expand(-1, -1, sub.size(-1)))
+        at_char = at_char * covered.unsqueeze(-1)
+        lang = batch["lang_ids"]
+        if self.training and self.lang_dropout:
+            lang = lang.masked_fill(torch.rand_like(lang.float()) < self.lang_dropout, 0)
+        features = (self.sub_projection(at_char) + self.char_embedding(batch["char_ids"])
+                    + self.feature_embedding(batch["char_features"])
+                    + self.lang_embedding(lang).unsqueeze(1))
+        lengths = batch["char_mask"].sum(1).clamp(min=1).cpu()
+        # Packed cuDNN LSTM bf16 is not uniformly supported. Keep this modest layer
+        # FP32, including inputs, while the much larger encoder/heads use autocast.
+        with torch.autocast(device_type=sub.device.type, enabled=False):
+            packed = pack_padded_sequence(features.float(), lengths, batch_first=True, enforce_sorted=False)
+            packed, _ = self.char_lstm(packed)
+            chars, _ = pad_packed_sequence(packed, batch_first=True, total_length=mapping.size(1))
+            chars = self.char_norm(chars)
+        chars = self.drop(chars) * batch["char_mask"].unsqueeze(-1)
+        return {"chars": chars, "sub_at_char": at_char,
+                "boundary_logits": self.boundary_head(chars)}
+
+    def word_heads(self, encoded, starts, ends, word_mask):
+        chars = encoded["chars"]
+        def gather(states, positions):
+            return states.gather(1, positions.clamp(min=0).unsqueeze(-1).expand(-1, -1, states.size(-1)))
+        features = torch.cat([gather(chars, starts), gather(chars, ends - 1),
+                              gather(encoded["sub_at_char"], starts)], dim=-1)
+        words = self.drop(self.word_projection(features)) * word_mask.unsqueeze(-1)
+        heads = torch.cat([self.root.expand(words.size(0), -1, -1), words], dim=1)
+        arcs = self.arc_biaf(self.arc_dep(words), self.arc_head(heads))
+        rels = self.rel_biaf(self.rel_dep(words), self.rel_head(heads))
+        valid = torch.cat([word_mask.new_ones(words.size(0), 1), word_mask], dim=1)
+        arcs = arcs.masked_fill(~valid[:, None, :].bool(), float("-inf"))
+        # Self arcs never represent a valid dependency.
+        w = words.size(1)
+        arcs = arcs.masked_fill(torch.eye(w, w + 1, device=words.device, dtype=torch.bool).roll(1, dims=1)[None], float("-inf"))
+        return {"pos_logits": self.pos_head(words), "lemma_logits": self.lemma_head(words),
+                "arc_scores": arcs, "rel_scores": rels}
+
+    def forward(self, batch):
+        encoded = self.encode_chars(batch)
+        out = self.word_heads(encoded, batch["starts"], batch["ends"], batch["word_mask"])
+        out.update(encoded)
+        mask = batch["word_mask"].bool()
+        # A differentiable zero for empty sentences; avoid multiplying -inf arcs by zero.
+        zero = out["pos_logits"].sum() * 0
+        parts = {}
+        def ce(logits, targets, active):
+            return F.cross_entropy(logits[active].float(), targets[active]) if active.any() else zero
+        parts["boundary"] = ce(out["boundary_logits"], batch["boundary"], batch["boundary"] >= 0)
+        parts["pos"] = ce(out["pos_logits"], batch["pos"], mask)
+        parts["lemma"] = ce(out["lemma_logits"], batch["lemma"], mask)
+        arc_mask = mask & (batch["head"] >= 0)
+        parts["arc"] = ce(out["arc_scores"], batch["head"], arc_mask)
+        if arc_mask.any():
+            rels = out["rel_scores"][arc_mask]
+            rels = rels[torch.arange(len(rels), device=rels.device), batch["head"][arc_mask]]
+            parts["rel"] = F.cross_entropy(rels.float(), batch["rel"][arc_mask])
+        else:
+            parts["rel"] = zero
+        out["loss"] = sum(self.lw[name] * value for name, value in parts.items())
+        out["parts"] = {name: value.detach() for name, value in parts.items()}
+        return out

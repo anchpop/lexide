@@ -1,0 +1,5 @@
+# sky_joint.yaml syncs code only; its dataset is a separate explicit archive mount.
+output
+.venv
+__pycache__
+*.pyc

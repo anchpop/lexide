@@ -24,6 +24,58 @@ handled by offset-based subword→word pooling (for tagging) and a separate byte
 
 ---
 
+## parsley-joint (2026-10-04) — the version that closes the gap
+
+Everything below "Done" describes v1. v1 never replaced Gemma in yap, and measured honestly
+it was not close: its published numbers were teacher agreement **with gold tokenization**,
+so tokenizer errors were never charged to the tagger. Scored end-to-end from raw text
+against Gemma's output on 12k sentences that neither model trained on (`eval_e2e.py`;
+an arc counts only if its span and its head's span both match):
+
+| | token | POS | lemma | UAS | LAS | jpn LAS | zho-hans LAS | kor LAS | tha LAS |
+|---|---|---|---|---|---|---|---|---|---|
+| v1 (shipped Rust pipeline) | 95.2 | 90.7 | 92.0 | 74.9 | 71.3 | 58.2 | 52.0 | 60.3 | 63.1 |
+| joint, bge-m3 18 layers, 2 ep | 99.1 | 97.7 | 98.0 | 86.8 | 84.3 | 78.9 | 76.8 | 81.3 | 81.4 |
+| **joint, bge-m3 24 layers, 3 ep** | **99.1** | **97.9** | **98.1** | **87.4** | **85.1** | **80.2** | **77.2** | **82.0** | **82.3** |
+
+(Macro over the 12 languages. Per-language tables: `training-runs/joint-*/test_metrics.md`
+on HF. Part of v1's deficit is label-policy drift since August, e.g. English contractions
+are now split `did|n't`, but that is what Gemma emits today, so it is the right target.)
+
+**Why v1 was weak exactly where it was weak.** `MultiTaskTagger` represents a word by its
+*first subword's* vector. In Japanese, Chinese and Thai one SentencePiece piece often spans
+several of our tokens, so distinct words got literally identical vectors: 22.5% of jpn words,
+16.5% zho-hans, 13.2% tha, 5.9% kor, ~0% elsewhere. That is the ranking of v1's failures.
+More data or a bigger encoder can't fix a representation that can't tell two words apart.
+
+**The model** (`JointTagger` in `tagger/model.py`): bge-m3 (yap's embedding model, pinned at
+yap's revision) → a 2-layer char BiLSTM over [encoder state of the covering piece + hashed
+char embedding + language] → a per-char B/I/O boundary head, and word heads (POS, lemma
+edit script, biaffine arcs/rels) on each word's [start char, end char, start piece] states,
+decoded with single-root MST. Tokenization moves into the big model, so segmenting
+Japanese gets bge-m3's lexical knowledge instead of a 1M-param byte model plus a UniDic
+prior. Trained on yap's October export (5.5M sentences, 2-4x more jpn/kor/zho/tha silver
+than v1 saw), with a per-language cap so European languages don't dominate.
+
+**Cost.** Both training runs together were ~$11 of Lambda A100 time (1,300-1,450
+sentences/s training). Serving on Modal (`modal/modal_serve_joint.py`, endpoint in
+`modal/README.md`): one L4 tags **850 sentences/s, ~$0.26 per million sentences** of GPU time.
+The production Gemma serve managed 7.5 sentences/s on an A100-80GB at the same client
+concurrency yap uses, ~$90/M, with a 317s cold start. On CPU (8 threads, fp32 PyTorch, no
+quantization) the 18-layer model does 24 sentences/s.
+
+**What still limits it.**
+- **The teacher.** German LAS stalls at ~85 with POS 98.8 because Gemma flips a coin on the
+  head of modal and copula clauses: modal + infinitive is `aux` 60% / `root` 36%, *sein* +
+  predicate `cop` 74% / `root` 22%. Each flip moves 3-5 dependents. A deterministic rule in
+  yap's `token_corrections` would remove this from the labels (and from Gemma's output).
+- **zho-hans / jpn / tha tokenization** (96.6 / 98.2 / 97.6 token F1) is the remaining
+  structural gap; token errors cascade into every other metric.
+- **Not done:** yap still points at Gemma; no ONNX/Rust local path for the joint model yet
+  (v1's `local` backend is unchanged); no Wiktionary OOD lemma floor on the joint model.
+
+---
+
 ## Done
 
 **Data** (`tagger/data_prep.py`). Normalized 3.28M sentences (silver from Gemma + gold
