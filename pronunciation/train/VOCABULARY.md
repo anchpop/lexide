@@ -11,8 +11,9 @@ to YAP-39 and requires training coverage, not just enum membership.
 
 ## Fresh training and checkpoint resume
 
-The cleaned inventory has **320 segmental phones**. The tokenizer adds only
-`<pad>` (CTC blank, ID 0) and `<unk>` (required unknown sentinel), for **322 slots**.
+The inventory has **244 segmental phones** (see the 2026-10-01 audit below). The
+tokenizer adds only `<pad>` (CTC blank, ID 0) and `<unk>` (required unknown
+sentinel), for **246 slots**.
 Both are masked out of the conditional phone logits, and neither is a valid
 training target. Stress, tone and pitch remain separate factors.
 
@@ -29,6 +30,25 @@ silently removing it and shortening the pronunciation. Regenerate old labels
 before the next fresh train; never delete individual unknown phones to make a row
 fit. Existing alignment/narrowing data must be regenerated or explicitly revalidated
 against the refreshed sequences. No corpus rewrite or retraining was performed here.
+
+## Token-convention audit (2026-10-01, g2p 0.7.0)
+
+Policy: **same sound, same token, in every language**, and the model subset is
+exactly the set of phones the labelled corpus uses. A token with no training
+rows is not a class the model can predict, so it is not in the list; add it
+back together with the data that supports it.
+
+- Removed the 102 entries with zero occurrences across the 684k labelled rows
+  (`cʰcʰ`, `kh`, `ja`, `oe`, `sx`, `ã`, … — no g2p backend emits them).
+- Mandarin diphthongs share `aɪ aʊ eɪ oʊ` with English/German/Portuguese
+  instead of `ai̯ au̯ ei̯ ou̯`; Hindi affricates share `tʃ tʃʰ dʒ dʒʱ` instead of
+  the tie-bar spellings. Both changes live in g2p 0.7.0.
+- g2p 0.7.0 merges identical adjacent consonants inside a word into one long
+  token (`k k` → `kː`, Hindi पक्का, Korean 몰라/언니, Italian ɲɲ, Arabic shadda),
+  so every `Cː` the corpus can now produce is listed. Vowels are never merged:
+  Japanese long vowels stay two moras because pitch is labelled per mora.
+- Mandarin `tone` is the surface tone (third-tone, 不, 一 sandhi), matching the
+  realized-H/L policy for Japanese pitch.
 
 ## YAP-38 inventory audit (2026-09-18)
 
