@@ -67,9 +67,12 @@ def test_metrics_nonblank_first_padded_tails_empty_and_stable_selection():
     outputs = {"log_probs": lp, "nonblank_logit": torch.tensor([[1., 1., 1., 1.],
                [-1., -1., 1., 1.], [1., 1., 1., 1.]]),
                "stress_logits": torch.tensor([[[2., 0.], [0., 2.], [2., 0.], [2., 0.]]]).expand(3, -1, -1)}
-    batch = {"clip_ids": ["eng/a", "eng/b", "eng/skip"], "langs": ["eng"] * 3,
+    outputs["language_head_logits"] = {}
+    batch = {**tiny_batch(3), "clip_ids": ["eng/a", "eng/b", "eng/skip"], "langs": ["eng"] * 3,
              "phoneme_ids": torch.tensor([[1, 1], [2, 0], [1, 0]]),
-             "phoneme_lens": torch.tensor([2, 1, 1])}
+             "phoneme_lens": torch.tensor([2, 1, 1]),
+             "stress_seq": torch.ones(3, 2).long(), "tone_seq": torch.zeros(3, 2).long(),
+             "pitch_accent_seq": torch.zeros(3, 2).long()}
     metrics.update(outputs, batch, torch.tensor([2, 2, 4]))
     actual = metrics.compute()["eng"]
     assert actual["per"] == pytest.approx(2 / 3)
@@ -148,9 +151,18 @@ def test_warmup_switches_after_exactly_400_updates_across_short_epochs(monkeypat
 def test_validation_phone_objective_stable_and_single_forward_per_batch():
     model = TinyModel()
     kwargs = dict(use_bf16=False, blank_id=0, stress_weight=.3, debug_finite=True)
-    joint = training.eval_epoch(model, [tiny_batch(2), tiny_batch()], "cpu", stress_active=True, **kwargs)
+    tokenizer = SimpleNamespace(convert_ids_to_tokens=lambda i: ["<pad>", "b", "a"][i])
+    batches = [tiny_batch(2), tiny_batch()]
+    for batch in batches:
+        batch["clip_ids"] = [f"eng/{i}" for i in range(len(batch["langs"]))]
+        batch["phoneme_ids"].fill_(2)
+    joint = training.eval_epoch(model, batches, "cpu", stress_active=True,
+                                tokenizer=tokenizer, decode_clip_ids={"eng/0", "eng/1"}, **kwargs)
+    assert joint["per_lang_decode"]["eng"]["stress_acc"] == 0
     assert model.calls == 2
-    phone = training.eval_epoch(model, [tiny_batch(3)], "cpu", stress_active=False, **kwargs)
+    phone_batch = tiny_batch(3)
+    phone_batch["phoneme_ids"].fill_(2)
+    phone = training.eval_epoch(model, [phone_batch], "cpu", stress_active=False, **kwargs)
     assert joint["phone_ctc_loss"] == pytest.approx(phone["ctc_loss"], abs=1e-6)
     assert joint["per_lang_phone_ctc"]["eng"] == pytest.approx(phone["per_lang_ctc"]["eng"], abs=1e-6)
     assert joint["ctc_loss"] != pytest.approx(joint["phone_ctc_loss"])

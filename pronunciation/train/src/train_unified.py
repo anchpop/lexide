@@ -683,7 +683,7 @@ def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool
     total_phone = 0.0
     total_samples = 0
     phone_lang_sum = defaultdict(float)
-    decoder = (DecodeMetrics(tokenizer, blank_id, decode_clip_ids)
+    decoder = (DecodeMetrics(tokenizer, blank_id, decode_clip_ids, model.language_head_specs)
                if tokenizer is not None and decode_clip_ids is not None else None)
     n_batches = 0
     lang_loss_sum: dict[str, float] = {}
