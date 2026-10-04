@@ -1,143 +1,69 @@
 #!/usr/bin/env bash
-# Post-training release pipeline: turn freshly trained weights on HF into a verified,
-# published, deployed parsley release. Run from tagging/ on the box after a training run
-# (run_node.sh has pushed tagger/best + tokenizer/tokenizer.pt to anchpop/lexide-parsley):
-#
-#     ./release.sh
-#
-# Steps (each gates the next; the script stops on the first failure):
-#   1. ONNX-export the tagger on Modal, numerically verified against PyTorch    -> volume
-#   2. Export the char-minGRU weights + reference fixtures on Modal             -> volume
-#   3. Pull the exported artifacts to data/onnx/
-#   4. Rebuild training-data lemma priors (skipped if data/processed is absent)
-#   5. Compile the Wiktionary tables + priors to fst                            -> data/onnx/lemma_fst
-#   6. Rust unit tests — includes bit-for-bit char-tokenizer parity vs step 2's fixtures
-#   7. Upload the complete data/onnx/ set to HF anchpop/lexide-parsley/onnx/
-#      (write token from the repo-root .env; the Modal secret's token is read-only)
-#   8. Deploy the parsley Modal serve (bakes the new weights + tables)
-#   9. Re-record parity fixtures from the live serve
-#  10. Run the token-for-token parity test: Rust local pipeline vs the live serve
-#
-# After it passes, commit the updated tests/fixtures/parsley_reference.json.
+# Release joint parsley without touching the legacy onnx/ artifacts or publishing crates.
 set -euo pipefail
 cd "$(dirname "$0")"
+ROOT="$PWD"
+PYTHON="${PYTHON:-$HOME/.venv-lexide-tests/bin/python}"
+if [[ -f /tmp/pyenv.sh ]]; then source /tmp/pyenv.sh; fi
+export HF_HUB_DISABLE_XET=1
+REVISION=09a1f8b32248cc303132026ec488f4ad65085ecb
+CHECKPOINT="$ROOT/tagger/output/hf-joint-v2/training-runs/joint-v2-24L/best"
+ARTIFACTS="$ROOT/tagger/output/joint-onnx"
+CARGO=(direnv exec /data/coding/yap cargo)
+# MODAL_PYTHON can select a working interpreter if the venv's symlink broke after a Nix upgrade.
+MODAL_PYTHON="${MODAL_PYTHON:-/nix/store/60m4rxhg2fldqaak400c0lry96ijrzqn-python3-3.13.13/bin/python3.13}"
+modal_cli() { PYTHONPATH="$HOME/.modal-venv/lib/python3.13/site-packages${PYTHONPATH:+:$PYTHONPATH}" "$MODAL_PYTHON" -m modal "$@"; }
 
-MODAL="${MODAL:-$HOME/.modal-venv/bin/modal}"
-VENV_PY="tagger/.venv/bin/python"          # has huggingface_hub (for the upload)
-SEG_PY="${SEG_PY:-.venv-seg/bin/python}"   # torch+safetensors, for the local segmenter export
-HF_REPO="anchpop/lexide-parsley"
-ENV_FILE="../.env"                         # repo root .env with the write-role HF_TOKEN
-SEG_CKPT="sentence-labeller/output/segmenter.pt"
+"$PYTHON" - <<PY
+from huggingface_hub import snapshot_download
+snapshot_download('anchpop/lexide-parsley', revision='$REVISION',
+                  allow_patterns='training-runs/joint-v2-24L/best/*',
+                  local_dir='$ROOT/tagger/output/hf-joint-v2')
+PY
+"$PYTHON" -m unittest discover -s tagger -p test_joint.py
+"$PYTHON" tagger/export_joint_onnx.py --checkpoint "$CHECKPOINT" --out "$ARTIFACTS"
+"$PYTHON" tagger/verify_joint_onnx.py --checkpoint "$CHECKPOINT" --onnx "$ARTIFACTS" \
+    --test data/processed-joint/test.jsonl --report tagger/output/joint-onnx-verification.json
 
-# cargo: direct only if the toolchain can actually build our dependency tree, else via the
-# yap flake devshell (how this box provides it). Testing `command -v cargo` alone is not
-# enough — NixOS has a system cargo on PATH, but openssl-sys is only discoverable inside the
-# devshell, so the bare branch got picked and the build died on a missing OpenSSL.
-if command -v cargo >/dev/null && pkg-config --exists openssl 2>/dev/null; then
-    CARGO=(cargo)
-else
-    CARGO=(direnv exec /data/coding/yap cargo)
-fi
-
-step() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
-
-step "1/10 ONNX export + PyTorch verification (Modal)"
-"$MODAL" run tagger/export_modal.py
-
-step "2/10 char-minGRU safetensors + fixtures export (Modal)"
-"$MODAL" run tagger/export_char_modal.py
-
-step "3/10 pull exported artifacts -> data/onnx/"
-mkdir -p data/onnx
-for f in tagger.onnx tokenizer.json vocab.json char_tokenizer.safetensors char_tokenizer_fixtures.json; do
-    "$MODAL" volume get --force lexide-onnx "$f" data/onnx/
-done
-
-step "3b/10 export sentence segmenter (local) -> data/onnx/"
-# The segmenter trains locally (sentence-labeller/train_segmenter.py), not on Lambda, so
-# its export runs here rather than on Modal. Skips cleanly if no checkpoint is present
-# (e.g. a tagger-only re-release) — the existing data/onnx/ segmenter artifacts are kept.
-if [ -f "$SEG_CKPT" ]; then
-    # The pip torch wheel needs libstdc++ (and, for CUDA, the driver) on LD_LIBRARY_PATH on
-    # this NixOS box, or `import torch` fails. Honor SEG_LD_LIBRARY_PATH if set; else locate
-    # a gcc-*-lib with libstdc++.so.6 in the nix store. Export is CPU-only.
-    : "${SEG_LD_LIBRARY_PATH:=$(dirname "$(find /nix/store -maxdepth 3 -name libstdc++.so.6 -path '*-gcc-*-lib/lib/*' 2>/dev/null | head -1)")}"
-    LD_LIBRARY_PATH="${SEG_LD_LIBRARY_PATH}:/run/opengl-driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        "$SEG_PY" sentence-labeller/export_segmenter.py --ckpt "$SEG_CKPT" --out-dir data/onnx
-else
-    echo "WARNING: $SEG_CKPT not found — skipping segmenter export (keeping existing artifacts)." >&2
-fi
-
-step "3c/10 stage boundary priors -> data/onnx/"
-# The tokenizer's boundary prior (segment::prior) is part of the model: a checkpoint
-# trained with one refuses to load without its data, because running it prior-free
-# silently degrades exactly the languages the prior was added for. These files are built
-# once by tagger/build_unidic_artifact.py + tagger/build_wordbanks.py and live in
-# data/priors; staging them here puts them in the same upload as the weights.
-if [ -f data/priors/jpn-unidic.bin ]; then
-    cp data/priors/jpn-unidic.bin data/onnx/
-    echo "staged jpn-unidic.bin ($(du -h data/priors/jpn-unidic.bin | cut -f1))"
-else
-    echo "WARNING: data/priors/jpn-unidic.bin not found — a prior-trained tokenizer will" >&2
-    echo "         fail to load. Rebuild with tagger/build_unidic_artifact.py." >&2
-fi
-if [ -d data/priors/wordbanks ]; then
-    mkdir -p data/onnx/wordbanks
-    cp data/priors/wordbanks/*.tsv data/onnx/wordbanks/ 2>/dev/null || true
-    echo "staged wordbanks: $(ls data/onnx/wordbanks 2>/dev/null | tr '\n' ' ')"
-fi
-
-step "4/10 rebuild training-data lemma priors"
-if [ -f data/processed/train.jsonl ]; then
-    PYTHONPATH=tagger python3 tagger/build_lemma_priors.py
-else
-    echo "WARNING: data/processed/train.jsonl not found — keeping existing wikt_priors_*.json." >&2
-    echo "         (Rebuild with data_prep.py + build_lemma_priors.py if training data changed.)" >&2
-fi
-
-step "5/10 compile lemma tables + priors -> fst"
-(cd lexide && "${CARGO[@]}" run --release --no-default-features --features local \
-    --bin build-lemma-fst -- --in ../data/lemma_tables --out ../data/onnx/lemma_fst)
-
-step "6/10 Rust unit tests (incl. char-tokenizer bit-parity vs the fresh fixtures)"
-(cd lexide && "${CARGO[@]}" test --lib --no-default-features --features local,remote --release)
-
-step "7/10 upload data/onnx/ -> HF ${HF_REPO}/onnx/"
-[ -f "$ENV_FILE" ] || { echo "ERROR: $ENV_FILE with a write-role HF_TOKEN is required" >&2; exit 1; }
-set -a; source "$ENV_FILE"; set +a
-SEG_CKPT="$SEG_CKPT" "$VENV_PY" - <<'PY'
+# Upload only the six fp32 runtime files; no int8, checkpoints, segmenter or v1 deletions.
+"$PYTHON" - "$ARTIFACTS" <<'PY'
 import os
-from huggingface_hub import upload_folder, upload_file
-r = upload_folder(
-    repo_id="anchpop/lexide-parsley",
-    folder_path="data/onnx",
-    path_in_repo="onnx",
-    token=os.environ["HF_TOKEN"],
-    commit_message="release.sh: refresh onnx/ artifacts",
-)
-print("uploaded onnx/:", r.commit_url)
-# The serve loads the raw segmenter checkpoint from segmenter/segmenter.pt (the Rust
-# backend uses onnx/sentence_segmenter.safetensors instead). Publish it when present.
-ckpt = os.environ.get("SEG_CKPT", "")
-if ckpt and os.path.exists(ckpt):
-    r2 = upload_file(
-        repo_id="anchpop/lexide-parsley",
-        path_or_fileobj=ckpt,
-        path_in_repo="segmenter/segmenter.pt",
-        token=os.environ["HF_TOKEN"],
-        commit_message="release.sh: refresh sentence segmenter",
-    )
-    print("uploaded segmenter/:", r2.commit_url)
+from pathlib import Path
+import re
+import sys
+from huggingface_hub import HfApi
+
+token = os.environ.get('HF_TOKEN')
+if not token:
+    token = next(line.split('=', 1)[1].strip().strip('\"\'')
+                 for line in Path('../.env').read_text().splitlines() if line.startswith('HF_TOKEN='))
+api = HfApi(token=token)
+result = api.upload_folder(
+    repo_id='anchpop/lexide-parsley', folder_path=sys.argv[1], path_in_repo='joint',
+    allow_patterns=['encoder.onnx', 'encoder.onnx.data', 'heads.onnx', 'tokenizer.json', 'vocab.json', 'config.json'],
+    commit_message='Publish verified fp32 joint parsley artifacts; preserve v1 onnx')
+api.upload_file(repo_id='anchpop/lexide-parsley', path_or_fileobj='tagger/model_card.md',
+                path_in_repo='README.md', commit_message='Document current joint parsley')
+path = Path('lexide/src/local/mod.rs')
+updated, count = re.subn(r'pub const MODEL_REVISION: &str = "[0-9a-f]{40}";',
+                        f'pub const MODEL_REVISION: &str = "{result.oid}";', path.read_text())
+assert count == 1, 'Expected one Rust artifact revision constant'
+path.write_text(updated)
+print('Rust artifact revision:', result.oid)
 PY
 
-step "8/10 deploy the parsley serve (Modal)"
-"$MODAL" deploy modal/modal_serve_tagger.py
+SEGMENT_URL=https://anchpop--lexide-parsley-parsley-segment.modal.run
+PASSAGES='{"texts":["Dr. Smith arrived at 3 p.m. He was early. Really?","こんにちは。元気ですか？","Eine Fundgrube. Das ist gut!"],"lang":"eng"}'
+curl --fail --silent --show-error --max-time 300 "$SEGMENT_URL" -H 'Content-Type: application/json' \
+    --data "$PASSAGES" > tagger/output/segment-before.json
+JOINT_HF_REVISION="$REVISION" modal_cli deploy modal/modal_serve_tagger.py
+curl --fail --silent --show-error --max-time 300 "$SEGMENT_URL" -H 'Content-Type: application/json' \
+    --data "$PASSAGES" > tagger/output/segment-after.json
+cmp tagger/output/segment-before.json tagger/output/segment-after.json
+modal_cli run modal/verify_parsley.py
 
-step "9/10 re-record parity fixtures from the live serve"
-python3 tagger/record_parity_fixtures.py
-
-step "10/10 token-for-token parity: Rust local pipeline vs the live serve"
-(cd lexide && "${CARGO[@]}" test --test parsley_parity --no-default-features --features local --release -- --nocapture)
-
-printf '\n\033[1mRelease verified.\033[0m Commit the refreshed fixtures:\n'
-printf '  git add lexide/tests/fixtures/parsley_reference.json && git commit\n'
+"$PYTHON" tagger/record_parity_fixtures.py --checkpoint "$CHECKPOINT"
+export LEXIDE_MODEL_DIR="$ARTIFACTS"
+"${CARGO[@]}" test --manifest-path lexide/Cargo.toml --features local --test parsley_parity -- --nocapture
+"${CARGO[@]}" fmt --manifest-path lexide/Cargo.toml --check
+printf 'Verified. Review the artifact revision and fixtures; nothing was committed or published to crates.io.\n'

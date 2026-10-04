@@ -3,8 +3,7 @@
 //! I = inside a sentence, O = a gap (whitespace, headings, separators between sentences).
 //!
 //! Trained by `sentence-labeller/train_segmenter.py` on LLM/mechanically labelled
-//! passages; the same architecture, weight layout, and export path as the token
-//! boundary tagger (`local::chartok`). Given a passage it recovers each sentence's char
+//! passages. Given a passage it recovers each sentence's char
 //! span, so a raw text (or a list of texts) can be split into its sentences with the
 //! gaps between them dropped — the whitespace/markers a sentence *frames* (its own quotes,
 //! leading dashes) stay attached because they were labelled as part of the sentence.

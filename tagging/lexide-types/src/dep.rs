@@ -1,6 +1,6 @@
 use std::fmt;
 
-/// Dependency relation types (Universal Dependencies)
+/// Dependency relation types
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Ord, PartialOrd, Copy,
 )]

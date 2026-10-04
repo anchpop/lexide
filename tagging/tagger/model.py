@@ -1,27 +1,17 @@
-"""Models for the lexide tagger.
+"""Parsley models.
 
-Two independently-trainable components make up the deployable pipeline:
-
-1. CharBoundaryTagger  -- raw text -> token spans. A tiny bidirectional minGRU over
-   bytes predicting per-char {O, B, I} so token boundaries need not agree with any
-   subword vocabulary. This is the piece that replaces the LLM's implicit tokenizer.
-
-2. MultiTaskTagger     -- token spans -> {POS, lemma, dep-head, dep-rel}. A shared
-   multilingual subword encoder with offset-based subword->word pooling, then a POS
-   head, a lemma edit-script classifier, and a Dozat-Manning biaffine dependency head.
-
-JointTagger adds character-resolved representations and jointly learns boundaries
-and word tasks. Unlike first-subword pooling, distinct words sharing one encoder
-piece receive distinct character states.
+JointTagger is the production tokenizer/tagger: bge-m3, character BiLSTM, boundary
+head and word tasks. Distinct words sharing one encoder piece get distinct states.
+CharBoundaryTagger also powers the independent byte sentence segmenter.
+MultiTaskTagger and the byte tokenizer remain for historical v1 training.
 """
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# NOTE: `transformers` is imported lazily inside MultiTaskTagger.__init__ so that the
-# tiny byte-level CharBoundaryTagger (and its sentence-segmenter twin) can be trained /
-# exported in a minimal torch-only environment without pulling in transformers.
+# Import transformers only inside encoder-model constructors so the independent byte
+# sentence segmenter still runs in a minimal torch-only environment.
 
 
 # --------------------------------------------------------------------------------------
@@ -290,33 +280,13 @@ class JointTagger(nn.Module):
         self.lw = {name: 1. for name in ("boundary", "pos", "lemma", "arc", "rel")}
         self.lw.update(loss_weights or {})
 
-    def encode_chars(self, batch):
+    def encode_chars(self, batch, *, unpadded=False):
         from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
         ids, attention = batch["input_ids"], batch["attention_mask"]
         limit = self.encoder.config.max_position_embeddings - 2
-        if ids.size(1) <= limit:
-            sub = self.encoder(input_ids=ids, attention_mask=attention).last_hidden_state
-        else:
-            # Long inference: encode all pieces in windows, then run ONE full
-            # character LSTM and ONE sentence-level dependency tree. No lost tail
-            # or multiple artificial roots. Training stays within max_subwords.
-            rows = []
-            for row, mask in zip(ids, attention):
-                length = int(mask.sum())
-                pieces = []
-                for start in range(1, length - 1, limit - 2):
-                    end = min(start + limit - 2, length - 1)
-                    window = torch.cat([row[:1], row[start:end], row[length - 1:length]])
-                    states = self.encoder(input_ids=window[None], attention_mask=torch.ones_like(window)[None]).last_hidden_state[0]
-                    pieces.append(states[0:1] if start == 1 else states[:0])
-                    pieces.append(states[1:-1])
-                    if end == length - 1:
-                        pieces.append(states[-1:])
-                if not pieces:  # Empty sentence alongside a long sentence.
-                    pieces = [self.encoder(input_ids=row[:length][None]).last_hidden_state[0]]
-                hidden = torch.cat(pieces)
-                rows.append(F.pad(hidden, (0, 0, 0, ids.size(1) - length)))
-            sub = torch.stack(rows)
+        if ids.size(1) > limit:
+            raise ValueError(f"Sentence has {ids.size(1)} subwords; maximum is {limit}. Split passages into sentences first.")
+        sub = self.encoder(input_ids=ids, attention_mask=attention).last_hidden_state
         mapping = batch["char_to_sub"]
         covered = mapping >= 0
         at_char = sub.gather(1, mapping.clamp(min=0).unsqueeze(-1).expand(-1, -1, sub.size(-1)))
@@ -327,13 +297,17 @@ class JointTagger(nn.Module):
         features = (self.sub_projection(at_char) + self.char_embedding(batch["char_ids"])
                     + self.feature_embedding(batch["char_features"])
                     + self.lang_embedding(lang).unsqueeze(1))
-        lengths = batch["char_mask"].sum(1).clamp(min=1).cpu()
         # Packed cuDNN LSTM bf16 is not uniformly supported. Keep this modest layer
         # FP32, including inputs, while the much larger encoder/heads use autocast.
         with torch.autocast(device_type=sub.device.type, enabled=False):
-            packed = pack_padded_sequence(features.float(), lengths, batch_first=True, enforce_sorted=False)
-            packed, _ = self.char_lstm(packed)
-            chars, _ = pad_packed_sequence(packed, batch_first=True, total_length=mapping.size(1))
+            if unpadded:
+                # Single-sentence ONNX inference supplies no character padding.
+                chars, _ = self.char_lstm(features.float())
+            else:
+                lengths = batch["char_mask"].sum(1).clamp(min=1).cpu()
+                packed = pack_padded_sequence(features.float(), lengths, batch_first=True, enforce_sorted=False)
+                packed, _ = self.char_lstm(packed)
+                chars, _ = pad_packed_sequence(packed, batch_first=True, total_length=mapping.size(1))
             chars = self.char_norm(chars)
         chars = self.drop(chars) * batch["char_mask"].unsqueeze(-1)
         return {"chars": chars, "sub_at_char": at_char,
@@ -353,7 +327,8 @@ class JointTagger(nn.Module):
         arcs = arcs.masked_fill(~valid[:, None, :].bool(), float("-inf"))
         # Self arcs never represent a valid dependency.
         w = words.size(1)
-        arcs = arcs.masked_fill(torch.eye(w, w + 1, device=words.device, dtype=torch.bool).roll(1, dims=1)[None], float("-inf"))
+        self_arcs = torch.arange(w, device=words.device)[:, None] + 1 == torch.arange(w + 1, device=words.device)[None, :]
+        arcs = arcs.masked_fill(self_arcs[None], float("-inf"))
         return {"pos_logits": self.pos_head(words), "lemma_logits": self.lemma_head(words),
                 "arc_scores": arcs, "rel_scores": rels}
 

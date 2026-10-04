@@ -1,4 +1,9 @@
-//! Byte-level bidirectional minGRU sentence segmenter.
+//! Shared byte-level bidirectional minGRU — a pure-Rust reimplementation of the
+//! `CharBoundaryTagger` in `tagger/model.py` (0.99M params, so no ML runtime needed;
+//! the sequential-scan recurrence is also what keeps it out of the ONNX graph).
+//!
+//! The demo's tokenizer and sentence segmenter share this weight layout; their
+//! O/B/I spans denote tokens and sentences respectively.
 //!
 //! Input is `[BOS] + utf8(text) + [EOS]` byte ids; output is a per-byte O/B/I label read
 //! at each character's first byte to recover char spans (see [`spans_from_byte_labels`]).
@@ -140,6 +145,18 @@ pub struct ByteBioModel {
     emb_dim: usize,
     /// How many language rows this checkpoint actually has — a prefix of [`LANG_ORDER`].
     n_langs: usize,
+    /// Optional per-byte boundary-prior embedding (see [`super::prior`]). Absent on
+    /// pre-prior checkpoints, which is why it is an Option rather than a zero row.
+    prior_emb: Option<Vec<f32>>,
+    /// Width of a prior row. Under `add` this equals `emb_dim` and the row is summed into
+    /// the byte embedding; under `concat` it is narrower and gets its own coordinates.
+    ///
+    /// Layer 0 is linear, so add computes `W(emb + prior)` — the prior's contribution is
+    /// forced through the *byte* projection — while concat computes
+    /// `W_byte·emb + W_prior·prior` with an independent one. With only PRIOR_VOCAB distinct
+    /// values a narrow dedicated channel can express anything the wide additive one could,
+    /// so concat is strictly the more general of the two, and measured better.
+    prior_dim: usize,
     layers: Vec<BiMinGru>,
     norm_w: Vec<f32>,
     norm_b: Vec<f32>,
@@ -208,9 +225,20 @@ impl ByteBioModel {
             );
         }
         let n_langs = emb_shape[0] - VOCAB;
-        if st.tensor("prior_emb.weight").is_ok() {
-            bail!("token boundary checkpoints are not sentence segmenters");
-        }
+        let (prior_emb, prior_dim) = match st.tensor("prior_emb.weight") {
+            Ok(_) => {
+                let (shape, w) = tensor("prior_emb.weight")?;
+                if shape[0] != super::prior::PRIOR_VOCAB {
+                    bail!(
+                        "prior embedding has {} rows, expected {}",
+                        shape[0],
+                        super::prior::PRIOR_VOCAB
+                    );
+                }
+                (Some(w), shape[1])
+            }
+            Err(_) => (None, 0),
+        };
         let mut layers = Vec::new();
         for i in 0.. {
             if st.tensor(&format!("layers.{i}.fwd.to_z.weight")).is_err() {
@@ -230,9 +258,18 @@ impl ByteBioModel {
         if layers.is_empty() {
             bail!("byte-minGRU weights contain no BiMinGRU layers");
         }
+        // Layer 0's input width is the ground truth for how the prior enters: equal to the
+        // byte embedding means the prior was summed in, wider means it was concatenated.
+        // Deriving it from the weights rather than a stored flag means a checkpoint cannot
+        // be loaded in the wrong mode.
+        let in0 = layers[0].fwd.to_z.in_dim;
         let emb_dim = emb_shape[1];
-        if layers[0].fwd.to_z.in_dim != emb_dim {
-            bail!("sentence segmenter input width differs from byte embedding");
+        let concat = prior_emb.is_some() && in0 == emb_dim + prior_dim;
+        if prior_emb.is_some() && !concat && in0 != emb_dim {
+            bail!(
+                "layer 0 takes {in0} inputs, but the byte embedding is {emb_dim} and the \
+                 prior embedding {prior_dim} — neither additive nor concatenated"
+            );
         }
         let (_, norm_w) = tensor("norm.weight")?;
         let (_, norm_b) = tensor("norm.bias")?;
@@ -242,11 +279,25 @@ impl ByteBioModel {
             emb_dim,
             emb,
             n_langs,
+            prior_emb,
+            prior_dim: if concat { prior_dim } else { 0 },
             layers,
             norm_w,
             norm_b,
             out,
         })
+    }
+
+    /// Per-position O/B/I logits for `[LANG or BOS] + utf8(text) + [EOS]`. `lang` is a
+    /// three-letter code from [`LANG_ORDER`]; unknown codes — or any code on a
+    /// language-blind checkpoint — fall back to the generic BOS.
+    pub fn logits(&self, text: &str, lang: Option<&str>) -> Vec<[f32; 3]> {
+        self.logits_with_prior(text, lang, None)
+    }
+
+    /// True when the checkpoint was trained with a boundary prior and expects one.
+    pub fn wants_prior(&self) -> bool {
+        self.prior_emb.is_some()
     }
 
     /// Embedding row for a language token, or `None` for the generic BOS. A code this
@@ -258,8 +309,15 @@ impl ByteBioModel {
         (i < self.n_langs).then(|| VOCAB + i)
     }
 
-    /// Per-byte O/B/I logits, including language/BOS and EOS positions.
-    pub fn logits(&self, text: &str, lang: Option<&str>) -> Vec<[f32; 3]> {
+    /// As [`Self::logits`], plus a per-byte boundary proposal aligned to
+    /// `[BOS] + utf8(text) + [EOS]` — exactly what [`super::prior::prior_ids`] returns.
+    /// Ignored by checkpoints trained without one.
+    pub fn logits_with_prior(
+        &self,
+        text: &str,
+        lang: Option<&str>,
+        prior: Option<&[u8]>,
+    ) -> Vec<[f32; 3]> {
         let first = self.lang_row(lang).unwrap_or(BOS_BYTE);
         let mut ids: Vec<usize> = Vec::with_capacity(text.len() + 2);
         ids.push(first);
@@ -267,9 +325,36 @@ impl ByteBioModel {
         ids.push(EOS_BYTE);
         let len = ids.len();
 
-        let mut h: Vec<f32> = Vec::with_capacity(len * self.emb_dim);
-        for id in ids {
+        // a short or absent prior reads as NONE rather than shifting the alignment
+        let prior_row = |t: usize| -> usize {
+            prior
+                .and_then(|p| p.get(t))
+                .copied()
+                .unwrap_or(super::prior::PRIOR_NONE) as usize
+        };
+        let d0 = self.emb_dim + self.prior_dim;
+        let mut h: Vec<f32> = Vec::with_capacity(len * d0);
+        for (t, id) in ids.into_iter().enumerate() {
             h.extend_from_slice(&self.emb[id * self.emb_dim..(id + 1) * self.emb_dim]);
+            match (&self.prior_emb, self.prior_dim) {
+                // concat: the prior gets its own coordinates after the byte's
+                (Some(pe), pd) if pd > 0 => {
+                    let row = prior_row(t);
+                    h.extend_from_slice(&pe[row * pd..(row + 1) * pd]);
+                }
+                // add: summed into the byte embedding it shares dimensions with
+                (Some(pe), _) => {
+                    let row = prior_row(t);
+                    let base = t * self.emb_dim;
+                    for (dst, v) in h[base..base + self.emb_dim]
+                        .iter_mut()
+                        .zip(&pe[row * self.emb_dim..(row + 1) * self.emb_dim])
+                    {
+                        *dst += v;
+                    }
+                }
+                (None, _) => {}
+            }
         }
         for layer in &self.layers {
             h = layer.forward(&h, len);
@@ -296,7 +381,21 @@ impl ByteBioModel {
 
     /// Raw text -> (start, end) char spans (each B and its trailing I run).
     pub fn segment(&self, text: &str, lang: Option<&str>) -> Vec<(usize, usize)> {
-        let labels: Vec<u8> = self.logits(text, lang).iter().map(argmax3).collect();
+        self.segment_with_prior(text, lang, None)
+    }
+
+    /// As [`Self::segment`], with a per-byte boundary proposal.
+    pub fn segment_with_prior(
+        &self,
+        text: &str,
+        lang: Option<&str>,
+        prior: Option<&[u8]>,
+    ) -> Vec<(usize, usize)> {
+        let labels: Vec<u8> = self
+            .logits_with_prior(text, lang, prior)
+            .iter()
+            .map(argmax3)
+            .collect();
         spans_from_byte_labels(text, &labels)
     }
 }
@@ -372,5 +471,79 @@ mod tests {
         // "яб": я is 2 bytes; its label is at byte pos 1, б's at pos 3.
         let labels = [0, 1, 0, 2, 0]; // BOS я(2b) б(2b) EOS -> one span covering both chars
         assert_eq!(spans_from_byte_labels("яб", &labels), vec![(0, 2)]);
+    }
+}
+
+#[cfg(test)]
+mod prior_parity_tests {
+    use super::*;
+    use crate::prior::PRIOR_NONE as PRIOR_NONE_U8;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    /// Bit-parity against PyTorch for a *concat-mode* prior checkpoint.
+    ///
+    /// The released fixtures come from whatever checkpoint shipped last, so until a concat
+    /// model ships they cannot cover this path. These come instead from a small
+    /// randomly-initialised concat model, committed (36KB) so the test never silently
+    /// skips. Small as it is, it catches what actually goes wrong here: the layer-0 input
+    /// assembled in the wrong order, the prior row indexed by the wrong stride, or the mode
+    /// mis-inferred from the weights.
+    #[test]
+    fn concat_prior_matches_pytorch() {
+        let model = ByteBioModel::load(&fixture("concat_parity.safetensors")).unwrap();
+        assert!(
+            model.wants_prior(),
+            "fixture model should carry a prior embedding"
+        );
+        assert!(
+            model.prior_dim > 0,
+            "should have loaded in concat mode, not add"
+        );
+
+        let cases: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(fixture("concat_parity.json")).unwrap())
+                .unwrap();
+        for c in cases.as_array().unwrap() {
+            let text = c["text"].as_str().unwrap();
+            let lang = c.get("lang").and_then(|v| v.as_str());
+            let prior: Vec<u8> = c["prior_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
+                .collect();
+            let want = c["logits"].as_array().unwrap();
+            let got = model.logits_with_prior(text, lang, Some(&prior));
+
+            // Guard against a vacuous pass: if the prior were being dropped on the floor,
+            // every comparison below would still succeed for a model that ignores it. A
+            // perturbed prior must move the logits.
+            if prior.iter().any(|&p| p != PRIOR_NONE_U8) {
+                let blanked = vec![PRIOR_NONE_U8; prior.len()];
+                let other = model.logits_with_prior(text, lang, Some(&blanked));
+                let moved = got
+                    .iter()
+                    .zip(&other)
+                    .any(|(a, b)| a.iter().zip(b).any(|(x, y)| (x - y).abs() > 1e-4));
+                assert!(moved, "prior had no effect on the logits for {text:?}");
+            }
+            assert_eq!(got.len(), want.len(), "length diverges for {text:?}");
+            for (t, (g, w)) in got.iter().zip(want).enumerate() {
+                for (j, gv) in g.iter().enumerate() {
+                    let wv = w[j].as_f64().unwrap() as f32;
+                    assert!(
+                        (gv - wv).abs() < 1e-3,
+                        "logits diverge for {text:?} lang={lang:?} at position {t}: \
+                         {g:?} vs {w:?}"
+                    );
+                }
+            }
+        }
     }
 }

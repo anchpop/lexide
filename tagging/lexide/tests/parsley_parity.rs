@@ -1,15 +1,5 @@
-//! Token-for-token parity between the local ONNX pipeline and the parsley Modal serve.
-//!
-//! `tests/fixtures/parsley_reference.json` holds recorded responses from the live endpoint
-//! (29 sentences across all 12 languages; refresh with
-//! `tagger/record_parity_fixtures.py`, which `tagging/release.sh` runs after each deploy).
-//! The local pipeline — byte-minGRU
-//! segmentation, ONNX tagging, fst lemma floor — must reproduce them exactly: same token
-//! boundaries, POS, lemma, dependency relation, and head.
-//!
-//! Skips (with a note) when the model artifacts aren't present; fetch them with
-//! `modal volume get lexide-onnx ...` into `tagging/data/onnx/` or point LEXIDE_MODEL_DIR
-//! at them, and build the lemma tables with `build-lemma-fst`.
+//! Token-for-token parity with CPU fp32 predict_joint (not the bf16 GPU serve).
+//! Set LEXIDE_MODEL_DIR to verified joint artifacts, or download the pinned release.
 
 #![cfg(feature = "local")]
 
@@ -17,12 +7,6 @@ use std::path::PathBuf;
 
 use lexide::pos::PartOfSpeech;
 use lexide::{Language, LocalConfig, LocalLexide};
-
-fn model_dir() -> PathBuf {
-    std::env::var("LEXIDE_MODEL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data/onnx"))
-}
 
 fn language(code: &str) -> Language {
     match code {
@@ -43,28 +27,16 @@ fn language(code: &str) -> Language {
 }
 
 #[test]
-fn local_pipeline_matches_parsley_server() {
-    let dir = model_dir();
-    if !dir.join("tagger.onnx").exists() {
-        eprintln!(
-            "skipping: no ONNX artifacts at {} (set LEXIDE_MODEL_DIR)",
-            dir.display()
-        );
-        return;
-    }
-    let have_tables = dir.join("lemma_fst").exists();
-    assert!(
-        have_tables,
-        "lemma tables missing at {}/lemma_fst — run build-lemma-fst first \
-         (the fixtures were recorded with the Wiktionary lemma floor active)",
-        dir.display()
-    );
-
+fn local_pipeline_matches_pytorch_fp32() {
     let lexide = LocalLexide::load(LocalConfig {
-        model_dir: Some(dir),
+        threads: 4,
         ..Default::default()
     })
     .expect("failed to load local pipeline");
+    let error = lexide
+        .analyze(&"hello ".repeat(10_000), Language::English)
+        .unwrap_err();
+    assert!(error.to_string().contains("maximum is 8192"), "{error:#}");
 
     let fixtures: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
@@ -97,20 +69,23 @@ fn local_pipeline_matches_parsley_server() {
         for (i, (g, w)) in got.tokens().iter().zip(want).enumerate() {
             let ctx = format!("{lang:?} {text:?} token {i} ({:?})", w["text"]);
             assert_eq!(g.text.text, w["text"].as_str().unwrap(), "text: {ctx}");
-            // Map the recorded strings through the same serde funnel the remote client
-            // uses, so both sides degrade unknown tags identically.
-            let want_pos: PartOfSpeech =
-                serde_plain::from_str(w["pos"].as_str().unwrap()).unwrap_or(PartOfSpeech::X);
+            assert_eq!(
+                g.whitespace.as_str(),
+                w["whitespace"].as_str().unwrap(),
+                "whitespace: {ctx}"
+            );
+            let want_pos: PartOfSpeech = serde_plain::from_str(w["pos"].as_str().unwrap())
+                .expect("PyTorch POS must be represented by the Rust API");
             assert_eq!(g.pos, want_pos, "pos: {ctx}");
             assert_eq!(g.lemma.lemma, w["lemma"].as_str().unwrap(), "lemma: {ctx}");
             let want_dep: lexide::DependencyRelation =
                 serde_plain::from_str(w["dep"].as_str().unwrap())
-                    .unwrap_or(lexide::DependencyRelation::Dep);
+                    .expect("PyTorch dependency relation must be represented by the Rust API");
             assert_eq!(g.dep, want_dep, "dep: {ctx}");
             assert_eq!(g.head, w["head"].as_i64().unwrap() as i32, "head: {ctx}");
             tokens += 1;
         }
         sentences += 1;
     }
-    println!("parity OK: {sentences} sentences, {tokens} tokens match the parsley serve");
+    println!("parity OK: {sentences} sentences, {tokens} tokens match PyTorch fp32");
 }

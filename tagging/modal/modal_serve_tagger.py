@@ -1,203 +1,161 @@
-#!/usr/bin/env python3
-"""Modal deployment for `parsley` — the small CPU tagger that replaces the Gemma pipeline.
-
-Serves the encoder multi-task tagger (POS + lemma + dependency) plus the byte-minGRU
-tokenizer from anchpop/lexide-parsley, on CPU, with scale-to-zero. One forward pass per
-sentence — no GPU — so idle cost is ~nothing and a warm container answers in ms.
-
-    modal deploy modal/modal_serve_tagger.py     # deploy the web endpoint
-    modal run    modal/modal_serve_tagger.py     # smoke-test locally
-
-The tagger model, its source, and the Wiktionary lemma tables are all baked into the image
-at build/deploy time (the model via a run_function download). This matters for memory
-snapshots: the snapshotted load must read only from local disk — Modal will not reuse a
-snapshot whose snap=True method did network I/O. Deploy from a checkout with
-data/lemma_tables/ populated (see tagger/LEMMA_LOOKUP.md).
-"""
+"""Parsley: joint L4 tagger and independent CPU sentence segmenter."""
 import os
 from pathlib import Path
+import re
 
 import modal
 
-APP_NAME = "lexide-parsley"
-HF_REPO = "anchpop/lexide-parsley"
-MODEL_DIR = "/model"                    # tagger weights baked into the image (see _download_model)
-APP_SRC = "/root/parsley"               # baked-in tagger source
-TABLES_DIR = "/root/lemma_tables"       # baked-in Wiktionary tables
-
-_here = Path(__file__).resolve().parent
-_tagger_src = _here.parent / "tagger"
-_tables_src = _here.parent / "data" / "lemma_tables"
-
-app = modal.App(APP_NAME)
-hf_secret = modal.Secret.from_name("huggingface-secret")
+app = modal.App("lexide-parsley")
+SOURCE = "/root/joint"
+MODEL = "/model"
+secret = modal.Secret.from_name("huggingface-secret")
 
 
-def _download_model():
-    """Bake the tagger weights into the image at build time (needs the HF token; runs once).
-
-    LEXIDE_MODEL_REVISION (set as an image env layer at deploy time) pins the HF repo
-    commit AND busts Modal's layer cache: without it, a redeploy after uploading new
-    weights silently reuses the image layer holding the old ones (bit us on the segmenter
-    v4 release — run_function args do NOT participate in the cache key, env layers do).
-    """
+def download_checkpoint():
     from huggingface_hub import snapshot_download
     snapshot_download(
-        HF_REPO,
-        revision=os.environ.get("LEXIDE_MODEL_REVISION") or None,
-        # segmenter/* is optional on older repo snapshots; snapshot_download simply skips
-        # patterns that match nothing, so the serve still builds before it's published.
-        # onnx/jpn-unidic.bin and onnx/wordbanks/* are the tokenizer's boundary priors —
-        # the same artifacts the Rust library reads, so the serve and the library segment
-        # identically (release.sh's step 10 parity test compares them token for token).
-        # The wordbanks are not optional decoration: tha and zho-hans have no whitespace to
-        # fall back on, so a serve without them would answer from a blank proposal while
-        # the model was trained on a real one.
-        allow_patterns=["tagger/best/*", "tokenizer/*", "segmenter/*",
-                        "onnx/jpn-unidic.bin", "onnx/wordbanks/*"],
-        local_dir=MODEL_DIR,
-        token=os.environ["HF_TOKEN"],
+        os.environ["JOINT_HF_REPO"], revision=os.environ["JOINT_HF_REVISION"],
+        allow_patterns=[os.environ["JOINT_HF_PATH"] + "/*"],
+        local_dir=MODEL, token=os.environ["HF_TOKEN"],
     )
+    # save_checkpoint bundles the exact training tokenizer, not latest upstream.
+    checkpoint = Path(MODEL) / os.environ["JOINT_HF_PATH"]
+    for name in ("state.pt", "config.json", "vocab.json", "tokenizer/tokenizer_config.json"):
+        if not (checkpoint / name).is_file():
+            raise FileNotFoundError(checkpoint / name)
 
 
+revision = os.environ.get("JOINT_HF_REVISION", "09a1f8b32248cc303132026ec488f4ad65085ecb")
+if modal.is_local() and not re.fullmatch(r"[0-9a-f]{40}", revision):
+    raise ValueError("Set JOINT_HF_REVISION to an immutable 40-character HF commit SHA")
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    # CPU-only torch (the default wheel bundles ~2.5GB of unused CUDA libs; this is a CPU serve,
-    # so the smaller image means faster cold-start container provisioning). Installed first so
-    # transformers sees torch already satisfied and doesn't pull the CUDA build.
-    .pip_install("torch==2.13.0", index_url="https://download.pytorch.org/whl/cpu")
-    .pip_install(
-        "transformers==5.13.0",
-        "tokenizers>=0.19",
-        "sentencepiece",
-        "huggingface_hub",
-        "numpy<2",
-        "fastapi[standard]",
-    )
-    # tagger source (predict.py, model.py, dataset.py, data_prep.py, lemma_lookup.py, ...)
-    .add_local_dir(str(_tagger_src), APP_SRC, copy=True,
-                   ignore=["output/**", ".venv/**", "__pycache__/**", "wandb/**", "*.pyc"])
+    modal.Image.debian_slim(python_version="3.13")
+    .pip_install("torch==2.14.1", "transformers==5.18.0", "sentencepiece", "fastapi[standard]")
+    .add_local_dir(str(Path(__file__).resolve().parents[1] / "tagger"), SOURCE,
+                   copy=True, ignore=["output/**", ".venv/**", "__pycache__/**", "wandb/**", "*.pyc"])
+    # Env layers (NOT run_function arguments) invalidate Modal's baked-weight cache.
+    .env({"JOINT_HF_REPO": os.environ.get("JOINT_HF_REPO", "anchpop/lexide-parsley"),
+          "JOINT_HF_PATH": os.environ.get("JOINT_HF_PATH", "training-runs/joint-v2-24L/best"),
+          "JOINT_HF_REVISION": revision, "HF_HUB_DISABLE_XET": "1"})
+    .run_function(download_checkpoint, secrets=[secret])
+    .env({"HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false"})
 )
-# Wiktionary lemma tables (the OOD lemma floor) — baked in if present; serving still works
-# without them (model-only lemmas). Populate data/lemma_tables/ before deploy for the floor.
-if _tables_src.exists():
-    image = image.add_local_dir(str(_tables_src), TABLES_DIR, copy=True)
-# Bake the model weights into the image so the snapshotted load is local-only. The repo's
-# current commit sha is resolved on the deploying machine into an env layer, so the model
-# layer is rebuilt exactly when the model repo has changed (empty only in non-local
-# contexts, where the image expression is never built).
-_model_revision = ""
-if modal.is_local():
-    from huggingface_hub import HfApi
-    _model_revision = HfApi().model_info(HF_REPO).sha
-image = image.env({"LEXIDE_MODEL_REVISION": _model_revision})
-image = image.run_function(_download_model, secrets=[hf_secret])
 
 
-@app.cls(
-    image=image,
-    cpu=2.0,
-    memory=4096,
-    scaledown_window=300,   # keep a warm container ~5 min after the last request
-    # Scale to zero (cheapest) — cold starts pay a model load (~15-20s). For user-facing
-    # latency with no cold starts, set min_containers=1 (one always-warm CPU container).
-    min_containers=0,
-    timeout=180,
-)
+@app.cls(image=image, gpu="L4", cpu=4, memory=16384, min_containers=0,
+         max_containers=4, scaledown_window=300, timeout=600)
+@modal.concurrent(max_inputs=64)
 class Parsley:
     @modal.enter()
     def load(self):
         import sys
-        sys.path.insert(0, APP_SRC)
-        from predict import Pipeline
+        import torch
+        sys.path.insert(0, SOURCE)
+        from predict_joint import load_checkpoint
+        torch.set_num_threads(4)
+        self.model, self.tokenizer, self.vocab = load_checkpoint(
+            Path(MODEL) / os.environ["JOINT_HF_PATH"], "cuda")
+        self.queue = None
 
-        # Only the model loads at startup; lemma tables load lazily per language (see _table)
-        # so a cold start doesn't parse all ~185MB of table JSON up front.
-        segmenter_path = os.path.join(MODEL_DIR, "segmenter", "segmenter.pt")
-        self.pipe = Pipeline(
-            tagger_dir=os.path.join(MODEL_DIR, "tagger", "best"),
-            tokenizer_path=os.path.join(MODEL_DIR, "tokenizer", "tokenizer.pt"),
-            segmenter_path=segmenter_path if os.path.exists(segmenter_path) else None,
-            prior_dir=os.path.join(MODEL_DIR, "onnx"),
-            device="cpu",
-        )
-        self._tables = {}
-        have_seg = self.pipe.segmenter is not None
-        print(f"[parsley] loaded tagger + tokenizer{' + segmenter' if have_seg else ''} "
-              "(lemma tables load lazily per language)")
+    def predict(self, records):
+        from predict_joint import predict_batch
+        predictions, _, _ = predict_batch(self.model, self.tokenizer, self.vocab, records, "cuda")
+        return [[{**t, "text": p["text"][t["start"]:t["end"]]} for t in p["tokens"]]
+                for p in predictions]
 
-    def _table(self, lang):
-        """Load (and cache) the lemma table for a language on first use; None if not built."""
-        if lang not in self._tables:
-            from lemma_lookup import LemmaTable
-            p = os.path.join(TABLES_DIR, f"wikt_{lang}.json")
-            priors = os.path.join(TABLES_DIR, f"wikt_priors_{lang}.json")
-            self._tables[lang] = (
-                LemmaTable.load(p, priors_path=priors) if lang and os.path.exists(p) else None
-            )
-        return self._tables[lang]
+    async def batch_loop(self):
+        import asyncio
+        while True:
+            first = await self.queue.get()
+            await asyncio.sleep(0.01)
+            batch = [first]
+            # Bound both sentence count and padded character length (quadratic arc heads).
+            longest = len(first[0]["text"])
+            while len(batch) < 256 and not self.queue.empty():
+                candidate = self.queue.get_nowait()
+                length = max(longest, len(candidate[0]["text"]))
+                if length * (len(batch) + 1) > 32768:
+                    self.queue.put_nowait(candidate)
+                    break
+                batch.append(candidate)
+                longest = length
+            try:
+                results = await asyncio.to_thread(self.predict, [r for r, _ in batch])
+                for (_, future), result in zip(batch, results):
+                    if not future.done():
+                        future.set_result(result)
+            except Exception as exc:
+                for _, future in batch:
+                    if not future.done():
+                        future.set_exception(exc)
 
-    def _tag_one(self, text, lang):
-        # lang conditions the byte tokenizer (lang-token checkpoints; harmless no-op on
-        # older ones) and selects the Wiktionary lemma floor below.
-        toks = self.pipe(text, lang or None)       # char-tokenize -> tag (model lemmas)
-        table = self._table(lang)
-        if table is not None:
-            for t in toks:
-                t["lemma"] = table.resolve(t["text"], t["pos"], t["lemma"])
-        return toks
+    @modal.fastapi_endpoint(method="POST", docs=True, label="lexide-parsley-parsley-tag")
+    async def tag(self, request: dict):
+        import asyncio
+        from fastapi import HTTPException
+        sentences = request.get("sentences")
+        if sentences is None:
+            sentences = [request["sentence"]] if "sentence" in request else []
+        lang = request.get("lang") or ""
+        if (not isinstance(sentences, list) or len(sentences) > 1000
+                or not all(isinstance(s, str) and len(s) <= 4096 for s in sentences)
+                or not isinstance(lang, str)):
+            raise HTTPException(422, "Expected up to 1000 strings of <=4096 characters and a string lang")
+        if self.queue is None:
+            self.queue = asyncio.Queue(maxsize=64000)
+            self.worker = asyncio.create_task(self.batch_loop())
+        futures = []
+        for text in sentences:
+            future = asyncio.get_running_loop().create_future()
+            if not text.strip():
+                future.set_result([])
+            else:
+                await self.queue.put(({"text": text, "lang": lang}, future))
+            futures.append(future)
+        return {"results": await asyncio.gather(*futures)}
 
-    @modal.method()
-    def run(self, text, lang=""):
-        """Callable path for `modal run` smoke tests (the HTTP path is tag() below)."""
-        return self._tag_one(text, lang)
 
-    @modal.method()
-    def baked_model_info(self):
-        """Debug: md5 + revision of the weights actually baked into this image."""
-        import hashlib
-        out = {"revision_env": os.environ.get("LEXIDE_MODEL_REVISION", "<unset>")}
-        for name in ["segmenter/segmenter.pt", "tokenizer/tokenizer.pt"]:
-            p = os.path.join(MODEL_DIR, name)
-            out[name] = (
-                hashlib.md5(open(p, "rb").read()).hexdigest() if os.path.exists(p) else "<absent>"
-            )
-        return out
+def download_segmenter():
+    from huggingface_hub import hf_hub_download
+    hf_hub_download("anchpop/lexide-parsley", "segmenter/segmenter.pt",
+                    revision=os.environ["SEGMENTER_REVISION"], local_dir=MODEL,
+                    token=os.environ["HF_TOKEN"])
 
-    @modal.fastapi_endpoint(method="POST", docs=True)
-    def tag(self, request: dict):
-        """POST {"sentences": ["...", ...], "lang": "deu"} -> [[{text,pos,lemma,head,dep,...}], ...].
 
-        `lang` is optional and only selects the Wiktionary lemma floor (the tagger itself is
-        multilingual); omit it or pass an unbuilt language to get model-only lemmas.
-        """
-        sentences = request.get("sentences") or ([request["sentence"]] if request.get("sentence") else [])
-        lang = request.get("lang", "")
-        return {"results": [self._tag_one(s, lang) for s in sentences]}
+# Keep segment-only calls off the GPU and pin the original public URL explicitly.
+segment_image = (
+    modal.Image.debian_slim(python_version="3.13")
+    .pip_install("torch", index_url="https://download.pytorch.org/whl/cpu")
+    .pip_install("huggingface_hub", "fastapi[standard]", "numpy")
+    .add_local_dir(str(Path(__file__).resolve().parents[1] / "tagger"), SOURCE,
+                   copy=True, ignore=["output/**", ".venv/**", "__pycache__/**", "wandb/**", "*.pyc"])
+    .env({"SEGMENTER_REVISION": "09a1f8b32248cc303132026ec488f4ad65085ecb", "HF_HUB_DISABLE_XET": "1"})
+    .run_function(download_segmenter, secrets=[secret])
+)
 
-    @modal.fastapi_endpoint(method="POST", docs=True)
+
+@app.cls(image=segment_image, cpu=2, memory=4096, min_containers=0,
+         scaledown_window=300, timeout=180)
+class SentenceSegmenter:
+    @modal.enter()
+    def load(self):
+        import sys
+        import torch
+        sys.path.insert(0, SOURCE)
+        from predict import load_char_model
+        torch.set_num_threads(2)
+        self.model = load_char_model(Path(MODEL) / "segmenter/segmenter.pt", "cpu")
+
+    @modal.fastapi_endpoint(method="POST", docs=True, label="lexide-parsley-parsley-segment")
     def segment(self, request: dict):
-        """POST {"texts": ["passage", ...], "lang": "deu"} -> {"results": [["sentence", ...], ...]}.
-
-        Splits each passage into its sentences (gaps between them dropped) with the byte
-        sentence segmenter. `lang` is optional: the segmenter is multilingual, but on
-        lang-token checkpoints the hint improves ambiguous boundaries (abbreviations etc.).
-        """
-        if self.pipe.segmenter is None:
-            return {"error": "sentence segmenter not available in this deployment"}
+        import torch
+        from predict import byte_encode, spans_from_byte_labels
         texts = request.get("texts") or ([request["text"]] if request.get("text") else [])
         lang = request.get("lang") or None
-        return {"results": [self.pipe.segment_sentences(t, lang) for t in texts]}
-
-
-@app.local_entrypoint()
-def main():
-    """Smoke test: `modal run modal/modal_serve_tagger.py`."""
-    samples = [("Eine Fundgrube.", "deu"), ("The cats were sleeping.", "eng")]
-    parsley = Parsley()
-    for text, lang in samples:
-        out = parsley.run.remote(text, lang)
-        print(f"\n{lang}: {text!r}")
-        for t in out:
-            print(f"  {t['text']!r:16} pos={t['pos']:6} lemma={t['lemma']!r:14} "
-                  f"head={t['head']} dep={t['dep']}")
+        results = []
+        with torch.inference_mode():
+            for text in texts:
+                x = torch.tensor([byte_encode(text, lang, self.model)])
+                labels = self.model(x)[0].argmax(-1).tolist()
+                results.append([text[s:e] for s, e in spans_from_byte_labels(text, labels)])
+        return {"results": results}

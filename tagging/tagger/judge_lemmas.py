@@ -17,7 +17,7 @@ LANG_NAME = {"deu":"German","eng":"English","fra":"French","hin":"Hindi","ita":"
 
 SYSTEM = (
     "You are an expert multilingual linguistic annotator. For each item you get a language, "
-    "a sentence, one token (word) from that sentence, and its universal POS tag. Output the "
+    "a sentence, one token (word) from that sentence, and its POS tag. Output the "
     "LEMMA (dictionary / citation form) of that token as used in that sentence, following "
     "standard lemmatization conventions (verbs -> infinitive/dictionary form, nouns -> "
     "singular/base, adjectives -> base, etc.). If more than one lemma is genuinely defensible, "

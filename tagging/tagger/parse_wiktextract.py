@@ -1,7 +1,7 @@
 """Stream Wiktextract JSONL (stdin) -> compact (POS -> form -> [lemmas]) table (stdout path arg).
 
 Each Wiktextract line is a headword entry: its `word` is the lemma, `pos` its part of speech,
-and `forms[]` its inflected surface forms. We invert that into form->lemma keyed by UPOS, so a
+and `forms[]` its inflected surface forms. We invert that into form->lemma keyed by POS tag, so a
 tagger can look up the lemma of an inflected surface form it never saw in training.
 """
 import json
@@ -17,7 +17,7 @@ def norm(s):
     d = "".join(c for c in d if c not in ("́", "̀"))
     return unicodedata.normalize("NFC", d)
 
-# Wiktextract pos string -> UPOS (our tag set). Unmapped pos are skipped.
+# Wiktextract pos string -> our POS tag set. Unmapped pos are skipped.
 POS_MAP = {
     "noun": "NOUN", "name": "PROPN", "proper noun": "PROPN",
     "verb": "VERB", "adj": "ADJ", "adv": "ADV", "pron": "PRON",
@@ -44,7 +44,7 @@ def clean_form(f):
 
 
 def main(out_path, lang_code):
-    table = defaultdict(lambda: defaultdict(set))  # upos -> form -> set(lemma)
+    table = defaultdict(lambda: defaultdict(set))  # pos -> form -> set(lemma)
     n_lines = n_entries = n_pairs = 0
     for line in sys.stdin:
         n_lines += 1

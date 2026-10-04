@@ -1,21 +1,16 @@
 //! WASM bindings for the byte-minGRU models: the char tokenizer and the sentence
-//! segmenter, running fully in-browser. Reuses the lexide crate's pure-Rust
-//! `byte_bio` module (single source of truth — included by path, not copied).
+//! segmenter, running fully in-browser. This demo keeps the historical byte models
+//! independently of the crate's joint tagger.
 //!
 //! Spans are char (code point) `[start, end)` indices into the input, matching the
 //! Rust/Python pipelines — JS callers must index by code point (`Array.from(text)`),
 //! not UTF-16 unit.
 
-#[path = "../../lexide/src/segment/byte_bio.rs"]
 #[allow(dead_code)]
 mod byte_bio;
-// byte_bio reads its prior symbols from these; included by path for the same reason —
-// one source of truth. unidic is pulled in because prior refers to it, but the browser
-// never has the 87MB artifact to hand it, so no dictionary is ever loaded here.
-#[path = "../../lexide/src/segment/prior.rs"]
+// Historical tokenizer priors; the Japanese dictionary is loaded on demand.
 #[allow(dead_code)]
 mod prior;
-#[path = "../../lexide/src/segment/unidic.rs"]
 #[allow(dead_code)]
 mod unidic;
 

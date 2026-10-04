@@ -13,13 +13,12 @@ The segmentation page runs the two byte-minGRU models (the sentence segmenter an
 the char tokenizer, 0.99M params / 3.96 MB each) fully in-browser via WASM.
 Paste a passage: it's split into sentences (gaps between them shown dropped),
 and each sentence into token spans — the same `[BOS] + utf8 + [EOS]` O/B/I
-pipeline as `lexide/src/local/`, reusing that crate's `byte_bio.rs` verbatim
-(included by `#[path]`, so there's a single source of truth; the wasm build is
-parity-tested against the Python reference fixtures).
+pipeline retained from v1. Its byte models and boundary-prior code now live in
+`web-demo/src/`, independently of the joint Rust tagger. The demo's concat-prior
+fixture still verifies the historical implementation against PyTorch.
 
-The full tagger (POS/lemma/deps) is *not* in the demo — the XLM-R ONNX graph is
-1.1 GB fp32 (~280 MB int8), which is not casual-demo territory. See
-`../OVERVIEW.md`.
+The full joint tagger (POS/lemma/deps) is *not* in the demo: its fp32 bge-m3 artifacts
+are about 2.4 GB. See `../OVERVIEW.md`. This page is not a joint-parsley quality demo.
 
 ## Build & run
 

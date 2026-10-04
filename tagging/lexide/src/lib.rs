@@ -18,7 +18,7 @@ use anyhow::Result;
 pub use g2p_types::Language;
 
 #[cfg(feature = "local")]
-pub use local::{build_table, LemmaTable, LocalConfig, LocalLexide};
+pub use local::{LocalConfig, LocalLexide, MODEL_REVISION};
 #[cfg(feature = "remote")]
 pub use remote::{RemoteClient, RemoteConfig, ResponseFormat};
 #[cfg(feature = "segment")]
@@ -52,7 +52,7 @@ impl Lexide {
         })?))
     }
 
-    /// Connect to the parsley CPU tagger endpoint (JSON tokens with char offsets).
+    /// Connect to the parsley joint tagger endpoint (JSON tokens with char offsets).
     #[cfg(feature = "remote")]
     pub fn from_parsley_server(url: &str) -> Result<Self> {
         Ok(Self::Remote(RemoteClient::new(RemoteConfig {
@@ -66,7 +66,7 @@ impl Lexide {
     #[allow(unreachable_code, unused_variables)]
     pub async fn analyze(&self, sentence: &str, language: Language) -> Result<Tokenization> {
         match self {
-            // Local parsley: in-process segment -> ONNX tag -> lemma floor.
+            // Local parsley: joint encoder and word heads.
             #[cfg(feature = "local")]
             Self::Local(local) => local.analyze(sentence, language),
             // Remote: dispatches internally on the endpoint's response format
@@ -94,7 +94,6 @@ mod tests {
         );
         assert_eq!(config.hf_repo, "anchpop/lexide-parsley");
         assert_eq!(config.threads, 0);
-        assert!(config.lemma_tables_dir.is_none());
     }
 
     #[cfg(feature = "remote")]

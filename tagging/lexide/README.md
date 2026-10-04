@@ -4,8 +4,8 @@
 running in your browser, generating the equivalent Rust as you type.
 
 A Rust library for multilingual NLP analysis: sentence segmentation, tokenization,
-POS tagging, lemmatization, and dependency parsing for 10 languages
-(deu eng fra hin ita jpn kor por rus spa), plus offline pronunciation decoding,
+POS tagging, lemmatization, and dependency parsing for 12 languages
+(deu eng fra hin ita jpn kor por rus spa tha zho-hans), plus offline pronunciation decoding,
 CTC scoring, and forced alignment from model frame probabilities.
 
 Capabilities selected by cargo feature:
@@ -19,22 +19,23 @@ Capabilities selected by cargo feature:
 
 - **`segment`** — just the sentence segmenter: a 1M-param byte-level minGRU, pure Rust,
   one ~4 MB model download. The lightest entry point (see below).
-- **`local`** — the full parsley tagger in-process on CPU: the byte-minGRU models, the
-  multi-task XLM-R encoder via ONNX Runtime (`ort`), and Wiktionary lemma
-  tables in a compact `fst` format. Analyzes a sentence in tens of milliseconds, no network;
-  loading is disk-bound on the 1.1 GB fp32 graph (~seconds; int8 quantization will shrink it).
-- **`remote`** — an HTTP client for the Modal endpoints: the parsley CPU serve
+- **`local`** — joint parsley in-process on CPU: 24-layer bge-m3, character BiLSTM,
+  boundary and word heads via fp32 ONNX Runtime. About 2.4 GB of model artifacts;
+  no separate tokenizer model, boundary priors or lemma dictionaries.
+- **`remote`** — an HTTP client for the Modal endpoints: the parsley L4 serve
   (`Lexide::from_parsley_server`, JSON tokens) or the legacy Gemma vLLM serve
   (`Lexide::from_server`, tab-separated completions).
 
-Local and remote produce identical `Tokenization`s — the local pipeline is verified
-token-for-token against the parsley serve (`tests/parsley_parity.rs`).
+Local inference is verified token-for-token against **CPU fp32 PyTorch** on 293
+multilingual fixtures (`tests/parsley_parity.rs`). The GPU serve uses bf16, so near-tied
+labels can differ. Version 0.5.0 changes the local backend; it is not yet on crates.io.
+Until publication, use a path dependency on this checkout instead of the version below.
 
 ## Pronunciation
 
 ```toml
 [dependencies]
-lexide = { version = "0.4", features = ["pronunciation"] }
+lexide = { version = "0.5", features = ["pronunciation"] }
 ```
 
 Deserialize the endpoint's `frame_matrix` object into
@@ -278,7 +279,7 @@ Gaps between sentences (whitespace, headings, separators) are dropped; punctuati
 
 ```toml
 [dependencies]
-lexide = { version = "0.4", features = ["remote"] }
+lexide = { version = "0.5", features = ["remote"] }
 ```
 
 ```rust
@@ -290,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
     let lexide = Lexide::from_parsley_server("https://anchpop--lexide-parsley-parsley-tag.modal.run")?;
 
     // Or local, with the `local` feature — downloads the model from HF on first use
-    // (~1.2 GB into the standard HF cache), no setup needed:
+    // (~2.4 GB into the standard HF cache), no setup needed:
     // let lexide = Lexide::from_pretrained(lexide::LocalConfig::default()).await?;
 
     let result = lexide.analyze("The cats were sleeping.", Language::English).await?;
@@ -308,40 +309,37 @@ first.
 
 ## Local model artifacts
 
-By default the `local` backend downloads everything it needs from HF
-`anchpop/lexide-parsley/onnx/` into the standard HuggingFace cache on first load — no
-setup. To use a local directory instead (offline, or artifacts you built yourself), set
-`LocalConfig::model_dir` or the `LEXIDE_MODEL_DIR` env var to a directory containing:
+The `local` backend downloads `anchpop/lexide-parsley/joint/` at the immutable
+`MODEL_REVISION` in [`src/local/mod.rs`](src/local/mod.rs) into the HF cache. Override with
+`LocalConfig::model_dir` or `LEXIDE_MODEL_DIR`. Required files:
 
-| file | what | built by |
-|------|------|----------|
-| `tagger.onnx` | XLM-R encoder + POS/lemma/biaffine heads, one graph | `tagger/export_onnx.py` |
-| `tokenizer.json` | XLM-R fast tokenizer | (from tagger training) |
-| `vocab.json` | POS / dep / lemma edit-script vocabularies | (from tagger training) |
-| `char_tokenizer.safetensors` | byte-minGRU token boundary tagger weights | `tagger/export_char_modal.py` |
-| `sentence_segmenter.safetensors` | byte-minGRU sentence segmenter weights (optional) | `sentence-labeller/export_segmenter.py` |
-| `lemma_fst/wikt_{lang}.fst` | optional per-language lemma tables | `build-lemma-fst` (below) |
+- `encoder.onnx` and `encoder.onnx.data` — bge-m3, character LSTM, boundary head.
+- `heads.onnx` — POS, lemma edit-script, dependency arc/relation heads.
+- `tokenizer.json`, `vocab.json`, `config.json` — matching tokenizer and metadata.
 
-To fetch that manually rather than through the crate:
+All are produced by `tagger/export_joint_onnx.py`. `LocalConfig::threads` controls
+ONNX intra-op parallelism. Inputs must fit 8192 subwords; passages should be segmented.
+The independent segmenter still downloads `onnx/sentence_segmenter.safetensors`.
+The rest of `onnx/` is preserved for 0.4.x clients, not used by 0.5 local.
+
+Measured on a Ryzen 9 3900X (293 multilingual length-spread sentences, warm filesystem
+cache, fp32; no other evaluation jobs running):
+
+| Intra-op threads | Load | Warm sentences/s | RSS |
+|---|---:|---:|---:|
+| 1 | 2.49 s | 5.97 | 2.20 GiB |
+| 4 | 2.44 s | 10.64 | 2.20 GiB |
+| 12 | 2.21 s | 12.15 | 2.20 GiB |
+
+The full 12k test predictions exactly match CPU PyTorch fp32 and Python ORT:
+macro token/POS/lemma/UAS/LAS F1 = 99.14 / 97.87 / 98.11 / 87.36 / 85.11.
 
 ```bash
-hf download anchpop/lexide-parsley --include "onnx/*" --local-dir . && export LEXIDE_MODEL_DIR=./onnx
+# Uses the pinned HF artifacts unless LEXIDE_MODEL_DIR is set.
+cargo run --release --features local --example bench_local -- 1
+cargo run --release --features local --example bench_local -- 4
+cargo run --release --features local --example tag_jsonl < ../data/processed-joint/test.jsonl
 ```
-
-(also mirrored on the `lexide-onnx` Modal volume: `modal volume get lexide-onnx …`).
-To rebuild the lemma tables from the Wiktionary JSON (`tagging/data/lemma_tables/`,
-see `tagger/LEMMA_LOOKUP.md`):
-
-```bash
-cargo run --release --features local --bin build-lemma-fst -- \
-    --in ../data/lemma_tables --out ../data/onnx/lemma_fst
-```
-
-Multi-candidate entries are resolved at build time using training-data priors
-(`wikt_priors_{lang}.json`, built by `tagger/build_lemma_priors.py`, picked up automatically
-from the `--in` directory) — training's lemmatization wins over homographs like eng
-`love→lofe`. Missing tables are fine — lemmas are then model-only, same as the server
-without tables.
 
 ## Matching
 

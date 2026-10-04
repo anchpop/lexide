@@ -1,234 +1,88 @@
-//! Local parsley inference: the ONNX multi-task tagger + byte-minGRU segmenter +
-//! Wiktionary lemma tables, all running in-process on CPU. This replaces the old
-//! mistralrs Gemma backend (which was unusably slow) with the same pipeline the
-//! parsley Modal serve runs, minus the network.
-//!
-//! By default the artifacts are downloaded from HF `anchpop/lexide-parsley/onnx/` into
-//! the standard HuggingFace cache on first load; set `LocalConfig::model_dir` (or
-//! `LEXIDE_MODEL_DIR`) to use a local directory instead. Expected `model_dir` layout
-//! (published by `tagging/release.sh`):
-//!   tagger.onnx                  encoder + heads, exported ONNX graph
-//!   tokenizer.json               XLM-R fast tokenizer
-//!   vocab.json                   POS / dep / lemma edit-script vocabularies
-//!   char_tokenizer.safetensors   byte-minGRU token boundary tagger weights
-//!   sentence_segmenter.safetensors  byte-minGRU sentence segmenter weights (optional)
-//!   lemma_fst/wikt_{lang}.fst    optional per-language lemma tables (build-lemma-fst)
-
-mod chartok;
-mod lemma;
+//! Local parsley: bge-m3 + character BiLSTM + joint word heads, CPU fp32 ONNX.
+mod mst;
 mod script;
 mod tagger;
 
-use std::collections::HashMap;
+use crate::{raw::tokens_from_raw, Language, Tokenization};
+use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
 
-use anyhow::{bail, Context, Result};
-
-use crate::raw::{tokens_from_raw, RawToken};
-use crate::{Language, Tokenization};
-
-pub use lemma::{build_table, LemmaTable};
+/// Immutable artifact revision; v1's `onnx/` directory remains untouched.
+pub const MODEL_REVISION: &str = "a4acccb7a921fa79493d02fd4f7ee6f22ab77a74";
 
 /// Configuration for local parsley inference.
 #[derive(Debug, Clone)]
 pub struct LocalConfig {
-    /// Directory with tagger.onnx, tokenizer.json, vocab.json, char_tokenizer.safetensors.
-    /// `None` (the default when `LEXIDE_MODEL_DIR` is unset) downloads the artifacts from
-    /// `hf_repo` into the standard HuggingFace cache on first use.
+    /// Directory containing encoder.onnx, encoder.onnx.data, heads.onnx,
+    /// tokenizer.json, vocab.json and config.json. Defaults to LEXIDE_MODEL_DIR.
     pub model_dir: Option<PathBuf>,
-    /// HuggingFace repo to fetch from when `model_dir` is None; artifacts live under its
-    /// `onnx/` folder. The repo is public, so no token is needed (`HF_TOKEN` is honored
-    /// if set, e.g. for a private fork).
+    /// Hugging Face repository; downloads joint/* at MODEL_REVISION.
     pub hf_repo: String,
-    /// Directory with per-language `wikt_{lang}.fst` lemma tables.
-    /// Defaults to `{model_dir}/lemma_fst`; missing tables just mean model-only lemmas,
-    /// matching the parsley server's behavior for languages without a table.
-    pub lemma_tables_dir: Option<PathBuf>,
-    /// Intra-op threads for ONNX Runtime (0 = let the runtime decide).
+    /// ONNX intra-op threads (0 lets the runtime decide).
     pub threads: usize,
 }
-
 impl Default for LocalConfig {
     fn default() -> Self {
         Self {
             model_dir: std::env::var("LEXIDE_MODEL_DIR").map(PathBuf::from).ok(),
-            hf_repo: "anchpop/lexide-parsley".to_string(),
-            lemma_tables_dir: None,
+            hf_repo: "anchpop/lexide-parsley".into(),
             threads: 0,
         }
     }
 }
 
-/// The languages with published lemma tables (jpn isn't served; see OVERVIEW.md).
-const TABLE_LANGS: [&str; 9] = [
-    "deu", "eng", "fra", "hin", "ita", "kor", "por", "rus", "spa",
-];
-
-/// The languages that ship a corpus wordbank as their boundary prior — the whitespace-free
-/// ones with no bundled dictionary. `PriorSet::load` still discovers banks by scanning the
-/// model directory; this list only says which ones to pull from the hub.
-const BANK_LANGS: [&str; 2] = ["tha", "zho-hans"];
-
-/// Fetch the model artifacts from the hub into the HF cache (no-op when already cached)
-/// and return the cache directory that mirrors a local model_dir layout.
 fn fetch_from_hub(repo_id: &str) -> Result<PathBuf> {
     let mut builder = hf_hub::api::sync::ApiBuilder::from_env();
     if let Ok(token) = std::env::var("HF_TOKEN") {
         builder = builder.with_token(Some(token));
     }
-    let api = builder.build().context("failed to build HF hub client")?;
-    let repo = api.model(repo_id.to_string());
-
-    let mut tagger_path = None;
-    for f in [
-        "tagger.onnx",
+    let api = builder.build()?;
+    let repo = api.repo(hf_hub::Repo::with_revision(
+        repo_id.into(),
+        hf_hub::RepoType::Model,
+        MODEL_REVISION.into(),
+    ));
+    for name in [
+        "encoder.onnx.data",
+        "heads.onnx",
         "tokenizer.json",
         "vocab.json",
-        "char_tokenizer.safetensors",
+        "config.json",
     ] {
-        let p = repo
-            .get(&format!("onnx/{f}"))
-            .with_context(|| format!("failed to download onnx/{f} from {repo_id}"))?;
-        if f == "tagger.onnx" {
-            tagger_path = Some(p);
-        }
+        repo.get(&format!("joint/{name}"))
+            .with_context(|| format!("downloading joint/{name}"))?;
     }
-    // Boundary priors for the tokenizer (see segment::prior). Optional on the hub: a repo
-    // whose checkpoint predates the prior simply has none, and CharTokenizer::load is what
-    // enforces that a prior-trained checkpoint actually found its data.
-    if let Err(e) = repo.get("onnx/jpn-unidic.bin") {
-        eprintln!("lexide: no Japanese boundary dictionary on {repo_id}: {e}");
-    }
-    // Corpus wordbanks. Only the languages that actually ship one are requested, rather
-    // than one miss per language on every cold start. Korean and Hindi are deliberately
-    // absent — measured against plain whitespace, giving Korean a bank cost 5.6 F1, since
-    // the model already reads eojeol-internal splits from context better than a unigram
-    // Viterbi proposes them. Thai and Chinese have no whitespace to read instead, so for
-    // them the bank is the proposal (see tagger/README.md).
-    for lang in BANK_LANGS {
-        if let Err(e) = repo.get(&format!("onnx/wordbanks/{lang}.tsv")) {
-            eprintln!("lexide: no {lang} wordbank on {repo_id}: {e}");
-        }
-    }
-    // Not used by this pipeline, but pre-fetching warms the cache Segmenter::from_pretrained
-    // reads from; a miss on older repo snapshots is fine.
-    if let Err(e) = repo.get("onnx/sentence_segmenter.safetensors") {
-        eprintln!("lexide: no sentence segmenter on {repo_id}: {e}");
-    }
-    for lang in TABLE_LANGS {
-        // Optional: a table missing on the hub just means model-only lemmas for that language.
-        if let Err(e) = repo.get(&format!("onnx/lemma_fst/wikt_{lang}.fst")) {
-            eprintln!("lexide: no lemma table for {lang} on {repo_id}: {e}");
-        }
-    }
-    // The snapshot layout mirrors the repo, so tagger.onnx's parent is a valid model_dir
-    // (with lemma_fst/ beneath it).
-    Ok(tagger_path
-        .expect("tagger.onnx was just downloaded")
+    Ok(repo
+        .get("joint/encoder.onnx")?
         .parent()
-        .expect("cached file has a parent directory")
+        .expect("cached model parent")
         .to_path_buf())
 }
 
-/// Local inference pipeline: segment (byte minGRU) -> tag (ONNX) -> lemma floor (fst).
+/// One joint model, no dictionary or boundary-prior dependencies.
 pub struct LocalLexide {
-    chartok: chartok::CharTokenizer,
     tagger: tagger::OnnxTagger,
-    lemma_dir: PathBuf,
-    // Tables load lazily per language (a table is a few MB; most callers use one language).
-    tables: RwLock<HashMap<&'static str, Option<Arc<LemmaTable>>>>,
 }
-
 impl LocalLexide {
-    /// Load the model. With the default config this downloads the artifacts from the hub
-    /// into the HF cache on first use (~1.2 GB; subsequent loads reuse the cache), so the
-    /// download runs off the async executor.
+    /// Download (~2.4 GB, cached) and load away from the async executor.
     pub async fn from_pretrained(config: LocalConfig) -> Result<Self> {
         tokio::task::spawn_blocking(move || Self::load(config))
             .await
             .context("model loading task panicked")?
     }
-
     pub fn load(config: LocalConfig) -> Result<Self> {
-        let dir = match &config.model_dir {
-            Some(dir) => {
-                if !dir.join("tagger.onnx").exists() {
-                    bail!(
-                        "no tagger.onnx in {} — point LocalConfig.model_dir (or \
-                         LEXIDE_MODEL_DIR) at the parsley ONNX artifacts, or leave it unset \
-                         to download them from HF {}",
-                        dir.display(),
-                        config.hf_repo
-                    );
-                }
-                dir.clone()
-            }
+        let dir = match config.model_dir {
+            Some(dir) => dir,
             None => fetch_from_hub(&config.hf_repo)?,
         };
-        let dir = &dir;
-        let chartok = chartok::CharTokenizer::load(&dir.join("char_tokenizer.safetensors"))
-            .context("failed to load the char tokenizer")?;
-        let tagger = tagger::OnnxTagger::load(dir, config.threads)
-            .context("failed to load the ONNX tagger")?;
-        let lemma_dir = config
-            .lemma_tables_dir
-            .unwrap_or_else(|| dir.join("lemma_fst"));
         Ok(Self {
-            chartok,
-            tagger,
-            lemma_dir,
-            tables: RwLock::new(HashMap::new()),
+            tagger: tagger::OnnxTagger::load(&dir, config.threads)?,
         })
     }
-
-    fn table(&self, language: Language) -> Option<Arc<LemmaTable>> {
-        let code = language.code();
-        if let Some(cached) = self.tables.read().expect("lemma tables lock").get(code) {
-            return cached.clone();
-        }
-        let path = self.lemma_dir.join(format!("wikt_{code}.fst"));
-        let table = match LemmaTable::load(&path) {
-            Ok(t) => Some(Arc::new(t)),
-            Err(_) if !path.exists() => None, // no table built for this language
-            Err(e) => {
-                // A present-but-unreadable table is worth a warning, not a hard failure:
-                // lemmas degrade to model-only, same as serving without tables.
-                eprintln!("lexide: ignoring lemma table {}: {e:#}", path.display());
-                None
-            }
-        };
-        self.tables
-            .write()
-            .expect("lemma tables lock")
-            .insert(code, table.clone());
-        table
-    }
-
-    /// Analyze a sentence: segment into tokens, tag POS/lemma/dependencies, and apply the
-    /// language's Wiktionary lemma floor. Mirrors the parsley server token-for-token.
     pub fn analyze(&self, sentence: &str, language: Language) -> Result<Tokenization> {
-        let spans = self.chartok.segment(sentence, Some(language.code()));
-        let tagged = self.tagger.tag(sentence, &spans)?;
-        let table = self.table(language);
-        let rtoks: Vec<RawToken> = tagged
-            .into_iter()
-            .map(|t| {
-                let lemma = match &table {
-                    Some(tb) => tb.resolve(&t.text, &t.pos, &t.lemma),
-                    None => t.lemma,
-                };
-                RawToken {
-                    text: t.text,
-                    start: t.start,
-                    end: t.end,
-                    pos: t.pos,
-                    lemma,
-                    dep: t.dep,
-                    head: t.head,
-                }
-            })
-            .collect();
-        Ok(tokens_from_raw(&rtoks, sentence)?)
+        Ok(tokens_from_raw(
+            &self.tagger.tag(sentence, language.code())?,
+            sentence,
+        )?)
     }
 }

@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 
-from data_prep import LANGS, UPOS, COPY_SCRIPT, iter_records, normalize_sentence, lemma_script
+from data_prep import LANGS, POS_TAGS, COPY_SCRIPT, iter_records, normalize_sentence, lemma_script
 
 
 def identity(text):
@@ -115,7 +115,7 @@ def build(args):
             scripts[lemma_script(tk["form"], tk["lemma"])] += 1
     selected = [s for s, _ in scripts.most_common(args.max_lemma_scripts)]
     selected.append(COPY_SCRIPT)
-    vocab = {"pos": UPOS, "dep": [d for d, _ in dep.most_common()], "lemma_scripts": selected, "langs": LANGS}
+    vocab = {"pos": POS_TAGS, "dep": [d for d, _ in dep.most_common()], "lemma_scripts": selected, "langs": LANGS}
     (out / "vocab.json").write_text(json.dumps(vocab, ensure_ascii=False, indent=2))
     script_ids = {s: i for i, s in enumerate(selected)}
     coverage = sum(scripts[s] for s in selected) / max(1, sum(scripts.values()))
@@ -126,7 +126,7 @@ def build(args):
             rec = json.loads(payload)
             for tk in rec["tokens"]:
                 tk["lemma_script"] = script_ids.get(lemma_script(tk["form"], tk["lemma"]), script_ids[COPY_SCRIPT])
-                if tk["pos"] not in UPOS:
+                if tk["pos"] not in POS_TAGS:
                     tk["pos"] = "X"
                 if split == "train":
                     del tk["form"], tk["lemma"]

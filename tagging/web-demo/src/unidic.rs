@@ -343,8 +343,12 @@ impl Proposer for UniDic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::segment::prior::segment_constrained;
-    use crate::segment::test_support::model_file;
+    use crate::prior::segment_constrained;
+    fn model_file(name: &str) -> Option<std::path::PathBuf> {
+        let root = std::env::var("LEXIDE_MODEL_DIR").unwrap_or_else(|_| "../data/onnx".into());
+        let path = std::path::Path::new(&root).join(name);
+        path.exists().then_some(path)
+    }
 
     fn seg(dict: &UniDic, text: &str) -> String {
         let chars: Vec<char> = text.chars().collect();

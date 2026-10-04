@@ -2,7 +2,7 @@
 
 The byte-minGRU has a sequential scan that doesn't ONNX-export cleanly and, at ~0.31M
 params, needs no runtime — the Rust side reimplements the forward pass and just loads the
-weights. This mirrors `tagger/export_char_modal.py` (the token boundary tagger's export)
+weights. This mirrors `web-demo/export_char_modal.py` (the historical token boundary export)
 but runs locally, since the segmenter trains locally.
 
     .venv-seg/bin/python sentence-labeller/export_segmenter.py \

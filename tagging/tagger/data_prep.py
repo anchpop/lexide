@@ -28,8 +28,8 @@ from pathlib import Path
 LANGS = ["deu", "eng", "fra", "hin", "ita", "jpn", "kor", "por", "rus", "spa", "tha",
          "zho-hans"]
 
-# spaCy sometimes emits a SPACE upos for whitespace-only tokens; keep it in the space.
-UPOS = ["NOUN", "PUNCT", "VERB", "PRON", "DET", "ADP", "ADV", "ADJ", "AUX", "PROPN",
+# spaCy sometimes emits a SPACE pos for whitespace-only tokens; keep it in the space.
+POS_TAGS = ["NOUN", "PUNCT", "VERB", "PRON", "DET", "ADP", "ADV", "ADJ", "AUX", "PROPN",
         "SCONJ", "PART", "CCONJ", "INTJ", "NUM", "X", "SYM", "SPACE"]
 
 # Sentinel lemma "script" meaning: lemma == surface form, verbatim. It is NOT a real
@@ -172,7 +172,7 @@ def build(args):
     if LEMMA_IDENTITY not in scripts:
         scripts.append(LEMMA_IDENTITY)
     vocab = {
-        "pos": UPOS,
+        "pos": POS_TAGS,
         "dep": dep_labels,
         "lemma_scripts": scripts,
         "langs": LANGS,
@@ -181,8 +181,8 @@ def build(args):
     script_to_id = {s: i for i, s in enumerate(scripts)}
     identity_id = script_to_id[LEMMA_IDENTITY]
     dep_to_id = {d: i for i, d in enumerate(dep_labels)}
-    pos_to_id = {p: i for i, p in enumerate(UPOS)}
-    print(f"[vocab] POS={len(UPOS)} DEP={len(dep_labels)} lemma_scripts={len(scripts)} "
+    pos_to_id = {p: i for i, p in enumerate(POS_TAGS)}
+    print(f"[vocab] POS={len(POS_TAGS)} DEP={len(dep_labels)} lemma_scripts={len(scripts)} "
           f"(covering {sum(c for s,c in script_counter.most_common(args.max_lemma_scripts))/max(1,sum(script_counter.values()))*100:.1f}% of tokens)")
 
     # ---- pass 2: emit unified records into per-split shards, stratified by language ----

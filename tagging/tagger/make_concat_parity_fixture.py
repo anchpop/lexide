@@ -1,4 +1,4 @@
-"""Regenerate lexide/tests/fixtures/concat_parity.{safetensors,json}.
+"""Regenerate web-demo/tests/fixtures/concat_parity.{safetensors,json}.
 
 The released char-tokenizer fixtures come from whatever checkpoint shipped last, so they
 cannot cover a code path no shipped model uses yet. This makes a small randomly-initialised
@@ -22,7 +22,7 @@ from dataset import BOS_BYTE, CHAR_VOCAB_SIZE, EOS_BYTE, LANG_BOS  # noqa: E402
 from model import CharBoundaryTagger  # noqa: E402
 from prior import PRIOR_VOCAB, prior_ids_for  # noqa: E402
 
-OUT = os.path.join(os.path.dirname(__file__), "..", "lexide", "tests", "fixtures")
+OUT = os.path.join(os.path.dirname(__file__), "..", "web-demo", "tests", "fixtures")
 # one no-space language, one long compound, one plain ASCII, one Japanese
 TEXTS = [("kor", "나는 밥을 먹었어요"),
          ("deu", "Der Kraftfahrzeug-Haftpflichtversicherung."),

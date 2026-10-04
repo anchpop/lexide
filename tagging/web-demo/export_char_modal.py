@@ -1,6 +1,6 @@
-"""Export the CharBoundaryTagger weights to safetensors for the Rust inference path.
+"""Export the CharBoundaryTagger weights to safetensors for the historical browser demo.
 
-    modal run tagger/export_char_modal.py
+    modal run web-demo/export_char_modal.py
 
 The byte-minGRU tokenizer doesn't export cleanly to ONNX (its sequential scan would be
 trace-unrolled at a fixed length), and at ~0.31M params it doesn't need a runtime — the Rust
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import modal
 
-_tagger_src = Path(__file__).resolve().parent
+_tagger_src = Path(__file__).resolve().parent.parent / "tagger"
 app = modal.App("lexide-char-export")
 hf_secret = modal.Secret.from_name("huggingface-secret")
 onnx_vol = modal.Volume.from_name("lexide-onnx", create_if_missing=True)

@@ -17,9 +17,7 @@
 //! ```
 
 pub(crate) mod byte_bio;
-pub mod prior;
 pub(crate) mod sentence;
-pub mod unidic;
 
 use std::path::Path;
 

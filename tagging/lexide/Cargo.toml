@@ -1,6 +1,6 @@
 [package]
 name = "lexide"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "Multilingual text analysis and pronunciation decoding, CTC scoring, and forced alignment"
 license = "MIT OR Apache-2.0"
@@ -9,16 +9,6 @@ repository = "https://github.com/anchpop/lexide"
 [lib]
 name = "lexide"
 path = "src/lib.rs"
-
-[[bin]]
-name = "emit-priors"
-path = "src/bin/emit_priors.rs"
-required-features = ["segment"]
-
-[[bin]]
-name = "build-lemma-fst"
-path = "src/bin/build_lemma_fst.rs"
-required-features = ["local"]
 
 [[bin]]
 name = "label-tokenization"
@@ -55,13 +45,11 @@ futures = "0.3.31"
 regex = "1.0"
 unicode-normalization = "0.1"
 
-# Local inference dependencies (only included with 'local' feature):
-# the parsley tagger — ONNX encoder via ort, XLM-R subword tokenization via tokenizers,
-# byte-minGRU segmenter weights via safetensors, Wiktionary lemma tables via fst.
+# Joint parsley ONNX inference and its bundled subword tokenizer.
+# safetensors is used only by the independent sentence segmenter.
 ort = { version = "2.0.0-rc.10", optional = true }
 tokenizers = { version = "0.21", optional = true }
 safetensors = { version = "0.6", optional = true }
-fst = { version = "0.4", optional = true }
 hf-hub = { version = "0.4", optional = true, default-features = false, features = ["ureq", "native-tls"] }
 
 # HTTP shared by the remote text and pronunciation clients.
@@ -83,7 +71,7 @@ tokio = { version = "1.42", features = ["rt"] }
 
 [features]
 # Backend selection - choose one (or both)
-local = ["segment", "dep:ort", "dep:tokenizers", "dep:fst", "dep:tokio"]
+local = ["segment", "dep:ort", "dep:tokenizers", "dep:tokio"]
 # Just the 1M-param sentence segmenter (Segmenter::from_pretrained, ~4 MB download)
 segment = ["dep:safetensors", "dep:hf-hub"]
 remote = ["dep:reqwest", "dep:tokio"]
@@ -98,4 +86,8 @@ required-features = ["pronunciation"]
 
 [[example]]
 name = "tag_jsonl"
+required-features = ["local"]
+
+[[example]]
+name = "bench_local"
 required-features = ["local"]

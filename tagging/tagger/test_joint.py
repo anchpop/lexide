@@ -11,7 +11,7 @@ import unittest
 import numpy as np
 import torch
 
-from data_prep import LANGS, UPOS
+from data_prep import LANGS, POS_TAGS
 from data_prep_joint import build
 from dataset_joint import IndexedCorpus, collate, prepare
 from eval_e2e import score
@@ -85,7 +85,7 @@ class JointTests(unittest.TestCase):
         self.assertEqual(spans_from_char_labels("", []), [])
 
     def test_char_model_shared_piece_empty_truncation(self):
-        vocab = {"pos": UPOS, "dep": ["root", "obj"], "lemma_scripts": ["COPY"]}
+        vocab = {"pos": POS_TAGS, "dep": ["root", "obj"], "lemma_scripts": ["COPY"]}
         record = {"lang": "jpn", "text": "你好", "tokens": [
             {"start": 0, "end": 1, "pos": "NOUN", "dep": "root", "head": 0},
             {"start": 1, "end": 2, "pos": "NOUN", "dep": "obj", "head": 1}]}
@@ -123,16 +123,21 @@ class JointTests(unittest.TestCase):
         partial = prepare(partial_word, {"input_ids": [0, 4, 2], "offset_mapping": [(0, 0), (0, 1), (0, 0)]}, vocab, 64, True)
         self.assertEqual(partial["starts"], [])
         self.assertEqual(partial["boundary"], [-100])
-        # All subwords are retained in long-inference windowing; one sentence parse.
+        # Reject over-limit sentences rather than silently windowing the encoder.
         long = prepare({"lang": "eng", "text": "abcdefghijk", "tokens": []},
                        {"input_ids": [0] + [4] * 11 + [2],
                         "offset_mapping": [(0, 0)] + [(i, i + 1) for i in range(11)] + [(0, 0)]}, vocab, 64, False)
-        encoded = model.encode_chars(collate([long, empty], 1))
-        self.assertEqual(tuple(encoded["chars"].shape), (2, 11, 16))
-        self.assertTrue(torch.isfinite(encoded["chars"]).all())
+        with self.assertRaisesRegex(ValueError, "maximum is 8"):
+            model.encode_chars(collate([long, empty], 1))
         model.eval()
-        alone = model.encode_chars(collate([item], 1))["chars"]
-        padded = model.encode_chars(collate([item, long], 1))["chars"]
+        single = collate([item], 1)
+        alone = model.encode_chars(single)["chars"]
+        unpacked = model.encode_chars(single, unpadded=True)["chars"]
+        self.assertTrue(torch.allclose(alone, unpacked, atol=1e-6))
+        medium = prepare({"lang": "eng", "text": "abcde", "tokens": []},
+                         {"input_ids": [0] + [4] * 5 + [2],
+                          "offset_mapping": [(0, 0)] + [(i, i + 1) for i in range(5)] + [(0, 0)]}, vocab, 64, False)
+        padded = model.encode_chars(collate([item, medium], 1))["chars"]
         self.assertTrue(torch.allclose(alone[0, :2], padded[0, :2], atol=1e-6))
         reload = JointTagger("unused", 18, 2, 1, encoder_layers=2, char_dim=8, char_hidden=8,
                              word_dim=16, char_buckets=64, arc_dim=8, rel_dim=8, dropout=0,
