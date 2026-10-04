@@ -778,6 +778,27 @@ def eval_epoch(model, loader, device, *, use_bf16, blank_id, stress_active: bool
     }
 
 
+def check_narrowed_matches_broad(narrowed: Path, broad: Path) -> None:
+    """A narrowed file is phonemes.jsonl with `phonemes` rewritten and the
+    original kept as `phonemes_broad`; everything else must be identical.
+    A stale one (Sep 2026 copies survived a full relabel) would otherwise
+    train the old labels."""
+    def rows(path):
+        with path.open() as f:
+            return {r["file"]: r for r in map(json.loads, filter(str.strip, f))}
+    broad_rows = rows(broad)
+    restored = {}
+    for file, r in rows(narrowed).items():
+        r = dict(r)
+        r["phonemes"] = r.pop("phonemes_broad", None)
+        r.pop("narrow_relabels", None)
+        restored[file] = r
+    if restored != broad_rows:
+        raise SystemExit(
+            f"{narrowed} is not a narrowing of the current {broad.name}; "
+            "regenerate it with espeak_audit/narrow.py or pass --no-use-narrowed.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path, default=Path("../data/audio"))
@@ -910,10 +931,12 @@ def main():
     parser.add_argument("--fleurs-audit-min-cer", type=float, default=None)
     parser.add_argument("--fleurs-audit-min-wer", type=float, default=None)
     parser.add_argument("--use-narrowed", action=argparse.BooleanOptionalAction,
-                        default=True,
+                        default=False,
                         help="Train on the narrowed phonemes file (coda-nasal vowels "
-                             "nasalized + English flaps) where it exists, else fall back "
-                             "to phonemes.jsonl. A full drop-in from espeak_audit/narrow.py.")
+                             "nasalized + English flaps) from espeak_audit/narrow.py. Off "
+                             "by default: narrowing has not been regenerated since the "
+                             "g2p 0.7 relabel, and a narrowed file is only accepted when "
+                             "its rows carry the same g2p identity as phonemes.jsonl.")
     parser.add_argument("--narrowed-name", default="phonemes_narrowed.jsonl",
                         help="Filename of the narrowed file under each lang dir "
                              "(for A/B-ing narrowing variants, e.g. "
@@ -1307,6 +1330,7 @@ def main():
                 raise SystemExit(
                     f"--use-narrowed but {narrowed} is missing for {lang_dir.name}. "
                     f"Run espeak_audit/narrow.py (it writes one per language).")
+            check_narrowed_matches_broad(narrowed, phonemes_file)
             phonemes_file = narrowed
         if phonemes_file.exists():
             ds = StressDataset(phonemes_file, processor.tokenizer,
