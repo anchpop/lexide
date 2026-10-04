@@ -57,8 +57,7 @@ import soundfile as sf
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "train" / "scripts"))
 sys.path.insert(0, str(REPO / "espeak_audit"))
-import run_audit as RA  # noqa: E402  (load_vocab / MASKED_IDS, resolved from the pinned commit)
-from modal_aligner import MODEL_REVISION  # noqa: E402  (single source of the pinned commit)
+from modal_aligner import MODEL_ID, MODEL_REVISION  # noqa: E402  (single source of the pinned commit)
 
 MODEL = f"vad-clean@{MODEL_REVISION[:12]}"
 CACHE = REPO / "espeak_audit" / ".cache" / "pitch_accent" / MODEL
@@ -107,6 +106,19 @@ CONTRA_ST = 1.5
 # measurement noise. A *rate* separates "this clip's contour is wrong" from
 # "one mora wobbled".
 MAX_CONTRA_FRAC = 0.20
+
+
+# Special ids of the aligner's vocab.json (pad/unk/bos/eos); phones that map to
+# them are dropped from the alignment targets.
+MASKED_IDS = {0, 1, 2, 3}
+
+
+def load_vocab() -> dict:
+    """vocab.json from the SAME pinned model commit the aligner uses, so target
+    ids cannot drift from the weights when MODEL_REVISION is bumped."""
+    from huggingface_hub import hf_hub_download
+    return json.loads(Path(hf_hub_download(MODEL_ID, "vocab.json",
+                                           revision=MODEL_REVISION)).read_text())
 
 
 def cache_path(file: str, phon_key: str) -> Path:
@@ -224,7 +236,7 @@ def cmd_measure(args):
         print("nothing to do — all cached.")
         return
 
-    vocab = RA.load_vocab()
+    vocab = load_vocab()
     Aligner = modal.Cls.from_name("espeak-audit-aligner", "VadCleanAligner")
     aligner = Aligner()
 
@@ -232,7 +244,7 @@ def cmd_measure(args):
         items = []
         for row in chunk:
             ids = [vocab.get(p, 3) for p in row["phonemes"]]
-            ok = [i not in RA.MASKED_IDS for i in ids]
+            ok = [i not in MASKED_IDS for i in ids]
             keep = [j for j in range(len(row["phonemes"])) if ok[j]]
             audio, sr = sf.read(str(AUDIO / LANG / row["file"]))
             if getattr(audio, "ndim", 1) > 1:
