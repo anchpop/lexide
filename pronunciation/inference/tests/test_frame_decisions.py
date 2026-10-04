@@ -77,25 +77,3 @@ def test_batch_transcription_uses_factorized_decisions():
     result = transcribe_audio_batch([np.ones(4)], Model(),
                                     SimpleNamespace(tokenizer=Tokenizer()), torch.device('cpu'))
     assert [(t['token'], t['frame']) for t in result[0]] == [('a', 0), ('a', 3)]
-
-
-def test_modal_reading_matches_shared_decisions_without_loading_modal():
-    # Compile only the actual method: importing this module configures a Modal
-    # app/image and requires Modal dependencies, neither needed for pure decoding.
-    path = Path(__file__).resolve().parents[2] / 'espeak_audit' / 'modal_aligner.py'
-    module = ast.parse(path.read_text())
-    cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == 'VadCleanAligner')
-    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == '_reading')
-    namespace = {}
-    exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), 'exec'), namespace)
-    aligner = SimpleNamespace(blank_id=BLANK, masked_slots=[BLANK, 7],
-                              inv_vocab=dict(enumerate(Tokenizer.tokens)))
-    log_probs, nonblank_logit = factorized_outputs([[.6, .6, .4, .6, .5, .6]])
-    log_probs[..., [0, 4, 6]] = 0
-    log_probs[..., 1] = -torch.inf
-    original = log_probs.clone()
-    assert namespace['_reading'](aligner, log_probs) == ['b', 'b', 'b']
-    torch.testing.assert_close(log_probs, original)
-    # Explicit checkpoint masking also excludes a slot even if its score is finite.
-    log_probs[..., 7] = 0
-    assert namespace['_reading'](aligner, log_probs) == ['b', 'b', 'b']

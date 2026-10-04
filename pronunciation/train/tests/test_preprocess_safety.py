@@ -21,27 +21,6 @@ sys.path.insert(0, str(TRAIN / "scripts"))
 import preprocess_support as preprocess
 
 
-@pytest.mark.parametrize("token", sorted(preprocess.MERGED_TOKEN_BASES) + ["tʃː", "tʃʲ", "dzː"])
-def test_merged_narrowing_refuses_before_import_or_writes(tmp_path, monkeypatch, token):
-    lang_dir = tmp_path / "eng"
-    lang_dir.mkdir()
-    (lang_dir / "phonemes.jsonl").write_text(json.dumps({"phonemes": [token]}) + "\n")
-    narrowed = lang_dir / "phonemes_narrowed.jsonl"
-    narrowed.write_text("carried acoustic decisions\n")
-    old_path = list(sys.path)
-    original_import = builtins.__import__
-
-    def no_cloud(name, *args, **kwargs):
-        assert name not in {"narrow", "modal", "modal_aligner"}
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", no_cloud)
-    with pytest.raises(ValueError, match="--skip-narrowing.*pronunciation/CLAUDE.md"):
-        preprocess.run_narrowing("eng", tmp_path)
-    assert narrowed.read_text() == "carried acoustic decisions\n"
-    assert sys.path == old_path
-
-
 def test_split_labels_still_run_narrowing(tmp_path, monkeypatch):
     (tmp_path / "eng").mkdir()
     (tmp_path / "eng" / "phonemes.jsonl").write_text(
@@ -53,19 +32,6 @@ def test_split_labels_still_run_narrowing(tmp_path, monkeypatch):
     preprocess.run_narrowing("eng", tmp_path)
     assert calls == [["eng"]]
     assert narrow.AUDIO == tmp_path
-
-
-@pytest.mark.parametrize("model, revision", [
-    ("anchpop/lexide-pronunciation-unified-vad-clean", "new-merged-model-commit"),
-    ("anchpop/lexide-pronunciation-merged", "2926e06f8092935f597e0018beb5d579b95b889a"),
-])
-def test_new_aligner_pin_not_blocked(tmp_path, model, revision):
-    aligner = tmp_path / "aligner.py"
-    aligner.write_text(
-        f"raise AssertionError('must not execute')\nMODEL_ID = {model!r}\n"
-        f"MODEL_REVISION = {revision!r}\n"
-    )
-    preprocess.guard_narrowing_labels("eng", tmp_path, aligner)
 
 
 @pytest.mark.parametrize("sentence, targets, expected_source, expected_stress", [
@@ -178,20 +144,6 @@ def test_absent_tar_refuses_even_with_marker(tmp_path, stage):
     assert result.returncode != 0
     assert "restage the dataset" in result.stderr
     assert (tmp_path / "data/eng/phonemes.jsonl").read_text() == "old"
-
-
-@pytest.mark.parametrize("token", ["tːs", "t͡ʃʲ", "t͜s"])
-def test_short_old_pin_and_decorated_merges_refuse(tmp_path, token):
-    aligner = tmp_path / "aligner.py"
-    aligner.write_text(
-        "raise AssertionError('must not execute')\n"
-        "MODEL_ID = 'anchpop/lexide-pronunciation-unified-vad-clean'\n"
-        "MODEL_REVISION = '2926e06'\n"
-    )
-    (tmp_path / "eng").mkdir()
-    (tmp_path / "eng/phonemes.jsonl").write_text(json.dumps({"phonemes": [token]}))
-    with pytest.raises(ValueError, match="--skip-narrowing"):
-        preprocess.guard_narrowing_labels("eng", tmp_path, aligner)
 
 
 def test_hindi_annotations_survive_preprocess(tmp_path, monkeypatch):

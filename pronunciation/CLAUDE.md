@@ -114,7 +114,7 @@ These are hard-won and override generic ML instincts. Violating them has burned 
   (`train/sky_vad_clean_sidechannel_degrade.yaml`); it beat the older `mode=off`
   `unified-vad-clean` model on the minimal-pair eval and was promoted to production
   2026-06-18. When anything force-aligns or measures against "the model," **pin the
-  exact commit** — alignment depends on the weights (see `espeak_audit/modal_aligner.py`).
+  exact commit** — alignment depends on the weights (`espeak_audit/production_alignment.py` keys its caches by the served model identity).
   - *Lineage*: the previous champion `unified-vad-clean` @`2926e06` is retained as a
     **private** HF repo (it's the distillation teacher), as is the tiny on-device student
     `distill-distilhubert`. All the other old pronunciation experiment repos were deleted.
@@ -243,7 +243,7 @@ diarization-derived `speaker_cluster` is never touched by the rewrite:
 - `train/` — `src/` (model, dataset, training), the Rust
   stage helpers and exclusion sidecars; stress/filter Rust modules live in `preprocess/src/`.
 - `espeak_audit/` — the acoustics-as-arbiter pipeline: `phonetics.py` (parselmouth
-  measures), `modal_aligner.py` (Modal forced-align+measure), `measure_corpus.py`,
+  measures), `production_alignment.py` (batch-endpoint frame matrices + local CTC alignment), `measure_corpus.py`,
   `narrow.py`, `nasal_acoustic.py`, `pitch_accent_audit.py`, REPORT*.md.
 - `vad_compare/` — standalone VAD comparison tool; production VAD lives in `preprocess/src/audio.rs`.
 - `inference/` — `infer.py`.

@@ -1,7 +1,6 @@
 """Python stages called by the Rust preprocessing driver; no g2p transport."""
 
 import argparse
-import ast
 import hashlib
 import json
 from collections import Counter
@@ -163,51 +162,6 @@ def load_stress_overrides(path: Path) -> dict[str, list[str]]:
     return overrides
 
 
-# g2p 0.4.0 compound classes (g2p/src/parse.rs vowel_unit/affricate);
-# vocabulary membership does not mean the old aligner's rows were trained.
-MERGED_TOKEN_BASES = frozenset({
-    "aɪ", "aʊ", "eɪ", "oʊ", "əʊ", "ɔɪ", "ɔʏ", "ɔø",
-    "ɑːɹ", "ɔːɹ", "ɛɹ", "ɪɹ", "ʊɹ",
-    "tʃ", "dʒ", "ts", "dz", "tɕ", "dʑ", "tʂ", "dʐ",
-    "pf", "bv", "tθ", "dð", "kx", "ɡɣ", "ʈʂ", "ɖʐ",
-    "ɐ̃ʊ̃", "ɐ̃ɪ̃", "õɪ̃", "ũɪ̃", "ɐ̃j",
-})
-# Decorations can occur on either half of an affricate (tːs, t͡ʃʲ).
-_MERGED_DECORATIONS = str.maketrans("", "", "ːʲʰ͜͡")
-_MERGED_UNDECORATED = {token.translate(_MERGED_DECORATIONS) for token in MERGED_TOKEN_BASES}
-
-
-def guard_narrowing_labels(lang: str, data_dir: Path, aligner_path: Path) -> None:
-    """Inspect literal model pins without importing Modal or cloud clients."""
-    pins = {}
-    for node in ast.parse(aligner_path.read_text()).body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id in {
-                    "MODEL_ID", "MODEL_REVISION",
-                }:
-                    pins[target.id] = ast.literal_eval(node.value)
-    revision = pins.get("MODEL_REVISION", "")
-    old_revision = "2926e06f8092935f597e0018beb5d579b95b889a"
-    if (pins.get("MODEL_ID") != "anchpop/lexide-pronunciation-unified-vad-clean"
-            or not (len(revision) >= 7 and old_revision.startswith(revision))):
-        return
-    path = data_dir / lang / "phonemes.jsonl"
-    with path.open() as labels:
-        for line in labels:
-            if not line.strip():
-                continue
-            for token in json.loads(line)["phonemes"]:
-                if token.translate(_MERGED_DECORATIONS) in _MERGED_UNDECORATED:
-                    raise ValueError(
-                        f"Refusing narrowing: {path} contains merged token {token!r}, "
-                        "but modal_aligner is pinned to vad-clean@2926e06, whose "
-                        "merged-token rows are untrained. Use --skip-narrowing "
-                        "until a merged-label model is pinned; see the narrowing "
-                        "caveat in pronunciation/CLAUDE.md."
-                    )
-
-
 def run_narrowing(lang: str, data_dir: Path) -> None:
     """Regenerate phonemes_narrowed.jsonl for a language just labeled.
 
@@ -219,7 +173,6 @@ def run_narrowing(lang: str, data_dir: Path) -> None:
     abstain counts — re-run espeak_audit/measure_corpus.py to narrow them).
     """
     audit_dir = Path(__file__).resolve().parents[2] / "espeak_audit"
-    guard_narrowing_labels(lang, data_dir, audit_dir / "modal_aligner.py")
     sys.path.insert(0, str(audit_dir))
     try:
         import narrow
@@ -729,7 +682,7 @@ def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str, 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=["prepare", "finalize", "guard", "measure", "narrow", "speakers", "exclusions", "pack"])
+    parser.add_argument("stage", choices=["prepare", "finalize", "measure", "narrow", "speakers", "exclusions", "pack"])
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--lang")
     parser.add_argument("--train-dir", type=Path, default=REPO_ROOT / "train")
@@ -742,13 +695,10 @@ def main():
         prepare(args.data_dir, args.lang, args.exchange, args.allow_noncommercial, args.train_dir)
     elif args.stage == "finalize":
         finalize(args.data_dir, args.lang, args.exchange, args.identity, args.train_dir)
-    elif args.stage == "guard":
-        guard_narrowing_labels(args.lang, args.data_dir, REPO_ROOT / "espeak_audit/modal_aligner.py")
     elif args.stage == "measure":
         if args.data_dir.resolve() != (REPO_ROOT / "data/audio").resolve():
             raise ValueError("acoustic measurements require the canonical corpus directory")
         if args.lang in {"eng", "deu", "ita", "spa", "rus", "por"}:
-            guard_narrowing_labels(args.lang, args.data_dir, REPO_ROOT / "espeak_audit/modal_aligner.py")
             subprocess.run([sys.executable, str(REPO_ROOT / "espeak_audit/measure_corpus.py"), "--langs", args.lang], check=True)
     elif args.stage == "narrow":
         run_narrowing(args.lang, args.data_dir)

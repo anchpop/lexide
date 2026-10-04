@@ -30,7 +30,6 @@ enum Stage {
     Narrow,
     Pack,
     Upload,
-    DeployAligner,
 }
 
 #[derive(Parser)]
@@ -70,7 +69,7 @@ struct Args {
     /// Concurrent language jobs; logs go to pronunciation/.work/preprocess_parallel.
     #[arg(long, default_value = "1", value_parser = clap::value_parser!(u16).range(1..))]
     jobs: u16,
-    /// Keep existing narrowed files. Required while the aligner has untrained merged labels.
+    /// Keep existing narrowed files instead of regenerating them.
     #[arg(long)]
     skip_narrowing: bool,
     #[arg(long)]
@@ -278,10 +277,6 @@ impl Args {
                     }
                 }
                 Stage::Measure | Stage::Narrow => {
-                    // Refuse incompatible labels before importing clients or spending on alignment.
-                    for lang in langs {
-                        run(self.helper("guard").arg("--lang").arg(lang), None)?;
-                    }
                     let name = if *stage == Stage::Measure {
                         "measure"
                     } else {
@@ -322,14 +317,6 @@ impl Args {
                         None,
                     )?;
                 }
-                Stage::DeployAligner => {
-                    run(
-                        Command::new(&self.python)
-                            .current_dir(root().join("espeak_audit"))
-                            .args(["-m", "modal", "deploy", "modal_aligner.py"]),
-                        None,
-                    )?;
-                }
             }
         }
         Ok(())
@@ -345,8 +332,8 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
-    // Stages run Python from different working directories (deploy-aligner runs
-    // inside espeak_audit/), so pin an explicit relative interpreter such as
+    // Stage helpers run Python from their own working directories, so pin an
+    // explicit relative interpreter such as
     // `scripts/py-linux.sh` to where it was given. A bare name stays a PATH lookup.
     // Not canonicalize: a venv's python3 is a symlink whose venv identity comes
     // from the unresolved location, so only the working directory is joined.
@@ -370,7 +357,7 @@ fn main() -> Result<()> {
         }
     }
     let mut languages = Vec::new();
-    if args.stage != Stage::DeployAligner {
+    {
         args.data_dir = args
             .data_dir
             .canonicalize()

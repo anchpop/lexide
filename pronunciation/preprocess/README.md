@@ -8,7 +8,7 @@ Run commands from `pronunciation/` (or use an absolute manifest path).
 # Inspect the full stage order without API calls or writes.
 cargo run --release --manifest-path preprocess/Cargo.toml -- run --dry-run
 
-# Prepare and upload. Until the aligner is retrained, skip narrowing.
+# Prepare and upload. Narrowing is off until it is regenerated against the current labels.
 cargo run --release --manifest-path preprocess/Cargo.toml -- run --skip-narrowing \
   --python /opt/homebrew/Caskroom/miniconda/base/bin/python3
 ```
@@ -59,14 +59,7 @@ and clustering, and Hugging Face's resumable uploader. Before g2p, prepare skips
 clips in the six training exclusion sidecars when the audited sentence hash still
 matches, as well as silent and (unless allowed) noncommercial recordings. The old
 shell/Python pipeline drivers and standalone stress/filter/VAD binaries are
-removed. The Modal services stay Python and are unchanged. Deployment is explicit:
-
-```sh
-cargo run --release --manifest-path preprocess/Cargo.toml -- deploy-aligner
-```
-
-The current aligner's merged-label refusal guard applies before measurements and
-narrowing. Neither `run` nor `measure` deploys automatically. Acoustic measurement
+removed. The Modal services stay Python and are unchanged. Acoustic measurement
 and speaker caches are tied to the canonical corpus directory; those stages
 reject a different `--data-dir` rather than mix corpora.
 
