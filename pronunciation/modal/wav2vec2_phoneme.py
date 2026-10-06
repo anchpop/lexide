@@ -147,24 +147,27 @@ image = (
         # along so the eval harness, which wants a guaranteed-fresh image even
         # when redeploying the *same* revision, gets one by varying the marker.
         f"echo 'MODEL_WEIGHTS_VERSION={MODEL_ID}@{MODEL_REVISION}#{DEPLOY_MARKER}' && "
-        "python -c \"from transformers import Wav2Vec2Model, Wav2Vec2Processor; "
-        "from huggingface_hub import hf_hub_download; "
-        f"Wav2Vec2Processor.from_pretrained('{MODEL_ID}', revision='{MODEL_REVISION}'); "
-        f"Wav2Vec2Model.from_pretrained('{MODEL_ID}', revision='{MODEL_REVISION}'); "
-        f"hf_hub_download('{MODEL_ID}', 'factorized_heads.pt', revision='{MODEL_REVISION}')\""
+        "python -c \"from huggingface_hub import snapshot_download; "
+        f"snapshot_download('{MODEL_ID}', revision='{MODEL_REVISION}', "
+        "allow_patterns=['*.json', '*.safetensors', '*.bin', '*.pt'])\""
     )
 )
 image = image.add_local_file(
     Path(__file__).resolve().parent / "pronunciation_batching.py",
     remote_path="/root/pronunciation_batching.py",
 )
-
+# Scratch checkpoint construction stays owned by the training model. Bundle
+# only its inference dependencies, not the trainer or its data pipeline.
+for module in ("factorized_ctc", "scratch_backbone", "articulatory"):
+    image = image.add_local_file(
+        Path(__file__).resolve().parents[1] / "train" / "src" / f"{module}.py",
+        remote_path=f"/root/{module}.py",
+    )
 
 
 # Canonical head construction: pronunciation/train/src/factorized_ctc.py,
 # FactorizedCTCModel.__init__ (_mk_head and variant-specific stress heads).
-# Keep these checkpoint-compatible reconstructions local to the Modal image;
-# relocation deliberately introduces no training-module imports or refactor.
+# Retain the existing wav2vec2 path and its fp16 backbone / fp32 heads exactly.
 def _build_simple_heads(hidden_size: int, vocab_size: int, num_stress_labels: int = 3):
     """Heads for the non-regularized variants (unified, unified-vad).
 
@@ -376,6 +379,8 @@ def _build_sidechannel(ckpt):
     enable_memory_snapshot=False,
 )
 class Wav2Vec2Phoneme:
+    _scratch_model = None
+
     @modal.enter()
     def load_model(self):
         self._pool_number = 0
@@ -397,8 +402,15 @@ class Wav2Vec2Phoneme:
         import torch
         import torch.nn as nn
         import torchaudio.transforms as T_audio
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import hf_hub_download, snapshot_download
         from transformers import Wav2Vec2Model, Wav2Vec2Processor
+
+        checkpoint = Path(snapshot_download(
+            MODEL_ID, revision=MODEL_REVISION, local_files_only=True,
+        ))
+        if (checkpoint / "scratch_backbone.pt").is_file():
+            self._load_scratch_model(checkpoint)
+            return
 
         self.processor = Wav2Vec2Processor.from_pretrained(
             MODEL_ID, revision=MODEL_REVISION
@@ -520,6 +532,30 @@ class Wav2Vec2Phoneme:
         with torch.no_grad():
             self._forward(dummy.input_values.to("cuda").to(torch.float16))
 
+    def _load_scratch_model(self, checkpoint, device="cuda"):
+        import torch
+        from transformers import Wav2Vec2Processor
+        from factorized_ctc import FactorizedCTCModel
+
+        self.processor = Wav2Vec2Processor.from_pretrained(checkpoint, local_files_only=True)
+        # The raw-waveform frontend normalizes valid samples itself. Keep its
+        # DFT/log-mel buffers and inputs in fp32 (including outside autocast).
+        self._scratch_model = FactorizedCTCModel.load_from_dir(checkpoint).to(device).eval()
+        self.backbone = self._scratch_model.backbone
+        self.blank_id = self._scratch_model.blank_id
+        self.masked_slots = self._scratch_model._masked_slots.tolist()
+        self.language_head_specs = self._scratch_model.language_head_specs
+        self.language_heads = self._scratch_model.language_heads
+        self.sample_rate = int(self.processor.feature_extractor.sampling_rate)
+        if self.sample_rate != 16000:
+            raise ValueError("scratch frontend requires 16 kHz audio")
+        self.frame_rate_ms = 1000 * W2V2_STRIDE / self.sample_rate
+        dummy = self.processor(
+            [0.0] * self.sample_rate, sampling_rate=self.sample_rate, return_tensors="pt",
+        )
+        with torch.inference_mode():
+            self._forward(dummy.input_values.to(device))
+
     def _compute_head_input_regularized(self, input_values, attention_mask=None):
         """Build the (1, T, head_base_dim) shared base feature for the
         regularized variant. See pronunciation/train/src/factorized_ctc.py
@@ -596,6 +632,19 @@ class Wav2Vec2Phoneme:
         """
         import torch
         import torch.nn.functional as F
+
+        if self._scratch_model is not None:
+            languages = language if isinstance(language, list) else [language]
+            all_flags = return_all_heads if isinstance(return_all_heads, list) else [return_all_heads] * len(languages)
+            selected = [self._aux_heads_for(lang, all_heads) for lang, all_heads in zip(languages, all_flags)]
+            output = self._scratch_model(
+                input_values, attention_mask=attention_mask,
+                active_language_heads={name for heads in selected for name in heads},
+            )
+            aux = [{name: output["language_head_logits"][name][i] for name in heads}
+                   for i, heads in enumerate(selected)]
+            return (output["log_probs"], output["stress_logits"],
+                    output["nonblank_logit"].sigmoid(), aux if isinstance(language, list) else aux[0])
 
         if self.regularized:
             h = self._compute_head_input_regularized(input_values, attention_mask)  # (1, T, 768), fp32
@@ -976,7 +1025,7 @@ class Wav2Vec2Phoneme:
         lengths = [item[2].numel() for item in prepared]
         # GroupNorm includes time in its normalization before masking, so
         # unvalidated group-normalized checkpoints retain singleton execution.
-        size = 1 if self.backbone.config.feat_extract_norm == "group" else BATCH_SIZE
+        size = 1 if getattr(self.backbone.config, "feat_extract_norm", None) == "group" else BATCH_SIZE
         batches = list(length_batches(lengths, size, int(MAX_PADDED_SECONDS * self.sample_rate),
                                       MAX_LENGTH_RATIO))
         print(json.dumps({"pronunciation_pool": pool_number, "requests": len(requests),
@@ -991,12 +1040,13 @@ class Wav2Vec2Phoneme:
         values = torch.nn.utils.rnn.pad_sequence([item[2] for item in items], batch_first=True)
         lengths = torch.tensor([item[2].numel() for item in items])
         frame_lengths = self.backbone._get_feat_extract_output_lengths(lengths).tolist()
+        parameter = next(self.backbone.parameters())
         mask = None
         if len(items) > 1:
-            mask = (torch.arange(values.shape[1])[None, :] < lengths[:, None]).long().to("cuda")
+            mask = (torch.arange(values.shape[1])[None, :] < lengths[:, None]).long().to(parameter.device)
         with torch.inference_mode():
             lp, stress, nb, aux = self._forward(
-                values.to("cuda", dtype=torch.float16),
+                values.to(device=parameter.device, dtype=parameter.dtype),
                 language=[item[1].get("language") for item in items], attention_mask=mask,
                 return_all_heads=[bool(item[1].get("return_all_heads")) for item in items],
             )

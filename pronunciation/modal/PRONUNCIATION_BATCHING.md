@@ -81,6 +81,18 @@ Batch shape can change FP16 probabilities and predictions even with correct
 masking. The 64-clip production-path test preserved phonemes in its sample;
 this is not a guarantee of singleton-equivalent output on every clip.
 
+## Checkpoint backbones
+
+Checkpoints containing `scratch_backbone.pt` load through
+`FactorizedCTCModel.load_from_dir`, using the shared model's forward pass.
+The Conformer and its raw-waveform frontend stay in fp32; the checkpoint's
+processor controls `do_normalize` (scratch training saves `false`). Sample
+masks exclude batch padding from the frontend's own normalization. Its fixed
+16 kHz, 320-sample stride gives a 20 ms frame interval and
+`(samples - 400) // 320 + 1` valid frames. Every returned head is trimmed to
+that length. The existing wav2vec2 path remains fp16 encoder / fp32 heads;
+both backbones return the same frame-matrix schema.
+
 ## Deployment ownership
 
 This app and its self-contained image now live in lexide, not yap. Yap consumes
@@ -115,10 +127,10 @@ bash /data/coding/lexide/pronunciation/scripts/py-linux.sh \
   -m pytest /data/coding/lexide/pronunciation/modal -q
 ```
 
-Verified: **54 passed**, with one existing Starlette TestClient/httpx deprecation
-warning. These CPU tests import the relocated app/image definition and exercise
-the real response handlers with fake model forwards; they do not deploy, load
-production weights, or validate GPU/cloud execution.
+These CPU tests import the app/image definition, exercise response handlers
+with fake model forwards, and round-trip a small real scratch checkpoint through
+the shared loader. They do not deploy, load production weights, or validate
+GPU/cloud execution.
 
 ## Self-describing frame matrices (schema 1)
 

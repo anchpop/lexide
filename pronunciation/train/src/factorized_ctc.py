@@ -210,9 +210,10 @@ class FactorizedCTCModel(nn.Module):
         mel_n_fft: int = 400,
         lowband_dim: int = 0,
         feature_emission_weight: float = 0.0,
-        mel_sidechannel: bool = True,
+        mel_sidechannel: bool | None = None,
         mlp_heads: bool = True,
         language_head_specs: dict[str, dict] | None = None,
+        scratch_config: dict | None = None,
     ):
         super().__init__()
         if feature_table is not None and aux_feature_table is not None:
@@ -220,6 +221,9 @@ class FactorizedCTCModel(nn.Module):
                 "feature_table (factorized) and aux_feature_table (auxiliary) are mutually exclusive. "
                 "Pick one feature mode."
             )
+        is_scratch = str(model_name) == "scratch" or (Path(model_name) / "scratch_backbone.pt").exists()
+        if mel_sidechannel is None:
+            mel_sidechannel = not is_scratch
         if regularized_heads and mel_sidechannel:
             raise ValueError(
                 "regularized_heads and mel_sidechannel are alternative head-base modes "
@@ -239,7 +243,14 @@ class FactorizedCTCModel(nn.Module):
         import os as _os
         _is_cohere = ("cohere" in str(model_name).lower()
                       or _os.path.exists(_os.path.join(str(model_name), "cohere_backbone.pt")))
-        if _is_cohere:
+        if is_scratch:
+            try:
+                from .scratch_backbone import ScratchConformer
+            except ImportError:
+                from scratch_backbone import ScratchConformer
+            self.backbone = (ScratchConformer(scratch_config) if str(model_name) == "scratch"
+                             else ScratchConformer.from_pretrained(model_name))
+        elif _is_cohere:
             try:
                 from .cohere_backbone import CohereBackbone
             except ImportError:

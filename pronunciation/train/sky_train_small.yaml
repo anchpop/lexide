@@ -1,0 +1,77 @@
+# From-scratch ~25M-param Conformer for on-device use: no pretrained backbone,
+# no teacher, no language input. Same data, labels and factorized heads as the
+# 2B recipe (sky_train_film.yaml); only the acoustic backbone is new.
+#
+# First run (2026-10-04, ~297 h of audio): an A100 took ~36 min/epoch, so the
+# 18 h timeout stopped it after epoch 28 for ~$38. Validation loss had already
+# flattened by epoch 25. French minimal pairs: 67.6% pass / 10.6% PER, against
+# the 2B's 70.8% / 8.5%.
+resources:
+  cloud: lambda
+  disk_size: 200
+  # Lambda's single GH200s are often all taken; any of these fits a 25M model.
+  ordered:
+    - accelerators: GH200:1
+    - accelerators: A100:1
+    - accelerators: H100:1
+  autostop:
+    idle_minutes: 20
+    down: true
+
+workdir: .
+file_mounts:
+  ~/.netrc: ~/.netrc
+  ~/sky_workdir/train/scripts/training_labels.json: ../tagging/lexide/data/training_labels.json
+  # Rebuild from pronunciation/ after any data/label change:
+  # cargo run --release --manifest-path preprocess/Cargo.toml -- pack
+  ~/data.tar: .work/pron_audio.tar
+
+setup: |
+  set -euo pipefail
+  pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio
+  pip install transformers soundfile tqdm wandb panphon
+  python -c 'import torch; assert torch.cuda.is_available(), "CUDA required"; print(torch.__version__, torch.cuda.get_device_name())'
+
+run: |
+  set -euo pipefail
+  test -f ~/data.tar || { echo 'Missing staged data.tar'; exit 1; }
+  tar_id=$(sha256sum ~/data.tar | cut -d ' ' -f 1)
+  if [ ! -f ~/data/.tar_id ] || [ "$(cat ~/data/.tar_id)" != "$tar_id" ]; then
+    stage=$(mktemp -d "$HOME/data.stage.XXXXXX")
+    trap 'rm -rf "$stage"' EXIT
+    tar -xf ~/data.tar -C "$stage"
+    printf '%s\n' "$tar_id" > "$stage/.tar_id"
+    backup=$(mktemp -d "$HOME/data.previous.XXXXXX")
+    if [ -e ~/data ]; then mv ~/data "$backup/data"; fi
+    if ! mv "$stage" ~/data; then
+      if [ -e "$backup/data" ]; then mv "$backup/data" ~/data; fi
+      exit 1
+    fi
+    rm -rf "$backup"
+    trap - EXIT
+  fi
+  cd ~/sky_workdir
+  python -c 'import torch; assert torch.cuda.is_available(), "CUDA required"'
+  # CR-CTC doubles the acoustic forward: two SpecAugment views of each batch.
+  # Waveform degradation and speed perturbation stay at the 2B recipe's
+  # defaults: a learner's phone mic is the deployment condition. The LR is the
+  # fragile knob: on a 2 h eng+spa smoke set, 5e-4 never left the all-blank
+  # plateau even without augmentation, while 3e-4 learned with or without it.
+  # Whole-backbone torch.compile did not finish warmup locally; leave it off.
+  timeout --signal=TERM 18h bash train/train.sh \
+    --model-name scratch \
+    --scratch-dim 256 --scratch-layers 16 --scratch-heads 4 \
+    --scratch-ff 1024 --scratch-kernel 31 \
+    --epochs 40 --backbone-lr 0.0003 --head-lr 0.0003 \
+    --lr-warmup-steps 4000 --cr-ctc-weight 0.2 \
+    --stress-warmup-steps 4000 \
+    --max-batch-audio-sec 200 --max-batch-size 128 \
+    --loss-reference-batch 64 --batch-size 32 --num-workers 24 \
+    --grad-clip-norm 5 --bf16 --fused-optimizer \
+    --no-compile-encoder-layers --no-compile-backbone --no-compile-forward \
+    --no-gradient-checkpointing --seed 42 \
+    --save-dir checkpoints-small \
+    --hf-repo anchpop/lexide-pronunciation-small
+
+secrets:
+  HF_TOKEN: null

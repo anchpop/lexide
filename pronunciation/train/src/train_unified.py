@@ -37,6 +37,7 @@ from .dataset import (
 )
 from .factorized_ctc import FactorizedCTCModel
 from .joint_ctc import joint_ctc_loss
+from .consistency import consistency_loss, warmup_cosine_multiplier
 from .validation_metrics import (
     sentence_split, identify_validation, collate_identified, DecodeMetrics, normalize_sentence,
 )
@@ -152,7 +153,10 @@ def load_processor(model_name: str, resume_from: Path | None = None):
         # Token IDs belong to the checkpoint, not the current training inventory.
         # Missing processor files must fail rather than rebuilding different IDs.
         return Wav2Vec2Processor.from_pretrained(str(resume_from), local_files_only=True)
-    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
+    feature_extractor = (Wav2Vec2FeatureExtractor(feature_size=1, sampling_rate=16000,
+                         padding_value=0.0, do_normalize=False, return_attention_mask=True)
+                         if model_name == "scratch" else
+                         Wav2Vec2FeatureExtractor.from_pretrained(model_name))
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     from training_vocabulary import new_tokenizer
@@ -397,7 +401,8 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
                 profile_steps: bool = False,
                 log_every: int = 20,
                 loss_reference_batch: int | None = None,
-                optimizer_steps: int = 0, stress_warmup_steps: int | None = None):
+                optimizer_steps: int = 0, stress_warmup_steps: int | None = None,
+                cr_ctc_weight: float = 0.0, step_scheduler=None):
     model.train()
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -406,6 +411,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
 
     # Accumulate metrics on-device and transfer once per epoch. Calling .item()
     # for every metric on every step serializes the GH200 CPU and GPU queues.
+    total_cr = torch.zeros((), device=device)
     total_ctc = torch.zeros((), device=device)
     total_vad = torch.zeros((), device=device)
     total_invalid = torch.zeros((), device=device)
@@ -446,126 +452,138 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         tone_seq = batch["tone_seq"].to(device, non_blocking=True)
         pitch_accent_seq = batch["pitch_accent_seq"].to(device, non_blocking=True)
 
-        if profile_steps:
-            torch.cuda.synchronize()
-        t_fwd = time.perf_counter()
-        batch_language_heads = active_language_heads(model, batch) if stress_active else []
-        with autocast_ctx:
-            outputs = model(
-                audio,
-                attention_mask=audio_mask,
-                active_language_heads=batch_language_heads,
-            )
-        for name, value in outputs.items():
-            if name == "log_probs":
-                check_ctc_log_probs(f"outputs/{name}", value, model, enabled=debug_finite)
-            else:
-                check_finite(f"outputs/{name}", value, enabled=debug_finite)
-        if profile_steps:
-            torch.cuda.synchronize()
-            timings["forward"] += time.perf_counter() - t_fwd
+        view_outputs, view_losses, view_ctc = [], [], []
+        for _view in range(2 if cr_ctc_weight > 0 else 1):
+            if profile_steps:
+                torch.cuda.synchronize()
+            t_fwd = time.perf_counter()
+            batch_language_heads = active_language_heads(model, batch) if stress_active else []
+            with autocast_ctx:
+                outputs = model(
+                    audio,
+                    attention_mask=audio_mask,
+                    active_language_heads=batch_language_heads,
+                )
+            for name, value in outputs.items():
+                if name == "log_probs":
+                    check_ctc_log_probs(f"outputs/{name}", value, model, enabled=debug_finite)
+                else:
+                    check_finite(f"outputs/{name}", value, enabled=debug_finite)
+            if profile_steps:
+                torch.cuda.synchronize()
+                timings["forward"] += time.perf_counter() - t_fwd
 
-        t_joint = time.perf_counter()
-        n_frames = model.backbone._get_feat_extract_output_lengths(
-            audio_mask.sum(-1)
-        ).to(torch.long)
-        ctc_loss = joint_ctc_loss(
-            phone_log_probs=outputs["log_probs"],
-            phone_targets=phoneme_ids,
-            target_lengths=phoneme_lens,
-            input_lengths=n_frames,
-            phone_blank_id=blank_id,
-            stress_logits=outputs["stress_logits"] if stress_active else None,
-            stress_weight=stress_weight,
-            stress_targets=stress_seq,
-            stress_available=batch["stress_available"],
-            language_head_logits=(
-                outputs["language_head_logits"] if stress_active else {}
-            ),
-            language_head_specs=(model.language_head_specs if stress_active else {}),
-            aligned_targets={"tone": tone_seq, "pitch_accent": pitch_accent_seq},
-            factor_available={
-                "tone": batch["tone_available"],
-                "pitch_accent": batch["pitch_accent_available"],
-            },
-            langs=batch["langs"],
-        )
-        check_finite("loss/ctc", ctc_loss, enabled=debug_finite)
-        if profile_steps:
-            torch.cuda.synchronize()
-            timings["joint_ctc"] += time.perf_counter() - t_joint
-
-        vl = torch.zeros((), device=device)
-        if vad_weight > 0 and batch.get("vad_probs") is not None:
-            vad_probs_b = batch["vad_probs"].to(device, non_blocking=True)
-            vad_lens_b = batch["vad_lens"].to(device, non_blocking=True)
-            # Number of wav2vec2 output frames per sample.
-            backbone = model.backbone
-            n_frames = backbone._get_feat_extract_output_lengths(audio_mask.sum(-1)).to(torch.long)
-            vl = vad_loss(outputs["nonblank_logit"], vad_probs_b, vad_lens_b, n_frames)
-            check_finite("loss/vad", vl, enabled=debug_finite)
-            total_vad += vl.detach()
-            n_vad_batches += 1
-
-        im_loss = torch.zeros((), device=device)
-        if invalid_mass_weight > 0 and "off_manifold" in outputs:
-            # `off_manifold[b, t]` is -log P(features land in vocab) for the
-            # unnormalized feature factorization. Minimize → features prefer
-            # combinations that exist as real phonemes. Mask padded frames.
-            om = outputs["off_manifold"]                              # (B, T)
-            backbone = model.backbone
-            n_frames_im = backbone._get_feat_extract_output_lengths(audio_mask.sum(-1)).to(torch.long)
-            mask_im = (torch.arange(om.shape[1], device=om.device)[None] < n_frames_im[:, None])
-            im_loss = (om * mask_im).sum() / mask_im.sum().clamp(min=1)
-            check_finite("loss/off_manifold", im_loss, enabled=debug_finite)
-            total_invalid += im_loss.detach()
-            n_invalid_batches += 1
-
-        distill_loss = torch.zeros((), device=device)
-        if teacher is not None and distill_weight > 0:
-            # Teacher transcribes the CLEAN companion clip (best-quality soft
-            # targets, matching its own clean training regime); the student
-            # learned from the degraded `audio`. Degrade is length-preserving,
-            # so both share the same frame grid → per-frame KD aligns exactly.
-            teacher_audio = batch.get("audio_clean")
-            teacher_audio = (teacher_audio.to(device, non_blocking=True)
-                             if teacher_audio is not None else audio)
-            n_frames_kd = model.backbone._get_feat_extract_output_lengths(
+            t_joint = time.perf_counter()
+            n_frames = model.backbone._get_feat_extract_output_lengths(
                 audio_mask.sum(-1)
             ).to(torch.long)
-            with torch.no_grad(), autocast_ctx:
-                teacher_out = teacher(teacher_audio, attention_mask=audio_mask)
-            T_s = outputs["log_probs"].shape[1]
-            T_t = teacher_out["log_probs"].shape[1]
-            assert T_s == T_t, (
-                f"Teacher/student frame-count mismatch ({T_t} vs {T_s}); KD "
-                f"assumes a shared 50 fps grid (identical conv feature extractor)."
+            ctc_loss = joint_ctc_loss(
+                phone_log_probs=outputs["log_probs"],
+                phone_targets=phoneme_ids,
+                target_lengths=phoneme_lens,
+                input_lengths=n_frames,
+                phone_blank_id=blank_id,
+                stress_logits=outputs["stress_logits"] if stress_active else None,
+                stress_weight=stress_weight,
+                stress_targets=stress_seq,
+                stress_available=batch["stress_available"],
+                language_head_logits=(
+                    outputs["language_head_logits"] if stress_active else {}
+                ),
+                language_head_specs=(model.language_head_specs if stress_active else {}),
+                aligned_targets={"tone": tone_seq, "pitch_accent": pitch_accent_seq},
+                factor_available={
+                    "tone": batch["tone_available"],
+                    "pitch_accent": batch["pitch_accent_available"],
+                },
+                langs=batch["langs"],
             )
-            frame_mask = (
-                torch.arange(T_s, device=device)[None, :] < n_frames_kd[:, None]
-            )
-            # Remap teacher log-probs (B,T,Vt) into the student's class order/size
-            # (B,T,Vs) by token-string id. Student-only classes get a finite, tiny
-            # log-prob (renormalized away) — never -inf, which would make the
-            # exp(t)*(t-s) KL term produce NaNs. When vocabs are identical the
-            # remap is the identity permutation and the renorm is a no-op.
-            teacher_lp = teacher_out["log_probs"]
-            if teacher_vocab_remap is not None:
-                Vs = outputs["log_probs"].shape[-1]
-                remapped = teacher_lp.new_full((*teacher_lp.shape[:-1], Vs), -30.0)
-                remapped[..., teacher_vocab_remap] = teacher_lp
-                teacher_lp = remapped - torch.logsumexp(remapped, dim=-1, keepdim=True)
-            distill_loss = distill_kl_loss(
-                outputs["log_probs"], teacher_lp, frame_mask,
-                temperature=distill_temperature,
-            )
-            check_finite("loss/distill", distill_loss, enabled=debug_finite)
-            total_distill += distill_loss.detach()
-            n_distill_batches += 1
-        loss = (ctc_loss
-                + vad_weight * vl
-                + invalid_mass_weight * im_loss
-                + distill_weight * distill_loss)
+            check_finite("loss/ctc", ctc_loss, enabled=debug_finite)
+            if profile_steps:
+                torch.cuda.synchronize()
+                timings["joint_ctc"] += time.perf_counter() - t_joint
+
+            vl = torch.zeros((), device=device)
+            if vad_weight > 0 and batch.get("vad_probs") is not None:
+                vad_probs_b = batch["vad_probs"].to(device, non_blocking=True)
+                vad_lens_b = batch["vad_lens"].to(device, non_blocking=True)
+                # Number of wav2vec2 output frames per sample.
+                backbone = model.backbone
+                n_frames = backbone._get_feat_extract_output_lengths(audio_mask.sum(-1)).to(torch.long)
+                vl = vad_loss(outputs["nonblank_logit"], vad_probs_b, vad_lens_b, n_frames)
+                check_finite("loss/vad", vl, enabled=debug_finite)
+                total_vad += vl.detach()
+                n_vad_batches += 1
+
+            im_loss = torch.zeros((), device=device)
+            if invalid_mass_weight > 0 and "off_manifold" in outputs:
+                # `off_manifold[b, t]` is -log P(features land in vocab) for the
+                # unnormalized feature factorization. Minimize → features prefer
+                # combinations that exist as real phonemes. Mask padded frames.
+                om = outputs["off_manifold"]                              # (B, T)
+                backbone = model.backbone
+                n_frames_im = backbone._get_feat_extract_output_lengths(audio_mask.sum(-1)).to(torch.long)
+                mask_im = (torch.arange(om.shape[1], device=om.device)[None] < n_frames_im[:, None])
+                im_loss = (om * mask_im).sum() / mask_im.sum().clamp(min=1)
+                check_finite("loss/off_manifold", im_loss, enabled=debug_finite)
+                total_invalid += im_loss.detach()
+                n_invalid_batches += 1
+
+            distill_loss = torch.zeros((), device=device)
+            if teacher is not None and distill_weight > 0:
+                # Teacher transcribes the CLEAN companion clip (best-quality soft
+                # targets, matching its own clean training regime); the student
+                # learned from the degraded `audio`. Degrade is length-preserving,
+                # so both share the same frame grid → per-frame KD aligns exactly.
+                teacher_audio = batch.get("audio_clean")
+                teacher_audio = (teacher_audio.to(device, non_blocking=True)
+                                 if teacher_audio is not None else audio)
+                n_frames_kd = model.backbone._get_feat_extract_output_lengths(
+                    audio_mask.sum(-1)
+                ).to(torch.long)
+                with torch.no_grad(), autocast_ctx:
+                    teacher_out = teacher(teacher_audio, attention_mask=audio_mask)
+                T_s = outputs["log_probs"].shape[1]
+                T_t = teacher_out["log_probs"].shape[1]
+                assert T_s == T_t, (
+                    f"Teacher/student frame-count mismatch ({T_t} vs {T_s}); KD "
+                    f"assumes a shared 50 fps grid (identical conv feature extractor)."
+                )
+                frame_mask = (
+                    torch.arange(T_s, device=device)[None, :] < n_frames_kd[:, None]
+                )
+                # Remap teacher log-probs (B,T,Vt) into the student's class order/size
+                # (B,T,Vs) by token-string id. Student-only classes get a finite, tiny
+                # log-prob (renormalized away) — never -inf, which would make the
+                # exp(t)*(t-s) KL term produce NaNs. When vocabs are identical the
+                # remap is the identity permutation and the renorm is a no-op.
+                teacher_lp = teacher_out["log_probs"]
+                if teacher_vocab_remap is not None:
+                    Vs = outputs["log_probs"].shape[-1]
+                    remapped = teacher_lp.new_full((*teacher_lp.shape[:-1], Vs), -30.0)
+                    remapped[..., teacher_vocab_remap] = teacher_lp
+                    teacher_lp = remapped - torch.logsumexp(remapped, dim=-1, keepdim=True)
+                distill_loss = distill_kl_loss(
+                    outputs["log_probs"], teacher_lp, frame_mask,
+                    temperature=distill_temperature,
+                )
+                check_finite("loss/distill", distill_loss, enabled=debug_finite)
+                total_distill += distill_loss.detach()
+                n_distill_batches += 1
+            loss = (ctc_loss
+                    + vad_weight * vl
+                    + invalid_mass_weight * im_loss
+                    + distill_weight * distill_loss)
+            view_outputs.append(outputs)
+            view_losses.append(loss)
+            view_ctc.append(ctc_loss)
+        loss = torch.stack(view_losses).mean()
+        ctc_loss = torch.stack(view_ctc).mean()
+        if cr_ctc_weight > 0:
+            cr_loss = consistency_loss(*view_outputs, n_frames, batch, model,
+                                       stress_active=stress_active, stress_weight=stress_weight)
+            loss = loss + cr_ctc_weight * cr_loss
+            total_cr += cr_loss.detach()
         # Every loss term above is a mean over the batch, so each sample carries
         # weight 1/B. Under token-budget batching B varies, which would quietly
         # upweight long clips -- they ride in the small batches. Rescaling to a
@@ -603,6 +621,8 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
         max_grad_norm = torch.maximum(max_grad_norm, last_grad_norm)
         optimizer.step()
         optimizer_steps += 1
+        if step_scheduler is not None:
+            step_scheduler.step()
         optimizer.zero_grad(set_to_none=True)
         if profile_steps:
             torch.cuda.synchronize()
@@ -644,6 +664,7 @@ def train_epoch(model, loader, optimizer, device, epoch, *, use_bf16,
 
     ns = max(total_samples, 1)
     return {
+        "cr_ctc_loss": (total_cr / nb).item(),
         "optimizer_steps": optimizer_steps,
         "ctc_loss": (total_ctc / ns).item(),
         "vad_loss": (total_vad / max(n_vad_batches, 1)).item() if n_vad_batches else 0.0,
@@ -799,6 +820,57 @@ def check_narrowed_matches_broad(narrowed: Path, broad: Path) -> None:
             "regenerate it with espeak_audit/narrow.py or pass --no-use-narrowed.")
 
 
+def load_training_datasets(args, processor):
+    # Resolve explicit audit-path inputs. The old `--fleurs-audit-path` is
+    # honored as an alias; no audit sidecar is auto-discovered.
+    audit_paths = list(args.audit_path or [])
+    if args.fleurs_audit_path is not None:
+        audit_paths.append(args.fleurs_audit_path)
+    min_per = args.fleurs_audit_min_per if args.fleurs_audit_min_per is not None else args.audit_min_per
+    min_cer = args.fleurs_audit_min_cer if args.fleurs_audit_min_cer is not None else args.audit_min_cer
+    min_wer = args.fleurs_audit_min_wer if args.fleurs_audit_min_wer is not None else args.audit_min_wer
+
+    asr_exclusions: dict[str, dict[str, str]] = {}
+    for p in audit_paths:
+        partial = load_asr_audit_exclusions(p, min_per=min_per, min_cer=min_cer, min_wer=min_wer)
+        for lang, files in partial.items():
+            asr_exclusions.setdefault(lang, {}).update(files)
+
+    datasets = []
+    for lang_dir in sorted(args.data_dir.iterdir()):
+        if args.langs is not None and lang_dir.name not in args.langs:
+            continue
+        phonemes_file = lang_dir / "phonemes.jsonl"
+        if args.use_narrowed and phonemes_file.exists():
+            # narrow.py writes a phonemes_narrowed.jsonl for EVERY lang (a broad
+            # copy where nothing narrowed), so under --use-narrowed it must exist
+            # for every trainable lang. Missing = setup error (narrow.py not run) —
+            # fail loud rather than silently train this lang on broad labels.
+            narrowed = lang_dir / args.narrowed_name
+            if not narrowed.exists():
+                raise SystemExit(
+                    f"--use-narrowed but {narrowed} is missing for {lang_dir.name}. "
+                    f"Run espeak_audit/narrow.py (it writes one per language).")
+            check_narrowed_matches_broad(narrowed, phonemes_file)
+            phonemes_file = narrowed
+        if phonemes_file.exists():
+            ds = StressDataset(phonemes_file, processor.tokenizer,
+                               max_audio_sec=args.max_audio_sec,
+                               min_rms=args.min_rms,
+                               excluded_target_hashes=asr_exclusions.get(lang_dir.name),
+                               min_whisper_logprob=args.min_whisper_logprob)
+            print(f"Loaded {lang_dir.name} from {phonemes_file.name}: {len(ds)} samples")
+            cap_clips_per_sentence(ds, phonemes_file, args.max_clips_per_sentence)
+            datasets.append(ds)
+
+    if args.source_cap_second and datasets:
+        datasets = cap_sources_second(datasets)
+    if not datasets:
+        raise RuntimeError(f"No phonemes.jsonl files matched (langs={args.langs}).")
+
+    return datasets
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path, default=Path("../data/audio"))
@@ -808,7 +880,17 @@ def main():
                         help="Feature extractor source for fresh training; the phone vocabulary is local.")
     parser.add_argument("--epochs", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--backbone-lr", type=float, default=1e-5)
+    parser.add_argument("--backbone-lr", type=float, default=None)
+    parser.add_argument("--scratch-dim", type=int, default=256)
+    parser.add_argument("--scratch-layers", type=int, default=16)
+    parser.add_argument("--scratch-heads", type=int, default=4)
+    parser.add_argument("--scratch-ff", type=int, default=1024)
+    parser.add_argument("--scratch-kernel", type=int, default=31)
+    parser.add_argument("--cr-ctc-weight", type=float, default=0.0)
+    parser.add_argument("--lr-warmup-steps", type=int, default=None,
+                        help="Opt into per-update warmup/cosine; unset preserves epoch cosine.")
+    parser.add_argument("--lr-total-steps", type=int, default=None,
+                        help="Fixed schedule horizon; otherwise epochs times loader length.")
     parser.add_argument("--head-lr", type=float, default=1e-3)
     parser.add_argument("--max-audio-sec", type=float, default=16.0)
     parser.add_argument("--val-split", type=float, default=0.05)
@@ -855,7 +937,7 @@ def main():
                              "all four heads, so phoneme and feature heads share a learned "
                              "projection (they predict overlapping information by construction).")
     parser.add_argument("--mel-sidechannel", action=argparse.BooleanOptionalAction,
-                        default=True,
+                        default=None,
                         help="Concatenate a raw log-mel side-channel (projected to "
                              "acoustic_dim) onto the FINAL encoder layer feeding the heads — "
                              "the regularized-heads acoustic channel WITHOUT the K-layer "
@@ -1063,9 +1145,9 @@ def main():
                         help="Diagnostic benchmark mode: do not write or upload checkpoints.")
     parser.add_argument("--resume-from", type=Path, default=None,
                         help="Local path to a checkpoint dir (saved by save_to_dir) to resume "
-                             "training from. Must be paired with --resume-epoch. Loads model "
-                             "weights only (optimizer/scheduler are reinitialized fresh). "
-                             "Use this to continue an in-flight run after a code change.")
+                             "training from. Must be paired with --resume-epoch. Step-schedule "
+                             "runs restore optimizer/scheduler too; legacy epoch-cosine runs "
+                             "restore weights and completed-update count only.")
     parser.add_argument("--resume-epoch", type=int, default=None,
                         help="Epoch number to start at when --resume-from is given. The "
                              "training loop runs epochs [resume_epoch, epochs] inclusive. "
@@ -1074,6 +1156,19 @@ def main():
     parser.add_argument("--resume-optimizer-steps", type=int, default=None,
                         help="Completed updates for legacy checkpoints without training_state.json.")
     args = parser.parse_args()
+    is_scratch = args.model_name == "scratch" or (args.resume_from is not None and
+                  (args.resume_from / "scratch_backbone.pt").exists())
+    if args.backbone_lr is None:
+        args.backbone_lr = 1e-3 if is_scratch else 1e-5
+    if args.mel_sidechannel is None:
+        args.mel_sidechannel = not is_scratch
+    if args.cr_ctc_weight < 0:
+        parser.error("--cr-ctc-weight must be nonnegative")
+    if args.lr_warmup_steps is not None and args.lr_warmup_steps < 0:
+        parser.error("--lr-warmup-steps must be nonnegative")
+    if args.lr_total_steps is not None and (args.lr_warmup_steps is None or
+            args.lr_total_steps <= args.lr_warmup_steps):
+        parser.error("--lr-total-steps requires warmup and must exceed warmup steps")
     if not 0 <= args.speed_perturb_prob <= 1:
         parser.error("--speed-perturb-prob must be between 0 and 1")
     if not 0 < args.speed_min <= args.speed_max < float("inf"):
@@ -1093,7 +1188,7 @@ def main():
     # --compile-backbone trips the exclusivity check against a strategy the
     # caller never asked for. Only an explicit pair is a real conflict.
     if args.compile_encoder_layers is None:
-        args.compile_encoder_layers = not (args.compile_forward
+        args.compile_encoder_layers = not (is_scratch or args.compile_forward
                                            or args.compile_backbone)
     if sum((args.compile_forward, args.compile_backbone,
             args.compile_encoder_layers)) > 1:
@@ -1139,7 +1234,7 @@ def main():
     device = torch.device("cuda")
     print(f"Using device: {device} ({torch.cuda.get_device_name(0)})")
 
-    processor = load_processor(args.processor_source, args.resume_from)
+    processor = load_processor("scratch" if is_scratch else args.processor_source, args.resume_from)
 
     if args.use_features and args.use_aux_features:
         raise SystemExit("--use-features and --use-aux-features are mutually exclusive.")
@@ -1173,6 +1268,9 @@ def main():
     else:
         model = FactorizedCTCModel(
             model_name=args.model_name,
+            scratch_config=dict(hidden_size=args.scratch_dim, num_hidden_layers=args.scratch_layers,
+                                heads=args.scratch_heads, ff_size=args.scratch_ff,
+                                kernel_size=args.scratch_kernel),
             vocab_size=len(processor.tokenizer),
             blank_id=processor.tokenizer.pad_token_id,
             feature_table=feature_table,
@@ -1300,52 +1398,7 @@ def main():
               + (f" ({extra} student-only tokens get no KD signal, hard-label only)"
                  if extra else " (identical vocab)"))
 
-    # Resolve explicit audit-path inputs. The old `--fleurs-audit-path` is
-    # honored as an alias; no audit sidecar is auto-discovered.
-    audit_paths = list(args.audit_path or [])
-    if args.fleurs_audit_path is not None:
-        audit_paths.append(args.fleurs_audit_path)
-    min_per = args.fleurs_audit_min_per if args.fleurs_audit_min_per is not None else args.audit_min_per
-    min_cer = args.fleurs_audit_min_cer if args.fleurs_audit_min_cer is not None else args.audit_min_cer
-    min_wer = args.fleurs_audit_min_wer if args.fleurs_audit_min_wer is not None else args.audit_min_wer
-
-    asr_exclusions: dict[str, dict[str, str]] = {}
-    for p in audit_paths:
-        partial = load_asr_audit_exclusions(p, min_per=min_per, min_cer=min_cer, min_wer=min_wer)
-        for lang, files in partial.items():
-            asr_exclusions.setdefault(lang, {}).update(files)
-
-    datasets = []
-    for lang_dir in sorted(args.data_dir.iterdir()):
-        if args.langs is not None and lang_dir.name not in args.langs:
-            continue
-        phonemes_file = lang_dir / "phonemes.jsonl"
-        if args.use_narrowed and phonemes_file.exists():
-            # narrow.py writes a phonemes_narrowed.jsonl for EVERY lang (a broad
-            # copy where nothing narrowed), so under --use-narrowed it must exist
-            # for every trainable lang. Missing = setup error (narrow.py not run) —
-            # fail loud rather than silently train this lang on broad labels.
-            narrowed = lang_dir / args.narrowed_name
-            if not narrowed.exists():
-                raise SystemExit(
-                    f"--use-narrowed but {narrowed} is missing for {lang_dir.name}. "
-                    f"Run espeak_audit/narrow.py (it writes one per language).")
-            check_narrowed_matches_broad(narrowed, phonemes_file)
-            phonemes_file = narrowed
-        if phonemes_file.exists():
-            ds = StressDataset(phonemes_file, processor.tokenizer,
-                               max_audio_sec=args.max_audio_sec,
-                               min_rms=args.min_rms,
-                               excluded_target_hashes=asr_exclusions.get(lang_dir.name),
-                               min_whisper_logprob=args.min_whisper_logprob)
-            print(f"Loaded {lang_dir.name} from {phonemes_file.name}: {len(ds)} samples")
-            cap_clips_per_sentence(ds, phonemes_file, args.max_clips_per_sentence)
-            datasets.append(ds)
-
-    if args.source_cap_second and datasets:
-        datasets = cap_sources_second(datasets)
-    if not datasets:
-        raise RuntimeError(f"No phonemes.jsonl files matched (langs={args.langs}).")
+    datasets = load_training_datasets(args, processor)
 
     full_dataset = ConcatDataset(datasets)
     train_ds, val_ds = sentence_split(full_dataset, args.val_split)
@@ -1489,12 +1542,6 @@ def main():
         ],
         fused=args.fused_optimizer,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    # When resuming, advance the cosine schedule to its value at the start of
-    # the resume epoch (epoch numbering is 1-based, so step() runs (resume_epoch-1) times).
-    if args.resume_epoch is not None:
-        for _ in range(args.resume_epoch - 1):
-            scheduler.step()
 
     # Run name reflects the backbone + whether it's a distillation run, so the
     # 300m distill jobs don't all show up as "unified-xls-r-2b" in wandb.
@@ -1520,6 +1567,28 @@ def main():
         if args.resume_from is None or args.resume_optimizer_steps < 0:
             raise SystemExit("--resume-optimizer-steps requires --resume-from and a nonnegative count")
         optimizer_steps = args.resume_optimizer_steps
+
+    if args.lr_warmup_steps is not None:
+        total_steps = args.lr_total_steps or args.epochs * min(
+            len(train_loader), args.max_train_batches or len(train_loader))
+        if total_steps <= args.lr_warmup_steps:
+            raise SystemExit("Step schedule horizon must exceed warmup")
+        from functools import partial
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, partial(
+            warmup_cosine_multiplier, warmup_steps=args.lr_warmup_steps, total_steps=total_steps))
+        if args.resume_from is not None:
+            saved = torch.load(args.resume_from / "optimizer.pt", map_location=device, weights_only=True)
+            if saved["total_steps"] != total_steps or saved["warmup_steps"] != args.lr_warmup_steps:
+                raise SystemExit("Resume must keep the saved step-schedule horizon and warmup")
+            optimizer.load_state_dict(saved["optimizer"])
+            scheduler.load_state_dict(saved["scheduler"])
+            if scheduler.last_epoch != optimizer_steps:
+                raise SystemExit("Scheduler and completed optimizer update counts disagree")
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+        if args.resume_epoch is not None:
+            for _ in range(args.resume_epoch - 1):
+                scheduler.step()
 
     hf_api = None
     if args.hf_repo:
@@ -1553,6 +1622,8 @@ def main():
             log_every=args.log_every,
             loss_reference_batch=args.loss_reference_batch,
             optimizer_steps=optimizer_steps, stress_warmup_steps=args.stress_warmup_steps,
+            cr_ctc_weight=args.cr_ctc_weight,
+            step_scheduler=scheduler if args.lr_warmup_steps is not None else None,
         )
         optimizer_steps = train_stats["optimizer_steps"]
         stress_active = optimizer_steps >= args.stress_warmup_steps
@@ -1565,7 +1636,8 @@ def main():
             max_eval_batches=args.max_eval_batches,
             tokenizer=processor.tokenizer, decode_clip_ids=decode_clip_ids,
         )
-        scheduler.step()
+        if args.lr_warmup_steps is None:
+            scheduler.step()
 
         val_loss = val_stats["phone_ctc_loss"]
         print(
@@ -1592,6 +1664,7 @@ def main():
         lrs = scheduler.get_last_lr()
         log_dict = {
             "epoch": epoch,
+            "train/cr_ctc_loss": train_stats["cr_ctc_loss"],
             "train/ctc_loss": train_stats["ctc_loss"],
             "train/vad_loss": train_stats["vad_loss"],
             "train/off_manifold": train_stats["off_manifold"],
@@ -1627,6 +1700,8 @@ def main():
             print(f"  decode {lang}: " + " ".join(
                 f"{name}={value:.4f}" for name, value in metrics.items()))
         wandb.log(log_dict)
+        with (args.save_dir / "metrics.jsonl").open("a") as f:
+            f.write(json.dumps(log_dict) + "\n")
 
         # Always save and push EVERY epoch's checkpoint. HF git history
         # preserves each revision, so worse-than-best epochs are still
@@ -1642,6 +1717,10 @@ def main():
         if not args.skip_save:
             model.save_to_dir(args.save_dir)
             processor.save_pretrained(args.save_dir)
+            if args.lr_warmup_steps is not None:
+                torch.save({"optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                            "total_steps": total_steps, "warmup_steps": args.lr_warmup_steps},
+                           args.save_dir / "optimizer.pt")
             (args.save_dir / "training_state.json").write_text(json.dumps({
                 "optimizer_steps": optimizer_steps,
                 "best_phone_ctc_loss": best_val_loss,
