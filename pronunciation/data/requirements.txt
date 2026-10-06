@@ -2,3 +2,9 @@ google-cloud-texttospeech
 datasets
 soundfile
 tqdm
+numpy
+scipy
+pyarrow
+requests
+huggingface_hub
+python-dotenv

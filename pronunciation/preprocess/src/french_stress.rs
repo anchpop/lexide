@@ -16,13 +16,10 @@
 //! each LLM-flagged word as primary stress and zeroes everything else.
 
 use anyhow::{Context, Result};
-use futures::stream::{self, StreamExt};
-use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::fs;
-use tysm::chat_completions::ChatClient;
 
 #[derive(Debug, Clone, Deserialize)]
 struct ManifestRecord {
@@ -107,28 +104,8 @@ Output: stressed_words = ["marais"]
 Input: "peine de mort"
 Output: stressed_words = ["mort"]"#;
 
-async fn get_stressed_words(client: &ChatClient, sentence: &str) -> Result<Vec<String>> {
-    let response: RhythmicGroupResponse = crate::llm::retry(|| async {
-        Ok(client
-            .chat_with_system_prompt(SYSTEM_PROMPT.to_string(), sentence.to_string())
-            .await?)
-    })
-    .await?;
-    Ok(response.stressed_words)
-}
-
-async fn process_record(client: &ChatClient, record: ManifestRecord) -> Result<StressOverride> {
-    let stressed_words = get_stressed_words(client, &record.sentence).await?;
-    Ok(StressOverride {
-        file: record.file,
-        stressed_words,
-    })
-}
-
-pub async fn run(data_dir: &Path) -> Result<()> {
-    let cache = crate::root().join("train/relabel-french/.cache");
-    std::fs::create_dir_all(&cache)?;
-    let client = &ChatClient::from_env(crate::llm::MODEL)?.with_cache_directory(cache);
+pub async fn run(data_dir: &Path, train_dir: &Path, dry: bool) -> Result<()> {
+    let cache = train_dir.join("relabel-french/.cache");
     let input = data_dir.join("fra/manifest.jsonl");
     let output = data_dir.join("fra/stress_overrides.jsonl");
 
@@ -144,32 +121,23 @@ pub async fn run(data_dir: &Path) -> Result<()> {
 
     println!("Loaded {} French manifest records", records.len());
 
-    let pb = ProgressBar::new(records.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{bar:40.cyan/blue} {pos}/{len} [{elapsed_precise}] {msg}")
-            .unwrap(),
-    );
-
-    let results: Vec<Result<StressOverride>> = stream::iter(records)
-        .map(|rec| {
-            let pb = pb.clone();
-            async move {
-                let r = process_record(client, rec).await;
-                pb.inc(1);
-                r
-            }
-        })
-        .buffer_unordered(30)
-        .collect()
-        .await;
-    pb.finish();
-
-    let rows = results
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?
+    let prompts = records
         .iter()
-        .map(serde_json::to_value)
+        .map(|r| (SYSTEM_PROMPT.to_owned(), r.sentence.clone()))
+        .collect::<Vec<_>>();
+    let Some(results) = crate::llm::run::<RhythmicGroupResponse>(&cache, &prompts, dry).await?
+    else {
+        return Ok(());
+    };
+    let rows = records
+        .into_iter()
+        .zip(results)
+        .map(|(rec, res)| {
+            serde_json::to_value(StressOverride {
+                file: rec.file,
+                stressed_words: res.stressed_words,
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
     crate::corpus::write(&output, &rows)?;
     println!("Wrote {} overrides to {}", rows.len(), output.display());

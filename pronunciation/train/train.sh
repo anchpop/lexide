@@ -67,7 +67,8 @@ echo "Using dataset at ~/data: $(ls ~/data | tr '\n' ' ')"
 # so stale sidecars fail open per-row, not per-file.
 audit_args=()
 for sidecar in fleurs_asr_exclusions tatoeba_asr_exclusions \
-               tts_asr_exclusions lang_exclusions mixed_script_exclusions \
+               tts_asr_exclusions mls_asr_exclusions cv_asr_exclusions \
+               aishell1_asr_exclusions aishell3_asr_exclusions lang_exclusions mixed_script_exclusions \
                boilerplate_exclusions; do
   if [ -f "$sidecar.jsonl" ]; then
     audit_args+=(--audit-path "$sidecar.jsonl")

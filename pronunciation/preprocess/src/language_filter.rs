@@ -18,14 +18,11 @@
 //!   cargo run --release --manifest-path preprocess/Cargo.toml -- filter --langs eng deu
 
 use anyhow::{Context, Result};
-use futures::stream::{self, StreamExt};
-use indicatif::{ProgressBar, ProgressStyle};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 use tokio::fs;
-use tysm::chat_completions::ChatClient;
 
 const LANGS: &[(&str, &str)] = &[
     ("eng", "English"),
@@ -39,6 +36,11 @@ const LANGS: &[(&str, &str)] = &[
     ("ces", "Czech"),
     ("dan", "Danish"),
     ("fas", "Persian"),
+    ("hin", "Hindi"),
+    ("jpn", "Japanese"),
+    ("kor", "Korean"),
+    ("tha", "Thai"),
+    ("zho-hans", "Mandarin Chinese"),
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,26 +74,14 @@ part of the snippet is not {language}, respond with `{{\"is_target_language\": f
     )
 }
 
-async fn check(client: &ChatClient, language: &str, sentence: &str) -> Result<LangCheck> {
-    let user = format!("snippet: {sentence:?}"); // {:?} => snippet: "..."
-    crate::llm::retry(|| async {
-        Ok(client
-            .chat_with_system_prompt(system_prompt(language), user.clone())
-            .await?)
-    })
-    .await
-}
-
-pub async fn run(data_dir: &Path, train_dir: &Path, langs: &[String]) -> Result<()> {
+pub async fn run(data_dir: &Path, train_dir: &Path, langs: &[String], dry: bool) -> Result<()> {
     if !LANGS
         .iter()
         .any(|(code, _)| langs.iter().any(|l| l == code))
     {
         return Ok(());
     }
-    let cache = crate::root().join("train/lang-filter/.cache");
-    std::fs::create_dir_all(&cache)?;
-    let client = &ChatClient::from_env(crate::llm::MODEL)?.with_cache_directory(cache);
+    let cache = train_dir.join("lang-filter/.cache");
     let out_path = train_dir.join("lang_exclusions.jsonl");
     // The judge is not deterministic across reruns, and a false negative
     // puts wrongly-phonemized foreign text back into training. Exclusions are
@@ -139,52 +129,28 @@ pub async fn run(data_dir: &Path, train_dir: &Path, langs: &[String]) -> Result<
             uniq.len()
         );
 
-        let pb = ProgressBar::new(uniq.len() as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{bar:40.cyan/blue} {pos}/{len} [{elapsed_precise}] {msg}")
-                .unwrap(),
-        );
-        pb.set_message(code.to_string());
-
-        let results: Vec<(String, Vec<String>, Result<LangCheck>)> = stream::iter(uniq)
-            .map(|(sentence, files)| {
-                let pb = pb.clone();
-                async move {
-                    let r = check(client, language, &sentence).await;
-                    pb.inc(1);
-                    (sentence, files, r)
-                }
-            })
-            .buffer_unordered(30)
-            .collect()
-            .await;
-        pb.finish();
-
+        let prompts: Vec<_> = uniq
+            .iter()
+            .map(|(sentence, _)| (system_prompt(language), format!("snippet: {sentence:?}")))
+            .collect();
+        let Some(verdicts) = crate::llm::run::<LangCheck>(&cache, &prompts, dry).await? else {
+            continue;
+        };
         let mut checked = 0;
         let mut flagged = 0;
-        for (sentence, files, res) in results {
-            match res {
-                Ok(c) => {
-                    checked += files.len();
-                    if !c.is_target_language {
-                        let hash = crate::corpus::hash(sentence.as_bytes());
-                        for file in files {
-                            flagged += 1;
-                            all_exclusions.push(Exclusion {
-                                lang: code.to_string(),
-                                file,
-                                expected_sha256: hash.clone(),
-                                per: 1.0,
-                                ok: true,
-                                reason: "non_target_language".to_string(),
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!("{code}: {sentence:?}; exclusions were not replaced")
+        for ((sentence, files), verdict) in uniq.into_iter().zip(verdicts) {
+            checked += files.len();
+            if !verdict.is_target_language {
+                let hash = crate::corpus::hash(sentence.as_bytes());
+                for file in files {
+                    flagged += 1;
+                    all_exclusions.push(Exclusion {
+                        lang: code.to_string(),
+                        file,
+                        expected_sha256: hash.clone(),
+                        per: 1.0,
+                        ok: true,
+                        reason: "non_target_language".to_string(),
                     });
                 }
             }
@@ -218,6 +184,9 @@ pub async fn run(data_dir: &Path, train_dir: &Path, langs: &[String]) -> Result<
         totals.insert(code.to_string(), (checked, flagged));
     }
 
+    if dry {
+        return Ok(());
+    }
     let rows = all_exclusions
         .iter()
         .map(serde_json::to_value)

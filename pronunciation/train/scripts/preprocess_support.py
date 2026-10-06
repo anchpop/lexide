@@ -17,6 +17,9 @@ from tqdm import tqdm
 
 from training_vocabulary import unknown_phonemes
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.audit_gate import STRICT_SOURCES, load_coverage, strict_verdict
+
 STRESS_NONE = 0
 STRESS_PRIMARY = 1
 STRESS_SECONDARY = 2
@@ -448,7 +451,8 @@ def load_training_exclusions(train_dir: Path) -> dict[str, dict[str, str]]:
     """
     exclusions: dict[str, dict[str, str]] = {}
     for name in (
-        "fleurs_asr_exclusions", "tatoeba_asr_exclusions", "tts_asr_exclusions",
+        "fleurs_asr_exclusions", "tatoeba_asr_exclusions", "tts_asr_exclusions", "mls_asr_exclusions",
+        "cv_asr_exclusions", "aishell1_asr_exclusions", "aishell3_asr_exclusions",
         "lang_exclusions", "mixed_script_exclusions", "boilerplate_exclusions",
     ):
         path = train_dir / f"{name}.jsonl"
@@ -460,6 +464,9 @@ def load_training_exclusions(train_dir: Path) -> dict[str, dict[str, str]]:
                     continue
                 rec = json.loads(line)
                 if not rec.get("ok", True):
+                    continue
+                # Strict sources are gated row by row through strict_verdict.
+                if (rec.get("source") or name.removesuffix("_asr_exclusions")) in STRICT_SOURCES:
                     continue
                 if "per" in rec:
                     if float(rec["per"]) < 1e-12:
@@ -480,15 +487,23 @@ def load_training_exclusions(train_dir: Path) -> dict[str, dict[str, str]]:
 
 
 def prepare(data_dir: Path, lang: str, output: Path, allow_noncommercial: bool,
-            train_dir: Path = REPO_ROOT / "train") -> None:
+            train_dir: Path = REPO_ROOT / "train", *, new_only=False, sources=()) -> None:
     lang_dir = data_dir / lang
     phonemes_path = lang_dir / "phonemes.jsonl"
     records = [json.loads(line) for line in (lang_dir / "manifest.jsonl").read_text().splitlines() if line.strip()]
+    existing = {r["file"] for r in read_jsonl(phonemes_path)} if new_only or sources else set()
+    records = [r for r in records if r["file"] not in existing and (not sources or r.get("source") in sources)]
+    coverage = load_coverage(train_dir / f"{s}_asr_exclusions.jsonl" for s in STRICT_SOURCES)
+    # Validate the entire selected scope before decoding any audio or writing output.
+    verdicts = {r["file"]: strict_verdict(r, lang, coverage) for r in records}
     excluded_target_hashes = load_training_exclusions(train_dir).get(lang, {})
     license_excluded = silent_dropped = audit_excluded = 0
     prepared_records: list[dict] = []
     with SilenceCache(lang_dir, phonemes_path) as silence_cache:
         for rec in tqdm(records, desc=f"{lang} silence"):
+            if verdicts[rec["file"]] is False:
+                audit_excluded += 1
+                continue
             audited_hash = excluded_target_hashes.get(rec["file"])
             if audited_hash is not None and audited_hash == hashlib.sha256(
                     rec.get("sentence", "").encode()).hexdigest():
@@ -513,7 +528,34 @@ def prepare(data_dir: Path, lang: str, output: Path, allow_noncommercial: bool,
     print(f"{lang}: prepared {len(prepared_records)} recordings; dropped {silent_dropped} silent, {license_excluded} noncommercial and {audit_excluded} by exclusions")
 
 
-def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str, train_dir: Path = REPO_ROOT / "train") -> None:
+def read_jsonl(path):
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+
+
+def write_jsonl(path, entries, incremental=False):
+    """Atomic append-by-copy: retain every prior byte, never replace a row."""
+    import tempfile
+    previous = path.read_bytes() if incremental and path.exists() else b""
+    if previous and not previous.endswith(b"\n"):
+        raise ValueError(f"{path}: existing JSONL lacks final newline")
+    existing = {r["file"] for r in read_jsonl(path)} if incremental else set()
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as out:
+        temp = Path(out.name)
+        try:
+            out.write(previous)
+            for entry in entries:
+                if entry["file"] in existing:
+                    raise ValueError(f"{path}: refusing to replace {entry['file']}")
+                existing.add(entry["file"])
+                out.write((json.dumps(entry, ensure_ascii=False) + "\n").encode())
+            out.flush()
+            os.fsync(out.fileno())
+            temp.replace(path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+
+def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str, train_dir: Path = REPO_ROOT / "train", *, incremental=False) -> None:
     lang_dir = data_dir / lang
     phonemes_path = lang_dir / "phonemes.jsonl"
     # Acoustics get the last word on the accent factor: the sidecar's
@@ -655,19 +697,18 @@ def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str, 
         print(f"  NOT writing {phonemes_path} — fix the above and re-run.")
         raise ValueError(f"{lang}: unsupported model labels; output was not replaced")
 
-    with open(phonemes_path, "w") as out:
-        for entry in entries:
-            out.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    write_jsonl(phonemes_path, entries, incremental)
 
     exclusion_path = lang_dir / "g2p_exclusions.jsonl"
-    with exclusion_path.open("w") as out:
-        for rec, g2p_language, labels in dispositions:
-            if labels.get("exclude_reason"):
-                out.write(json.dumps({
-                    "file": rec["file"], "sentence": rec["sentence"],
-                    "g2p_language": g2p_language, "g2p_identity": build_identity,
-                    "exclude_reason": labels["exclude_reason"],
-                }, ensure_ascii=False) + "\n")
+    exclusions = [{
+        "file": rec["file"], "sentence": rec["sentence"],
+        "g2p_language": g2p_language, "g2p_identity": build_identity,
+        "exclude_reason": labels["exclude_reason"],
+    } for rec, g2p_language, labels in dispositions if labels.get("exclude_reason")]
+    if incremental:
+        already = {r["file"] for r in read_jsonl(exclusion_path)}
+        exclusions = [r for r in exclusions if r["file"] not in already]
+    write_jsonl(exclusion_path, exclusions, incremental)
     print(f"{lang}: wrote {len(entries)} entries to {phonemes_path}")
     if g2p_excluded:
         reasons = Counter(labels["exclude_reason"] for _, _, labels in dispositions
@@ -689,12 +730,14 @@ def main():
     parser.add_argument("--exchange", type=Path)
     parser.add_argument("--identity")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--new-only", action="store_true")
+    parser.add_argument("--label-sources", nargs="+", default=[])
     parser.add_argument("--allow-noncommercial", action="store_true")
     args = parser.parse_args()
     if args.stage == "prepare":
-        prepare(args.data_dir, args.lang, args.exchange, args.allow_noncommercial, args.train_dir)
+        prepare(args.data_dir, args.lang, args.exchange, args.allow_noncommercial, args.train_dir, new_only=args.new_only, sources=args.label_sources)
     elif args.stage == "finalize":
-        finalize(args.data_dir, args.lang, args.exchange, args.identity, args.train_dir)
+        finalize(args.data_dir, args.lang, args.exchange, args.identity, args.train_dir, incremental=args.new_only or bool(args.label_sources))
     elif args.stage == "measure":
         if args.data_dir.resolve() != (REPO_ROOT / "data/audio").resolve():
             raise ValueError("acoustic measurements require the canonical corpus directory")

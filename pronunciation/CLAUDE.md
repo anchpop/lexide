@@ -172,7 +172,14 @@ containers do not keep serving old code (only when a deployment is authorized):
      `tts` too: the Gemini backend is an LLM reading text, so unlike Chirp3 it
      *can* paraphrase or decline, and this is what catches a clip whose audio
      stopped matching its label. (Spot-checked 12/12 verbatim at introduction.)
-   - `preprocess filter` (Rust + tysm + gpt-5.4-nano): flag clips whose transcript
+   - Read-speech sources added in bulk (`mls`, `cv`, `aishell1`, `aishell3`)
+     are *strict*: `preprocess audit` (use `--asr-backend cloudflare`; Groq's
+     rate limits are painful at this scale) runs g2p on both the transcript and
+     Whisper's text and admits a clip only if the phone sequences are identical.
+     MLS transcripts carry OCR damage and archaic spellings, so a PER threshold
+     lets bad labels through. Missing or stale strict audits stop preprocessing
+     and training (`train/src/audit_gate.py`).
+   - `preprocess filter` (Rust + gpt-6-luna, via the OpenAI Batch API): flag clips whose transcript
      isn't entirely the target language → `train/lang_exclusions.jsonl`.
    - `preprocess stress`: LLM rhythmic-group stress → `fra/stress_overrides.jsonl`.
 4. **Narrow** (`espeak_audit/`, optional): `measure_corpus.py` force-aligns each clip

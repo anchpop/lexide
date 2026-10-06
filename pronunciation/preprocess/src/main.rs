@@ -66,6 +66,15 @@ struct Args {
     /// Python interpreter (or executable wrapper) with the existing audio dependencies.
     #[arg(long, default_value = "python3")]
     python: PathBuf,
+    /// Append labels/VAD only for files absent from canonical outputs.
+    #[arg(long)]
+    new_only: bool,
+    /// Append only these manifest sources (also implies --new-only).
+    #[arg(long, num_args = 1..)]
+    label_sources: Vec<String>,
+    /// Construct uncached Batch JSONL locally; never submit or replace sidecars.
+    #[arg(long)]
+    batch_dry_run: bool,
     /// Concurrent language jobs; logs go to pronunciation/.work/preprocess_parallel.
     #[arg(long, default_value = "1", value_parser = clap::value_parser!(u16).range(1..))]
     jobs: u16,
@@ -115,6 +124,14 @@ impl Args {
             .arg(&self.data_dir)
             .arg("--train-dir")
             .arg(&self.train_dir);
+        if matches!(stage, "prepare" | "finalize") {
+            if self.new_only {
+                command.arg("--new-only");
+            }
+            if !self.label_sources.is_empty() {
+                command.arg("--label-sources").args(&self.label_sources);
+            }
+        }
         command
     }
 
@@ -260,17 +277,26 @@ impl Args {
                 }
                 Stage::Stress => {
                     if langs.iter().any(|l| l == "fra") {
-                        french_stress::run(&self.data_dir).await?;
+                        french_stress::run(&self.data_dir, &self.train_dir, self.batch_dry_run)
+                            .await?;
                     }
                 }
                 Stage::Filter => {
-                    language_filter::run(&self.data_dir, &self.train_dir, langs).await?
+                    language_filter::run(&self.data_dir, &self.train_dir, langs, self.batch_dry_run)
+                        .await?
                 }
                 Stage::Labels => {
                     let identity = g2p::identity();
                     self.parallel(langs, |lang| self.labels(lang, &identity))?;
                 }
-                Stage::Vad => self.parallel(langs, |lang| audio::vad(&self.data_dir, lang))?,
+                Stage::Vad => self.parallel(langs, |lang| {
+                    audio::vad(
+                        &self.data_dir,
+                        lang,
+                        self.new_only || !self.label_sources.is_empty(),
+                        &self.label_sources,
+                    )
+                })?,
                 Stage::Speakers => {
                     for lang in langs {
                         run(self.helper("speakers").arg("--lang").arg(lang), None)?;
@@ -326,6 +352,10 @@ impl Args {
 fn main() -> Result<()> {
     let mut args = Args::parse();
     let stages = args.stages();
+    ensure!(
+        !args.batch_dry_run || matches!(args.stage, Stage::Filter | Stage::Stress),
+        "--batch-dry-run requires filter or stress; it must never run other stages"
+    );
     if args.dry_run {
         for stage in &stages {
             println!("{stage:?}");

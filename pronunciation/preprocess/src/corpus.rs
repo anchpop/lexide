@@ -85,6 +85,23 @@ impl Writer {
         })
     }
 
+    pub fn append(path: &Path) -> Result<Self> {
+        let mut writer = Self::create(path)?;
+        if path.exists() {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut previous = fs::File::open(path)?;
+            if previous.metadata()?.len() > 0 {
+                previous.seek(SeekFrom::End(-1))?;
+                let mut last = [0];
+                previous.read_exact(&mut last)?;
+                anyhow::ensure!(last == [b'\n'], "{} lacks final newline", path.display());
+                previous.rewind()?;
+            }
+            std::io::copy(&mut previous, &mut writer.temp)?;
+        }
+        Ok(writer)
+    }
+
     pub fn row(&mut self, row: &impl Serialize) -> Result<()> {
         serde_json::to_writer(&mut self.temp, row)?;
         writeln!(self.temp)?;

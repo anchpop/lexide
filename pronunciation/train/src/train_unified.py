@@ -35,6 +35,7 @@ from .dataset import (
     make_train_collate,
     LengthBucketedBatchSampler, TokenBudgetBatchSampler, get_audio_lengths,
 )
+from .audit_gate import STRICT_SOURCES, load_coverage, strict_verdict
 from .factorized_ctc import FactorizedCTCModel
 from .joint_ctc import joint_ctc_loss
 from .consistency import consistency_loss, warmup_cosine_multiplier
@@ -186,6 +187,9 @@ def load_asr_audit_exclusions(
                 continue
             rec = json.loads(line)
             if not rec.get("ok", True):
+                continue
+            # Strict sources are gated row by row in load_training_datasets.
+            if (rec.get("source") or path.stem.removesuffix("_asr_exclusions")) in STRICT_SOURCES:
                 continue
             if "per" in rec:
                 if float(rec["per"]) < min_per:
@@ -836,6 +840,7 @@ def load_training_datasets(args, processor):
         for lang, files in partial.items():
             asr_exclusions.setdefault(lang, {}).update(files)
 
+    coverage = load_coverage(audit_paths)
     datasets = []
     for lang_dir in sorted(args.data_dir.iterdir()):
         if args.langs is not None and lang_dir.name not in args.langs:
@@ -854,6 +859,12 @@ def load_training_datasets(args, processor):
             check_narrowed_matches_broad(narrowed, phonemes_file)
             phonemes_file = narrowed
         if phonemes_file.exists():
+            for line in phonemes_file.read_text().splitlines():
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if strict_verdict(record, lang_dir.name, coverage) is False:
+                    asr_exclusions.setdefault(lang_dir.name, {})[record["file"]] = hashlib.sha256(record["sentence"].encode()).hexdigest()
             ds = StressDataset(phonemes_file, processor.tokenizer,
                                max_audio_sec=args.max_audio_sec,
                                min_rms=args.min_rms,
