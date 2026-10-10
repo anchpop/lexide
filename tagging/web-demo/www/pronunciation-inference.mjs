@@ -1,8 +1,7 @@
 // A canceled/failed run discards the worker, including its WASM session.
 export class LocalTranscriber {
-  constructor(createWorker, assets) {
+  constructor(createWorker) {
     this.createWorker = createWorker;
-    this.assets = assets;
     this.worker = null;
     this.reject = null;
   }
@@ -24,7 +23,7 @@ export class LocalTranscriber {
       };
       // Keep the original audio for playback, the spectrogram and Retry.
       const waveform = Float32Array.from(samples);
-      worker.postMessage({ waveform, ...this.assets }, [waveform.buffer]);
+      worker.postMessage({ waveform }, [waveform.buffer]);
     });
   }
 

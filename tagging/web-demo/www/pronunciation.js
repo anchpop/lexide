@@ -3,10 +3,7 @@ import { matrixMetadata, outputJSON } from "./pronunciation-decoder.mjs";
 import { LocalTranscriber } from "./pronunciation-inference.mjs";
 
 const inference = new LocalTranscriber(
-  () => new Worker(new URL("./pronunciation-worker.js", import.meta.url), { type: "module" }),
-  { modelURL: new URL("pronunciation.int8.onnx", document.baseURI).href,
-    metadataURL: new URL("pronunciation-frame-matrix.json", document.baseURI).href },
-);
+  () => new Worker(new URL("./pronunciation-worker.js", import.meta.url), { type: "module" }));
 const SAMPLE_RATE = 16000;
 const MAX_SECONDS = 20;
 const $ = (id) => document.getElementById(id);

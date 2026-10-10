@@ -1,0 +1,53 @@
+name: Deploy web demo
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - tagging/web-demo/**
+      - tagging/lexide/src/pronunciation/**
+      - .github/workflows/web-demo.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: web-demo-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tagging/web-demo
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - run: tagging/web-demo/build.sh
+      # Copy over the published tree rather than replacing it: cached older
+      # HTML still needs its own hashed assets.
+      - name: Publish to gh-pages
+        run: |
+          git fetch --depth 1 origin gh-pages
+          git worktree add pages FETCH_HEAD
+          cp -r tagging/web-demo/www/. pages/
+          rm pages/pkg/.gitignore
+          cd pages
+          git add -A
+          git diff --cached --quiet && exit 0
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "Publish ${GITHUB_SHA::8}"
+          git push origin HEAD:gh-pages
+          # Pushes made with GITHUB_TOKEN don't trigger the branch's Pages build.
+          gh api -X POST "repos/$GITHUB_REPOSITORY/pages/builds"
+        env:
+          GH_TOKEN: ${{ github.token }}

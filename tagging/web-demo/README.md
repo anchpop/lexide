@@ -23,13 +23,13 @@ are about 2.4 GB. See `../OVERVIEW.md`. This page is not a joint-parsley quality
 ## Build & run
 
 ```sh
-./build.sh                        # wasm-pack build + copy segmentation and pronunciation weights
+./build.sh                        # wasm-pack build + copy segmentation weights
 python3 -m http.server -d www     # then open http://localhost:8000
 ```
 
 The segmentation page loads its weights from its own directory, falling back to
-`huggingface.co/anchpop/lexide-parsley/resolve/main/onnx/`. Pronunciation requires
-its local ONNX and metadata files; there is no hosted inference or weight fallback.
+`huggingface.co/anchpop/lexide-parsley/resolve/main/onnx/`. The pronunciation
+model always loads from Hugging Face.
 
 `wasm-pack` comes from the yap flake (`direnv exec /data/coding/yap`); the
 shared demo WASM binary is ~516 KB (separate from ONNX Runtime's WASM).
@@ -42,9 +42,9 @@ is ready or recording stops. Audio stays in the browser. Cancel terminates the
 inference worker, including model loading or an active run; Retry starts a fresh
 worker. Successful runs reuse the loaded session.
 
-The model is `anchpop/lexide-pronunciation-small` run 2, pinned to
-`a5472e4a6d8b3074c84c788e2df4474f91daba67` (24.93M parameters). The module worker
-lazily loads the local int8 ONNX model and `onnxruntime-web@1.30.0` from jsDelivr
+The model is `anchpop/lexide-pronunciation-small` run 2 (`a5472e4a`, 24.93M
+parameters). Its int8 export lives in that repo under `onnx/`, and the worker pins
+the commit that added it (`58bd3171`). The module worker lazily loads that model and `onnxruntime-web@1.30.0` from jsDelivr
 on the first transcription. It uses the single-threaded WASM backend, so static
 Pages needs no cross-origin isolation headers. The browser supplies raw mono
 16 kHz float32 audio, matching the saved processor's `do_normalize=False`.
@@ -54,10 +54,9 @@ mean/variance per clip (`epsilon=1e-5`). JavaScript must not normalize again.
 
 ### Export the pinned model
 
-From the repository root, download that exact revision into
-`pronunciation/.work/onnx-run2/checkpoint` using `huggingface_hub.snapshot_download`
-with `HF_TOKEN` from `.env` if needed (never put credentials in `www/`). The repo
-was public when checked. Then:
+To re-export (e.g. for a new run), download the checkpoint into
+`pronunciation/.work/onnx-run2/checkpoint` with `huggingface_hub.snapshot_download`,
+then from the repository root:
 
 ```sh
 LEXIDE_DATA_VENV=~/.venv-lexide-tests pronunciation/scripts/py-linux.sh \
@@ -65,19 +64,12 @@ LEXIDE_DATA_VENV=~/.venv-lexide-tests pronunciation/scripts/py-linux.sh \
   --output pronunciation/.work/onnx-run2
 ```
 
-Add `--validation-clips <json-list-of-16kHz-mono-wav-paths>` to verify real-clip
-parity. The outside-repo venv needs torch, torchaudio, transformers, soundfile,
-onnx, onnxscript and onnxruntime. `benchmark.json` records dynamic-shape parity,
-artifact sizes and CPU timings. The verified export is 103,699,846 bytes fp32 /
-30,150,565 bytes int8. One-thread native CPU medians (5 trials) were 0.175 / 0.160 s
-for 5 s audio and 0.680 / 0.666 s for 15 s audio (fp32 / int8); these are not
-browser timings. Both exports preserved phone and stress decoding on the French
-Tatoeba smoke-test clip; int8 is not numerically identical to PyTorch.
-
-`build.sh` copies `model.int8.onnx` and `frame_matrix.json` from that ignored
-export directory to ignored `www/pronunciation.int8.onnx` and
-`www/pronunciation-frame-matrix.json`. Missing artifacts produce a build note,
-not a remote fallback. Nothing is uploaded to Hugging Face.
+The venv needs onnx, onnxscript and onnxruntime besides the training stack.
+`benchmark.json` records parity, sizes and CPU timings: int8 is 30 MB and took
+0.16 s for 5 s of audio on one native core. Upload `model.int8.onnx` and
+`frame_matrix.json` to the model repo's `onnx/`, then pin the new commit in
+`www/pronunciation-worker.js`. `tests/run.sh` validates the exported vocabulary
+through the g2p types when that export directory exists.
 
 `www/pronunciation-decoder.mjs` loads the WASM bindings. Local phone log
 probabilities go directly into a float32 constructor with vocabulary/blank
@@ -150,16 +142,11 @@ Microphone access requires HTTPS or localhost and browser permission.
 
 ## GitHub Pages
 
-The published site lives on the `gh-pages` branch. Build with `./build.sh`, then
-copy the **entire contents** of `www/` into the Pages branch before publishing,
-including `demo.css`, `theme.js`, `pronunciation.html`, `pronunciation.js`,
-`pronunciation.css`, `pronunciation-decoder.mjs`, `pronunciation-worker.js`,
-`pronunciation-inference.mjs`, `pronunciation.int8.onnx`,
-`pronunciation-frame-matrix.json`, `audio-explorer.js`, `spectrogram.mjs`,
-`spectrogram-worker.js`, `pkg/`, and the segmentation weights. The ignored model
-files must be copied explicitly; publishing only tracked files is not enough.
-Keep the branch's `.nojekyll` file.
-There is no SPA rewrite or server to configure. Both pages use the shared WASM package; run `build.sh` before serving `www/`.
+`.github/workflows/web-demo.yml` publishes on every push to `main` that touches
+the demo or the shared decoder: it runs `build.sh` and copies `www/` over the
+`gh-pages` branch. Segmentation weights aren't in git, so the copies already on
+`gh-pages` stay. Keep the branch's `.nojekyll` file. There is no SPA rewrite or
+server to configure.
 
 ### Browser asset versions
 
@@ -169,6 +156,6 @@ rewrites module/worker imports to matching hashed dependencies, and updates
 both HTML pages. This prevents new markup from using stale cached JavaScript.
 Run this command before serving locally as well.
 
-When publishing, copy `www/assets/` alongside the HTML and **retain previously
-published hashed assets** on `gh-pages`: cached older HTML still needs its own
+Publishing copies over `gh-pages` instead of replacing it, so previously
+published hashed assets are kept: cached older HTML still needs its own
 matching versions. Source JS/CSS files in `www/` remain the editable originals.

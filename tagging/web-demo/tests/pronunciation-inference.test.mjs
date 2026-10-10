@@ -9,7 +9,7 @@ function fixture() {
       terminate() { this.terminated = true; } };
     workers.push(worker);
     return worker;
-  }, { modelURL: "model.onnx", metadataURL: "metadata.json" });
+  });
   return { runner, workers };
 }
 

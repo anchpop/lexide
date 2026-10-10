@@ -6,7 +6,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-direnv exec /data/coding/yap wasm-pack build --target web --out-dir www/pkg
+# CI installs wasm-pack; locally it comes from the yap flake.
+command -v wasm-pack >/dev/null || exec direnv exec /data/coding/yap "$PWD/build.sh" "$@"
+wasm-pack build --target web --out-dir www/pkg
 
 ONNX=../data/onnx
 for f in char_tokenizer.safetensors sentence_segmenter.safetensors; do
@@ -14,17 +16,6 @@ for f in char_tokenizer.safetensors sentence_segmenter.safetensors; do
         cp "$ONNX/$f" www/
     else
         echo "note: $ONNX/$f not found — the page will fetch it from HF instead" >&2
-    fi
-done
-
-PRONUNCIATION=../../pronunciation/.work/onnx-run2
-for pair in model.int8.onnx:pronunciation.int8.onnx frame_matrix.json:pronunciation-frame-matrix.json; do
-    source=${pair%%:*}
-    target=${pair#*:}
-    if [[ -f "$PRONUNCIATION/$source" ]]; then
-        cp "$PRONUNCIATION/$source" "www/$target"
-    else
-        echo "note: $PRONUNCIATION/$source not found — export run 2 before using pronunciation (no remote fallback)" >&2
     fi
 done
 

@@ -5,19 +5,21 @@ import { decodeHeads } from "./pronunciation-decoder.mjs";
 ort.env.wasm.numThreads = 1;
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/";
 const modelId = "anchpop/lexide-pronunciation-small";
-const revision = "a5472e4a6d8b3074c84c788e2df4474f91daba67";
+// Run 2 (a5472e4a) plus its int8 export under onnx/.
+const revision = "58bd3171a23ec86876dd71ba4c9d9179aab2ce58";
+const base = `https://huggingface.co/${modelId}/resolve/${revision}/onnx`;
 let session;
 let metadata;
 
-self.onmessage = async ({ data: { waveform, modelURL, metadataURL } }) => {
+self.onmessage = async ({ data: { waveform } }) => {
   try {
     if (!session) {
       self.postMessage({ status: "Loading browser model…" });
-      const response = await fetch(metadataURL);
-      if (!response.ok) throw new Error("Local model metadata is missing. Run build.sh first.");
+      const response = await fetch(`${base}/frame_matrix.json`);
+      if (!response.ok) throw new Error(`Could not download the model (${response.status}).`);
       metadata = await response.json();
       if (metadata.sample_rate !== 16000) throw new Error("Invalid model sample rate.");
-      session = await ort.InferenceSession.create(modelURL, { executionProviders: ["wasm"] });
+      session = await ort.InferenceSession.create(`${base}/model.int8.onnx`, { executionProviders: ["wasm"] });
     }
     self.postMessage({ status: "Transcribing locally…" });
     // Scratch training uses do_normalize=False. Waveform and mel normalization
