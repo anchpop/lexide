@@ -165,14 +165,12 @@ function render() {
 
 // The same segmentation, as the runnable Rust it takes (weights are shared, so this
 // assert really passes). JSON string escaping is valid Rust except \uXXXX -> \u{XXXX}.
-const LANG_NAME = {deu:"German", eng:"English", fra:"French", hin:"Hindi", ita:"Italian",
-                   jpn:"Japanese", kor:"Korean", por:"Portuguese", rus:"Russian", spa:"Spanish"};
 function rustStr(s) {
   return JSON.stringify(s).replace(/\\u([0-9a-fA-F]{4})/g, "\\u{$1}");
 }
 function rustSnippet(text, lang, sentSpans, cps) {
   const call = lang
-    ? `parsley.segment_in(${rustStr(text)}, Language::${LANG_NAME[lang]})`
+    ? `parsley.segment_in(${rustStr(text)}, Language::from_code(${rustStr(lang)}).unwrap())`
     : `parsley.segment(${rustStr(text)})`;
   const imports = lang ? "{Language, Segmenter}" : "Segmenter";
   const sentences = sentSpans

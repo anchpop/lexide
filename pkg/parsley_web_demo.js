@@ -102,6 +102,12 @@ if (Symbol.dispose) Parsley.prototype[Symbol.dispose] = Parsley.prototype.free;
  * Own the unpacked matrix in WASM rather than round-tripping float arrays through JS.
  */
 export class PronunciationMatrix {
+    static __wrap(ptr) {
+        const obj = Object.create(PronunciationMatrix.prototype);
+        obj.__wbg_ptr = ptr;
+        PronunciationMatrixFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -136,6 +142,25 @@ export class PronunciationMatrix {
         } finally {
             wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
         }
+    }
+    /**
+     * Local ONNX phone head: row-major float32 joint log probabilities.
+     * @param {Float32Array} values
+     * @param {number} frames
+     * @param {string} vocab
+     * @param {number} blank_id
+     * @returns {PronunciationMatrix}
+     */
+    static from_log_probs(values, frames, vocab, blank_id) {
+        const ptr0 = passArrayF32ToWasm0(values, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(vocab, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.pronunciationmatrix_from_log_probs(ptr0, len0, frames, ptr1, len1, blank_id);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return PronunciationMatrix.__wrap(ret[0]);
     }
     /**
      * @param {string} payload
@@ -186,6 +211,14 @@ const PronunciationMatrixFinalization = (typeof FinalizationRegistry === 'undefi
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_pronunciationmatrix_free(ptr, 1));
 
+let cachedFloat32ArrayMemory0 = null;
+function getFloat32ArrayMemory0() {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32ArrayMemory0;
+}
+
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
 }
@@ -205,6 +238,13 @@ function isLikeNone(x) {
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
@@ -286,6 +326,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedFloat32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

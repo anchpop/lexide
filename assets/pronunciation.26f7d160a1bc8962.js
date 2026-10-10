@@ -1,9 +1,9 @@
-import { AudioExplorer } from "./audio-explorer.js";
-import { matrixMetadata, outputJSON } from "./pronunciation-decoder.mjs";
-import { LocalTranscriber } from "./pronunciation-inference.mjs";
+import { AudioExplorer } from "./audio-explorer.6a3a3e9ffe259e31.js";
+import { matrixMetadata, outputJSON } from "./pronunciation-decoder.2c63f52165fa993c.mjs";
+import { LocalTranscriber } from "./pronunciation-inference.c9534c45757439ef.mjs";
 
 const inference = new LocalTranscriber(
-  () => new Worker(new URL("./pronunciation-worker.js", import.meta.url), { type: "module" }));
+  () => new Worker(new URL("./pronunciation-worker.a8b92e755f17760f.js", import.meta.url), { type: "module" }));
 const SAMPLE_RATE = 16000;
 const MAX_SECONDS = 20;
 const $ = (id) => document.getElementById(id);

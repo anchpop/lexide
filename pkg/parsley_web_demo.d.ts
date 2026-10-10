@@ -38,6 +38,10 @@ export class PronunciationMatrix {
      * Stress stays on its original frame; only phone IDs determine CTC runs.
      */
     decode(frames: string): string;
+    /**
+     * Local ONNX phone head: row-major float32 joint log probabilities.
+     */
+    static from_log_probs(values: Float32Array, frames: number, vocab: string, blank_id: number): PronunciationMatrix;
     constructor(payload: string);
 }
 
@@ -53,6 +57,7 @@ export interface InitOutput {
     readonly parsley_sentence_spans: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly parsley_token_spans: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly pronunciationmatrix_decode: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pronunciationmatrix_from_log_probs: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly pronunciationmatrix_new: (a: number, b: number) => [number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
