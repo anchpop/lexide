@@ -32,7 +32,8 @@ from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec
 
 from .dataset import (
     StressDataset, collate_fn_augment,
-    make_train_collate,
+    make_train_collate, augmented_audio_lengths,
+    PlannedPaddingBatchSampler, PlannedPaddingDataset,
     LengthBucketedBatchSampler, TokenBudgetBatchSampler, get_audio_lengths,
 )
 from .audit_gate import STRICT_SOURCES, load_coverage, strict_verdict
@@ -982,6 +983,9 @@ def main():
                              "'bigger head' on top of the 2B encoder.")
     parser.add_argument("--speed-perturb", action=argparse.BooleanOptionalAction,
                         default=True, help="Resample training audio to vary pitch and tempo.")
+    parser.add_argument("--random-padding", action=argparse.BooleanOptionalAction,
+                        default=False, help="Sampler-planned independent 0–1s squared-uniform margins")
+    parser.add_argument("--padding-prob", type=float, default=0.3)
     parser.add_argument("--speed-perturb-prob", type=float, default=0.6)
     parser.add_argument("--speed-min", type=float, default=0.85)
     parser.add_argument("--speed-max", type=float, default=1.3)
@@ -1180,6 +1184,8 @@ def main():
     if args.lr_total_steps is not None and (args.lr_warmup_steps is None or
             args.lr_total_steps <= args.lr_warmup_steps):
         parser.error("--lr-total-steps requires warmup and must exceed warmup steps")
+    if not 0 <= args.padding_prob <= 1:
+        parser.error("--padding-prob must be between 0 and 1")
     if not 0 <= args.speed_perturb_prob <= 1:
         parser.error("--speed-perturb-prob must be between 0 and 1")
     if not 0 < args.speed_min <= args.speed_max < float("inf"):
@@ -1424,24 +1430,27 @@ def main():
     train_lengths = get_audio_lengths(train_ds)
     print(f"Audio length stats: min={min(train_lengths)}, max={max(train_lengths)}, "
           f"median={sorted(train_lengths)[len(train_lengths)//2]}")
-    if args.max_batch_audio_sec is not None:
-        # Constant padded-audio budget per step instead of a constant clip
-        # count, so short clips (the bulk of the corpus) ride in far bigger
-        # batches and actually fill the GPU. Budget is padded seconds:
-        # max_clip_len * batch_size. The fixed-16 recipe averages ~43s.
-        budget_scale = min(args.speed_min, 1.0) if args.speed_perturb else 1.0
-        if budget_scale < 1:
-            print(f"Token budget scaled by {budget_scale:g} for maximum speed slowdown")
-        train_batch_sampler = TokenBudgetBatchSampler(
-            train_lengths,
-            token_budget=int(args.max_batch_audio_sec * 16000 * budget_scale),
-            max_batch_size=args.max_batch_size,
-            bucket_size=args.batch_size * 100,
-            seed=42,
-        )
+    if args.max_batch_audio_sec is not None or args.random_padding:
+        # Draw padding before grouping clips, so the token budget pays only
+        # for margins this epoch actually uses. Slowdown remains bounded.
+        speed_min = args.speed_min if args.speed_perturb and args.speed_perturb_prob > 0 else 1.0
+        budget = int(args.max_batch_audio_sec * 16000) if args.max_batch_audio_sec is not None else float('inf')
+        cap = args.max_batch_size if args.max_batch_audio_sec is not None else args.batch_size
+        sampler_args = dict(token_budget=budget, max_batch_size=cap,
+                            bucket_size=args.batch_size * 100, seed=42)
+        if args.random_padding:
+            train_batch_sampler = PlannedPaddingBatchSampler(
+                train_lengths, padding_prob=args.padding_prob, speed_min=speed_min,
+                pad_audio_multiple=args.pad_audio_multiple, **sampler_args)
+            train_ds = PlannedPaddingDataset(train_ds)
+        else:
+            train_batch_sampler = TokenBudgetBatchSampler(
+                augmented_audio_lengths(train_lengths, speed_min=speed_min,
+                                        pad_audio_multiple=args.pad_audio_multiple), **sampler_args)
         st = train_batch_sampler.stats()
-        print(f"Token-budget batching ON ({args.max_batch_audio_sec * budget_scale:.0f}s padded "
-              f"audio/step, cap {args.max_batch_size} clips): "
+        budget_label = f'{args.max_batch_audio_sec:g}s' if args.max_batch_audio_sec is not None else 'fixed clip count'
+        print(f"Token-budget batching ON ({budget_label} padded "
+              f"audio/step, cap {cap} clips): "
               f"{st['n_batches']:,} batches/epoch, "
               f"size min/mean/max {st['batch_size_min']}/"
               f"{st['batch_size_mean']:.1f}/{st['batch_size_max']}, "

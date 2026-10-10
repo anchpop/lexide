@@ -3,21 +3,26 @@ import hashlib
 import json
 from pathlib import Path
 
-STRICT_SOURCES = frozenset({"mls", "cv", "aishell1", "aishell3"})
+STRICT_SOURCES = frozenset({"mls", "cv", "aishell1", "aishell3", "tts_word"})
 
 
 def load_coverage(paths):
+    """Stream only admission metadata; do not retain large Whisper payloads."""
+    fields = ("ok", "expected_sha256", "g2p_language", "g2p_identity",
+              "g2p_selection", "phone_match", "phone_match_version")
     coverage = {}
     for path in paths:
         if not Path(path).exists():
             continue
-        for line in Path(path).read_text().splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            source = row.get("source") or Path(path).stem.removesuffix("_asr_exclusions")
-            if source in STRICT_SOURCES:
-                coverage[(source, row["lang"], row["file"])] = row
+        with Path(path).open() as source_file:
+            for line in source_file:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                source = row.get("source") or Path(path).stem.removesuffix("_asr_exclusions")
+                if source in STRICT_SOURCES:
+                    coverage[(source, row["lang"], row["file"])] = {
+                        key: row.get(key) for key in fields}
     return coverage
 
 

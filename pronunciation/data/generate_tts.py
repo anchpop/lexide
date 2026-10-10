@@ -53,8 +53,8 @@ LANG_CONFIG = {
     "kor": "ko-KR",
     # Ride-along languages: no tagging corpus, so load_sentences falls back to
     # data/tts_sentences/<lang>.jsonl (build_tts_sentences.py, Tatoeba text).
-    # fas is absent deliberately: neither Google Cloud TTS nor Gemini TTS
-    # supports Persian (ar-XA lists 30 Chirp3-HD voices, fa-IR lists zero).
+    # fas has no Cloud voice. Word plans use the separately verified
+    # Gemini 3.8 Flash-Lite Persian backend; never substitute an Arabic voice.
     "ara": "ar-XA",
     "ces": "cs-CZ",
     "dan": "da-DK",
@@ -278,18 +278,19 @@ def synthesize_one_gemini(api_key, sentence, voice, lang, model, style, out_dir)
     }, audio_tokens
 
 
-def synthesize_one(client, sentence, voice_name, language_code, audio_config, out_dir, lang):
+def synthesize_one(client, sentence, voice_name, language_code, audio_config, out_dir, lang,
+                   *, file=None, source="tts", attempts=5):
     """Synthesize a single sentence. Returns (hash, record) or None on error."""
     from google.cloud import texttospeech
 
-    h = cloud_clip_hash(sentence, language_code, lang)
+    h = Path(file).stem if file else cloud_clip_hash(sentence, language_code, lang)
     voice_params = texttospeech.VoiceSelectionParams(
         language_code=language_code,
         name=voice_name,
     )
     synthesis_input = texttospeech.SynthesisInput(text=sentence)
 
-    for attempt in range(5):
+    for attempt in range(attempts):
         try:
             response = client.synthesize_speech(
                 input=synthesis_input,
@@ -299,14 +300,15 @@ def synthesize_one(client, sentence, voice_name, language_code, audio_config, ou
                 # blip at startup once stranded all 10 workers indefinitely
                 # (2026-09-08, zero clips in 80 minutes, every thread parked).
                 timeout=60,
+                **({"retry": None} if attempts == 1 else {}),
             )
             break
         except Exception as e:
             retryable = "429" in str(e) or "Deadline" in type(e).__name__
-            if retryable and attempt < 4:
+            if retryable and attempt < attempts - 1:
                 time.sleep(2 ** attempt)
                 continue
-            print(f"Error synthesizing '{sentence[:60]}...': {e}")
+            print(f"Error synthesizing '{sentence[:60]}...': {e}", flush=True)
             return None
 
     wav_path = out_dir / f"{h}.wav"
@@ -319,7 +321,7 @@ def synthesize_one(client, sentence, voice_name, language_code, audio_config, ou
     return {
         "file": f"{h}.wav",
         "sentence": sentence,
-        "source": "tts",
+        "source": source,
         "voice": voice_name,
         **({"espeak_voice": CLOUD_ESPEAK_VOICES[language_code]}
            if language_code in CLOUD_ESPEAK_VOICES else {}),
@@ -588,7 +590,13 @@ def main():
     parser.add_argument("--gemini-price-per-mtok", type=float, default=20.0,
                         help="$ per 1M output audio tokens, for the cost readout only "
                              "(list price as of 2026-08; audio bills at ~25 tok/s)")
+    parser.add_argument("--word-plan", type=Path,
+                        help="Execute a frozen tts_words plan with its hard $20 ledger")
     args = parser.parse_args()
+    if args.word_plan:
+        from tts_words import execute
+        execute(args.word_plan, args.output, args.workers, args.rps)
+        return
     if args.backend != "chirp3" and (args.language_code or args.voice_filter != "Chirp3-HD"
                                      or args.sentence_filter):
         parser.error("--language-code, --voice-filter and --sentence-filter require --backend chirp3")

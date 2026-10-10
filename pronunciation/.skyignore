@@ -9,6 +9,8 @@ G2PWModel
 **/.cache
 *.tar
 .sky-venv
+# Rust build output (~14G); the cluster never runs the preprocessor.
+preprocess/target
 # Local scratch: Pimsleur download artifacts (8.6G), a Linux-local venv (1.1G)
 # and a pip cache (239M). `*.tar` above already kept the 35G dataset tarball out
 # of the workdir, which made .work look handled — it wasn't, and sky measured a

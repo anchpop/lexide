@@ -27,7 +27,7 @@ pub enum Backend {
 #[derive(Args)]
 pub struct Options {
     /// Manifest sources to audit (defaults match the former upload script).
-    #[arg(long, num_args = 1.., default_values = ["fleurs", "tatoeba"], value_parser = ["fleurs", "tatoeba", "tts", "kathbath", "mls", "cv", "aishell1", "aishell3"])]
+    #[arg(long, num_args = 1.., default_values = ["fleurs", "tatoeba"], value_parser = ["fleurs", "tatoeba", "tts", "tts_word", "kathbath", "mls", "cv", "aishell1", "aishell3"])]
     pub sources: Vec<String>,
     /// ASR provider. Groq remains the default to preserve existing requests/caches.
     #[arg(long, value_enum, default_value = "groq")]
@@ -142,7 +142,7 @@ fn distance<T: PartialEq>(a: &[T], b: &[T]) -> f64 {
 fn strict_source(row: &Value) -> bool {
     matches!(
         row["source"].as_str(),
-        Some("mls" | "cv" | "aishell1" | "aishell3")
+        Some("mls" | "cv" | "aishell1" | "aishell3" | "tts_word")
     )
 }
 
@@ -587,6 +587,11 @@ mod tests {
         let args = crate::Args::try_parse_from(["lexide-preprocess", "audit", "--sources", "mls"])
             .unwrap();
         assert_eq!(args.audit.sources, ["mls"]);
+        let word =
+            crate::Args::try_parse_from(["lexide-preprocess", "audit", "--sources", "tts_word"])
+                .unwrap();
+        assert_eq!(word.audit.sources, ["tts_word"]);
+        assert!(strict_source(&json!({"source":"tts_word"})));
         let defaults = crate::Args::try_parse_from(["lexide-preprocess", "audit"]).unwrap();
         assert_eq!(defaults.audit.sources, ["fleurs", "tatoeba"]);
     }

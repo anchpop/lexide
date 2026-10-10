@@ -389,7 +389,22 @@ def newest_mtime(data_dir: Path) -> float:
     return newest
 
 
-def build_dataset_tar(data_dir: Path, output: Path = DATASET_TAR) -> Path:
+def strict_pack_exclusions(data_dir: Path, audit_paths) -> list[str]:
+    """Omit only current strict rejects; keep their manifests/labels intact."""
+    coverage = load_coverage(audit_paths)
+    excluded = []
+    for manifest in sorted(data_dir.glob("*/manifest.jsonl")):
+        lang = manifest.parent.name
+        with manifest.open() as source:
+            for line in source:
+                row = json.loads(line)
+                if strict_verdict(row, lang, coverage) is False:
+                    excluded.append(f"./{lang}/{row['file']}")
+    return excluded
+
+
+def build_dataset_tar(data_dir: Path, output: Path = DATASET_TAR,
+                      train_dir: Path = REPO_ROOT / "train") -> Path:
     """Pack data/audio into the one tarball the training launchers stage.
 
     Half a million loose wavs defeat every transport we've tried: rsync crawls,
@@ -398,15 +413,23 @@ def build_dataset_tar(data_dir: Path, output: Path = DATASET_TAR) -> Path:
     as a single file — sky's file_mounts rsyncs it to the node, the run: block
     untars it into ~/data, and the loader still opens loose wavs from there.
 
-    Always packs the WHOLE data_dir, even under --langs: training reads every
-    language, so a tar of one language would be a footgun.
+    Packs every language, even under --langs. Confirmed strict-source rejects
+    lose only their audio payloads; manifests and labels remain unchanged, and
+    the trainer applies the same strict gate before attempting to open audio.
 
     Writes to a .partial path and renames, so an interrupted run leaves the
     previous good tar in place rather than a truncated one a launcher would
     cheerfully upload.
     """
+    import tempfile
+
     output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists() and output.stat().st_mtime >= newest_mtime(data_dir):
+    audit_paths = [train_dir / f"{source}_asr_exclusions.jsonl" for source in sorted(STRICT_SOURCES)]
+    excluded = strict_pack_exclusions(data_dir, audit_paths)
+    # Audit verdict changes and changes to packing policy invalidate old packs.
+    policy_inputs = [Path(__file__), REPO_ROOT / "train/src/audit_gate.py", *audit_paths]
+    if output.exists() and output.stat().st_mtime >= max(
+            [newest_mtime(data_dir)] + [p.stat().st_mtime for p in policy_inputs if p.exists()]):
         size_gb = output.stat().st_size / 1e9
         print(f"staging tar up to date: {output} ({size_gb:.1f} GB)")
         return output
@@ -415,11 +438,15 @@ def build_dataset_tar(data_dir: Path, output: Path = DATASET_TAR) -> Path:
     # `*.tar` — a leftover partial must never ride along in the workdir upload.
     tmp = output.with_name(output.stem + ".partial.tar")
     tmp.unlink(missing_ok=True)
-    print(f"packing {data_dir} -> {output} ...")
-    subprocess.run(
-        ["tar", "-cf", str(tmp), "-C", str(data_dir), "--exclude=.cache", "."],
-        check=True,
-    )
+    print(f"packing {data_dir} -> {output}; omitting {len(excluded):,} strict-rejected audio files ...")
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent) as exclusions:
+        exclusions.writelines(path + "\n" for path in excluded)
+        exclusions.flush()
+        subprocess.run(
+            ["tar", "-cf", str(tmp), "-C", str(data_dir), "--exclude=.cache",
+             "--exclude-from", exclusions.name, "."],
+            check=True,
+        )
     tmp.replace(output)
     size_gb = output.stat().st_size / 1e9
     print(f"wrote staging tar: {output} ({size_gb:.1f} GB)")
@@ -451,7 +478,7 @@ def load_training_exclusions(train_dir: Path) -> dict[str, dict[str, str]]:
     """
     exclusions: dict[str, dict[str, str]] = {}
     for name in (
-        "fleurs_asr_exclusions", "tatoeba_asr_exclusions", "tts_asr_exclusions", "mls_asr_exclusions",
+        "fleurs_asr_exclusions", "tatoeba_asr_exclusions", "tts_asr_exclusions", "tts_word_asr_exclusions", "mls_asr_exclusions",
         "cv_asr_exclusions", "aishell1_asr_exclusions", "aishell3_asr_exclusions",
         "lang_exclusions", "mixed_script_exclusions", "boilerplate_exclusions",
     ):
@@ -659,11 +686,12 @@ def finalize(data_dir: Path, lang: str, labels_path: Path, build_identity: str, 
         if acoustic_reason is not None:
             entry.pop("pitch_accent", None)
             entry["pitch_accent_exclude_reason"] = acoustic_reason
-        # Propagate Whisper signal fields from the manifest. Only
-        # present for Pimsleur (extracted with download_pimsleur.py).
-        # FLEURS / Tatoeba rows lack these and pass them through as None.
+        # Keep acquisition signals and dialect-certification provenance with
+        # the canonical labels (including variety-invariant Spanish clips).
         for k in ("whisper_avg_logprob", "whisper_no_speech_prob",
-                 "whisper_compression_ratio", "duration_sec"):
+                 "whisper_compression_ratio", "duration_sec", "variety",
+                 "variety_invariant", "variety_invariant_g2p_identity",
+                 "dialect_evidence_sha256"):
             if k in rec:
                 entry[k] = rec[k]
         entries.append(entry)
@@ -750,7 +778,7 @@ def main():
     elif args.stage == "exclusions":
         refresh_mixed_script_exclusions(args.data_dir, args.output)
     else:
-        build_dataset_tar(args.data_dir, args.output)
+        build_dataset_tar(args.data_dir, args.output, train_dir=args.train_dir)
 
 
 if __name__ == "__main__":

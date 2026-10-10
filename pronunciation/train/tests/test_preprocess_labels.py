@@ -19,6 +19,33 @@ def test_vocabulary_check_does_not_rewrite_pronunciation():
     assert phones == ["ə", "ɪ", "hʲ", "."]
 
 
+def test_variety_invariant_provenance_survives_finalization(tmp_path):
+    directory = tmp_path / 'spa'
+    directory.mkdir()
+    row = {'file': 'safe.wav', 'sentence': 'hola', 'source': 'mls',
+           'variety': 'european', 'variety_invariant': True,
+           'variety_invariant_g2p_identity': 'test-build',
+           'dialect_evidence_sha256': 'speaker-evidence'}
+    exchange = tmp_path / 'labels.jsonl'
+    exchange.write_text(json.dumps({'record': row, 'language': 'spa',
+        'labels': {'phonemes': ['o', 'l', 'a'], 'stress': [1, 0, 0],
+                   'word_spans': [[0, 3]]}}) + '\n')
+    preprocess.finalize(tmp_path, 'spa', exchange, 'test-build')
+    label = json.loads((directory / 'phonemes.jsonl').read_text())
+    for field in ('variety', 'variety_invariant', 'variety_invariant_g2p_identity',
+                  'dialect_evidence_sha256'):
+        assert label[field] == row[field]
+    coverage = {('mls', 'spa', 'safe.wav'): {
+        'ok': True, 'phone_match': True, 'phone_match_version': 1,
+        'expected_sha256': preprocess.hashlib.sha256(b'hola').hexdigest(),
+        'g2p_language': 'spa', 'g2p_identity': 'test-build',
+        'g2p_selection': {'g2p_language': None, 'variety': 'european', 'espeak_voice': None}}}
+    assert preprocess.strict_verdict(row, 'spa', coverage)
+    assert preprocess.strict_verdict(label, 'spa', coverage)
+    with pytest.raises(ValueError, match='stale'):
+        preprocess.strict_verdict({**row, 'variety': 'latin_american'}, 'spa', coverage)
+
+
 @pytest.mark.parametrize("valid", [True, False])
 def test_preprocess_records_language_only_with_valid_labels(tmp_path, valid):
     lang_dir = tmp_path / "spa"

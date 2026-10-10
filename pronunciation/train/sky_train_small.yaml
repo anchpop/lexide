@@ -6,16 +6,18 @@
 # 18 h timeout stopped it after epoch 28 for ~$38. Validation loss had already
 # flattened by epoch 25. French minimal pairs: 67.6% pass / 10.6% PER, against
 # the 2B's 70.8% / 8.5%.
+#
+# Second run (2026-10-09, ~805 h: run 1's data plus ASR-gated MLS, AISHELL-1/3
+# and single-word TTS; padding augmentation): ~80 min/epoch, 8 epochs for ~$27.
+# 73.7% pass / 8.0% PER, nasal clips 62% — ahead of both run 1 and the 2B.
+# Most of the gain came late in the cosine decay; 17 h would fit ~11 epochs.
 resources:
   cloud: lambda
-  disk_size: 200
-  # Lambda's single GH200s are often all taken; any of these fits a 25M model.
-  ordered:
-    - accelerators: GH200:1
-    - accelerators: A100:1
-    - accelerators: H100:1
+  disk_size: 600
+  # Pin the costed device; do not silently fall back to a different hourly rate.
+  accelerators: A100:1
   autostop:
-    idle_minutes: 20
+    idle_minutes: 5
     down: true
 
 workdir: .
@@ -58,13 +60,16 @@ run: |
   # fragile knob: on a 2 h eng+spa smoke set, 5e-4 never left the all-blank
   # plateau even without augmentation, while 3e-4 learned with or without it.
   # Whole-backbone torch.compile did not finish warmup locally; leave it off.
-  timeout --signal=TERM 18h bash train/train.sh \
+  # At $1.99/h, 17h training leaves just over two hours of the $38 budget
+  # for staging/setup and shutdown; the launch operator watches that phase.
+  timeout --signal=TERM --kill-after=120s 17h bash train/train.sh \
     --model-name scratch \
     --scratch-dim 256 --scratch-layers 16 --scratch-heads 4 \
     --scratch-ff 1024 --scratch-kernel 31 \
-    --epochs 40 --backbone-lr 0.0003 --head-lr 0.0003 \
+    --epochs 8 --backbone-lr 0.0003 --head-lr 0.0003 \
     --lr-warmup-steps 4000 --cr-ctc-weight 0.2 \
     --stress-warmup-steps 4000 \
+    --random-padding --padding-prob 0.3 --no-use-narrowed \
     --max-batch-audio-sec 200 --max-batch-size 128 \
     --loss-reference-batch 64 --batch-size 32 --num-workers 24 \
     --grad-clip-norm 5 --bf16 --fused-optimizer \

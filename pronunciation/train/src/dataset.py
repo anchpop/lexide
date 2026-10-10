@@ -360,6 +360,35 @@ def make_train_collate(degrade_prob: float | None = None, keep_clean: bool = Fal
                    speed_min=speed_min, speed_max=speed_max)
 
 
+class PlannedPaddingDataset(Dataset):
+    """Route sampler-owned padding through nested Subset/ConcatDataset indices."""
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index_and_padding):
+        index, padding = index_and_padding
+        return {**self.dataset[index], 'padding_frames': padding}
+
+
+def augmented_audio_lengths(lengths, *, speed_min=1.0, padding_frames=None,
+                            pad_audio_multiple=None):
+    """Speed bounds plus supplied padding draws (legacy bounds when absent)."""
+    import math
+
+    rate = min(100, math.ceil(speed_min * 100))
+    if padding_frames is None:
+        frames = round(0.2 * 16000 / VAD_FRAME_SAMPLES) + round(0.5 * 16000 / VAD_FRAME_SAMPLES)
+        padding_frames = [(0, frames)] * len(lengths)
+    assert len(lengths) == len(padding_frames)
+    multiple = pad_audio_multiple or 1
+    return [((math.ceil(n * 100 / rate) + sum(padding) * VAD_FRAME_SAMPLES
+              + multiple - 1) // multiple) * multiple for n, padding in zip(lengths, padding_frames)]
+
+
 def _match_vad_length(vad: torch.Tensor, target_len: int) -> torch.Tensor:
     """Trim/pad VAD to the number of complete 16 ms frames in the audio."""
     if vad.shape[0] > target_len:
@@ -602,14 +631,19 @@ def _collate(batch, *, augment: bool, degrade_prob: float | None = None,
                         )[0, 0]
             # Quantize synthetic silence to VAD frames so the precomputed VAD
             # grid remains aligned after prepending silence.
-            head_frames = random.randint(
-                round(0.1 * sr / VAD_FRAME_SAMPLES),
-                round(0.2 * sr / VAD_FRAME_SAMPLES),
-            )
-            tail_frames = random.randint(
-                round(0.3 * sr / VAD_FRAME_SAMPLES),
-                round(0.5 * sr / VAD_FRAME_SAMPLES),
-            )
+            if 'padding_frames' in item:
+                # The sampler has already drawn and budgeted these margins.
+                # Never redraw in workers: doing so invalidates the budget.
+                head_frames, tail_frames = item['padding_frames']
+            else:
+                head_frames = random.randint(
+                    round(0.1 * sr / VAD_FRAME_SAMPLES),
+                    round(0.2 * sr / VAD_FRAME_SAMPLES),
+                )
+                tail_frames = random.randint(
+                    round(0.3 * sr / VAD_FRAME_SAMPLES),
+                    round(0.5 * sr / VAD_FRAME_SAMPLES),
+                )
             head = head_frames * VAD_FRAME_SAMPLES
             tail = tail_frames * VAD_FRAME_SAMPLES
             audio = torch.cat([torch.zeros(head), audio, torch.zeros(tail)])
@@ -906,6 +940,7 @@ class TokenBudgetBatchSampler(Sampler):
             "batch_size_max": max(sizes, default=0),
             "padding_waste": 1.0 - useful / max(padded, 1),
             "over_budget_batches": over,
+            "padded_audio_samples": padded,
         }
 
     def __iter__(self):
@@ -913,3 +948,39 @@ class TokenBudgetBatchSampler(Sampler):
 
     def __len__(self):
         return len(self._batches)
+
+
+class PlannedPaddingBatchSampler(TokenBudgetBatchSampler):
+    """Draw padding once per epoch, then batch its actual cost, not its maximum.
+
+    A disabled padding draw has no legacy margins. Unbounded token_budget with
+    max_batch_size also supports the trainer's fixed-clip-count mode.
+    """
+
+    def __init__(self, lengths, token_budget, *, padding_prob=0.3, speed_min=1.0,
+                 pad_audio_multiple=None, **kwargs):
+        if not 0 <= padding_prob <= 1:
+            raise ValueError('padding_prob must be between 0 and 1')
+        self.raw_lengths = list(lengths)
+        self.padding_prob = padding_prob
+        self.speed_min = speed_min
+        self.pad_audio_multiple = pad_audio_multiple
+        super().__init__(lengths, token_budget, **kwargs)
+
+    def _build(self):
+        rng = random.Random(self.seed + self.epoch)
+        self.padding_frames = [
+            (int(rng.random() ** 2 * 16000 / VAD_FRAME_SAMPLES),
+             int(rng.random() ** 2 * 16000 / VAD_FRAME_SAMPLES))
+            if rng.random() < self.padding_prob else (0, 0)
+            for _ in self.raw_lengths
+        ]
+        self.lengths = augmented_audio_lengths(
+            self.raw_lengths, speed_min=self.speed_min,
+            padding_frames=self.padding_frames, pad_audio_multiple=self.pad_audio_multiple)
+        self._sorted = sorted(range(len(self.lengths)), key=self.lengths.__getitem__)
+        return super()._build()
+
+    def __iter__(self):
+        for batch in self._batches:
+            yield [(index, self.padding_frames[index]) for index in batch]
