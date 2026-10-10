@@ -149,6 +149,31 @@ impl PronunciationMatrix {
         })
     }
 
+    /// Local ONNX phone head: row-major float32 joint log probabilities.
+    pub fn from_log_probs(
+        values: Vec<f32>,
+        frames: usize,
+        vocab: &str,
+        blank_id: usize,
+    ) -> Result<PronunciationMatrix, JsError> {
+        let build = || -> anyhow::Result<_> {
+            let vocab: Vec<String> = serde_json::from_str(vocab)?;
+            anyhow::ensure!(
+                (1..=2000).contains(&frames) && (2..=4096).contains(&vocab.len()),
+                "matrix dimensions exceed demo limits"
+            );
+            for token in &vocab {
+                if pronunciation::is_phone_token(token) {
+                    token.parse::<pronunciation::Phoneme>()?;
+                }
+            }
+            Ok(Self {
+                matrix: pronunciation::FrameMatrix::from_log_probs(values, frames, vocab, blank_id)?,
+            })
+        };
+        build().map_err(js_err)
+    }
+
     /// Stress stays on its original frame; only phone IDs determine CTC runs.
     pub fn decode(&self, frames: &str) -> Result<String, JsError> {
         self.decode_ui(frames).map_err(js_err)

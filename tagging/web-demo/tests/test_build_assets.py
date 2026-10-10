@@ -30,6 +30,15 @@ class AssetBuildTests(unittest.TestCase):
             decoder = (root / "assets" / updated["pronunciation-decoder.mjs"]).read_text()
             self.assertIn('import("../pkg/parsley_web_demo.js")', decoder)
             self.assertNotIn("node-pkg", decoder)
+            with (root / 'pronunciation-decoder.mjs').open('a') as source:
+                source.write('\n// Updated shared decoder bindings\n')
+            local = assets.build(root)
+            for name in ('pronunciation-decoder.mjs', 'pronunciation-worker.js', 'pronunciation.js'):
+                self.assertNotEqual(updated[name], local[name])
+            self.assertIn(local['pronunciation-worker.js'], (root / 'assets' / local['pronunciation.js']).read_text())
+            worker = (root / 'assets' / local['pronunciation-worker.js']).read_text()
+            self.assertIn(local['pronunciation-decoder.mjs'], worker)
+            self.assertIn('onnxruntime-web@1.30.0/dist/ort.wasm.min.mjs', worker)
 
 
 if __name__ == '__main__':

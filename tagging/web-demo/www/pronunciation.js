@@ -1,8 +1,12 @@
 import { AudioExplorer } from "./audio-explorer.js";
-import { unpackMatrix, decodePath, matrixMetadata } from "./pronunciation-decoder.mjs";
+import { matrixMetadata, outputJSON } from "./pronunciation-decoder.mjs";
+import { LocalTranscriber } from "./pronunciation-inference.mjs";
 
-// Existing production Lexide model, also used by Yap. No credentials in the page.
-const ENDPOINT = "https://anchpop--wav2vec2-phoneme-wav2vec2phoneme-predict.modal.run";
+const inference = new LocalTranscriber(
+  () => new Worker(new URL("./pronunciation-worker.js", import.meta.url), { type: "module" }),
+  { modelURL: new URL("pronunciation.int8.onnx", document.baseURI).href,
+    metadataURL: new URL("pronunciation-frame-matrix.json", document.baseURI).href },
+);
 const SAMPLE_RATE = 16000;
 const MAX_SECONDS = 20;
 const $ = (id) => document.getElementById(id);
@@ -250,7 +254,7 @@ function renderResult(result, output) {
   $("copy-ipa").disabled = !result.phones.length;
   $("frame-cursor").max = result.path.length - 1;
   $("frame-cursor").value = 0;
-  $("model-version").textContent = `Production model · ${output.deploy_marker || "version not reported"} · ${result.path.length} frames`;
+  $("model-version").textContent = `Browser model · run 2 / ${output.model_revision.slice(0, 7)} · ${result.path.length} frames`;
   $("result").hidden = false;
   $("drop-zone").classList.add("has-result");
   paintFrames();
@@ -336,10 +340,10 @@ $("playback").addEventListener("timeupdate", () => {
 window.addEventListener("resize", paintFrames);
 $("download-frames").onclick = () => {
   if (!modelOutput) return;
-  const url = URL.createObjectURL(new Blob([JSON.stringify({
+  const url = URL.createObjectURL(new Blob([outputJSON({
     ...modelOutput,
     demo_metadata: { sample_rate: SAMPLE_RATE, frame_stride_seconds: frameSeconds,
-      decoder: "nonblank-first CTC over float16 phoneme matrix", phones: decoded.phones },
+      decoder: "nonblank-first CTC over float32 phone log probabilities", ...decoded },
   })], { type: "application/json" }));
   const link = document.createElement("a");
   link.href = url;
@@ -352,50 +356,31 @@ async function transcribe() {
   if (!samples || request) return;
   canRetry = false;
   clearResult();
-  request = new AbortController();
+  request = true;
   controls();
   const start = performance.now();
-  let timedOut = false;
-  const timeout = setTimeout(() => { timedOut = true; request?.abort(); }, 180000);
-  $("status").textContent = "Transcribing… The model may need a minute to wake up.";
+  $("status").textContent = "Loading browser model…";
   try {
-    const response = await fetch(ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ audio: samples, sample_rate: SAMPLE_RATE, top_k: 3, return_frames: true, return_frame_matrix: true }),
-      signal: request.signal,
-    });
-    if (!response.ok) throw new Error(`The model returned an error (${response.status}). Please try again shortly.`);
-    const data = await response.json();
-    const matrix = await unpackMatrix(data.frame_matrix);
-    let result;
-    try { result = decodePath(matrix, data.frames); }
-    finally { matrix.free(); }
-    if (request.signal.aborted) throw new DOMException("Aborted", "AbortError");
-    renderResult(result, data);
+    const { result, output } = await inference.run(samples, status => { $("status").textContent = status; });
+    renderResult(result, output);
     $("status").textContent = result.phones.length
       ? `${result.phones.length} phonemes recognized.`
       : "No phonemes detected. Try a clip with clearer speech.";
     $("timing").textContent = `${((performance.now() - start) / 1000).toFixed(1)}s`;
   } catch (error) {
     canRetry = true;
-    $("status").textContent = error.name === "AbortError"
-      ? (timedOut ? "The model took too long to respond. Please try again." : "Transcription canceled.")
-      : error instanceof TypeError
-        ? "Could not reach the model. Check your connection and try again."
-        : error.message;
+    $("status").textContent = error.name === "AbortError" ? "Transcription canceled." : error.message;
   } finally {
-    clearTimeout(timeout);
     request = null;
     controls();
   }
 }
 $("retry").onclick = () => void transcribe();
-$("cancel").onclick = () => request?.abort();
+$("cancel").onclick = () => inference.cancel();
 window.addEventListener("pagehide", () => {
   if (recorder) recorder.onstop = null;
   stopRecording();
   recorder = null;
-  request?.abort();
+  inference.cancel();
   controls();
 });

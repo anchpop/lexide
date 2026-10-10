@@ -11,7 +11,7 @@ import re
 ASSETS = {
     'theme.js', 'demo.css', 'pronunciation.css', 'pronunciation.js',
     'pronunciation-decoder.mjs', 'audio-explorer.js', 'spectrogram-worker.js',
-    'spectrogram.mjs',
+    'spectrogram.mjs', 'pronunciation-worker.js', 'pronunciation-inference.mjs',
 }
 REFERENCE = re.compile(r'''(["'])(\./(?:assets/)?[a-zA-Z0-9_.-]+\.(?:js|mjs|css))\1''')
 

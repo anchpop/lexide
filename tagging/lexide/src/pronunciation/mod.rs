@@ -498,8 +498,19 @@ impl FrameMatrix {
             &payload.encoding,
             &payload.data,
         )?;
-        let index: HashMap<String, usize> = payload
-            .vocab
+        Self::from_log_probs(log_probs, frames, payload.vocab.clone(), payload.blank_id)
+    }
+
+    /// Build from local inference without a lossy float16 wire round-trip.
+    pub fn from_log_probs(
+        log_probs: Vec<f32>,
+        frames: usize,
+        vocab: Vec<String>,
+        blank_id: usize,
+    ) -> Result<Self> {
+        let width = vocab.len();
+        matrix_len(frames, width, blank_id)?;
+        let index: HashMap<String, usize> = vocab
             .iter()
             .enumerate()
             .map(|(i, tok)| (tok.clone(), i))
@@ -515,8 +526,8 @@ impl FrameMatrix {
             sample_rate: None,
             heads: HashMap::new(),
             frames,
-            vocab: payload.vocab.clone(),
-            blank_id: payload.blank_id,
+            vocab,
+            blank_id,
             index,
             log_probs,
         };

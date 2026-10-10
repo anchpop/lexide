@@ -1,3 +1,5 @@
 target/
 www/pkg/
 www/*.safetensors
+www/pronunciation.int8.onnx
+www/pronunciation-frame-matrix.json

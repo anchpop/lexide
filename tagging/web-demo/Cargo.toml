@@ -11,7 +11,7 @@ wasm-bindgen = "0.2"
 anyhow = "1.0"
 safetensors = "0.6"
 serde_json = { version = "1.0", features = ["raw_value"] }
-g2p-types = { git = "https://github.com/anchpop/g2p", rev = "ef90533979a537469a2dc03546cb5d5c5d208c77" }
+g2p-types = { git = "https://github.com/anchpop/g2p", rev = "b32b56f7cdf4f0464c2cf9c7a3945b9783f88bef" }
 serde = { version = "1.0", features = ["derive"] }
 half = "2"
 flate2 = "1"

@@ -17,6 +17,17 @@ for f in char_tokenizer.safetensors sentence_segmenter.safetensors; do
     fi
 done
 
+PRONUNCIATION=../../pronunciation/.work/onnx-run2
+for pair in model.int8.onnx:pronunciation.int8.onnx frame_matrix.json:pronunciation-frame-matrix.json; do
+    source=${pair%%:*}
+    target=${pair#*:}
+    if [[ -f "$PRONUNCIATION/$source" ]]; then
+        cp "$PRONUNCIATION/$source" "www/$target"
+    else
+        echo "note: $PRONUNCIATION/$source not found — export run 2 before using pronunciation (no remote fallback)" >&2
+    fi
+done
+
 python3 build-assets.py
 
 echo "done — serve with: python3 -m http.server -d www"

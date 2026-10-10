@@ -2,7 +2,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { deflateSync } from "node:zlib";
 import wasm from "../target/node-pkg/parsley_web_demo.js";
-import { initDecoder, unpackMatrix, decodePath } from "../www/pronunciation-decoder.mjs";
+import { initDecoder, unpackMatrix, rawMatrix, decodePath, decodeHeads, outputJSON } from "../www/pronunciation-decoder.mjs";
 
 await initDecoder(wasm);
 const allocated = [];
@@ -160,6 +160,65 @@ test("actual WASM accepts both schemas and exposes declared 40 ms timing to the 
     await assert.rejects(unpack({...modern, ...change}), /invalid frame matrix/);
   }
 });
+
+const rawPhone = { labels: ["<pad>", "a", "b", "c"], blank_id: 0, value_semantics: "joint_log_probability" };
+async function raw(values, phone = rawPhone, count = values.length / phone.labels.length) {
+  const matrix = await rawMatrix(Float32Array.from(values), count, phone);
+  allocated.push(matrix);
+  return matrix;
+}
+
+test("raw float32 uses shared nonblank-first semantics without float16 threshold rounding", async () => {
+  const values = [Math.log(.4), Math.log(.24), Math.log(.18), Math.log(.18),
+    Math.log(.5), Math.log(.25), Math.log(.25), -Infinity,
+    Math.log(.49999), Math.log(.25), Math.log(.25), -Infinity];
+  const result = decodePath(await raw(values), frames(3));
+  assert.deepEqual(result.path.map(frame => frame.id), [1, 0, 1]);
+  assert.ok(Math.abs(result.phones[0].confidence - .4) < 1e-7);
+  const saved = JSON.parse(outputJSON({ values: Float32Array.from(values) }));
+  assert.equal(saved.values[7], "-Infinity");
+  assert.deepEqual(decodePath(await raw(saved.values.map(Number)), frames(3)), result);
+});
+
+test("raw matrices preserve special exclusions and reject invalid vocab, shapes and probabilities", async () => {
+  const phone = { ...rawPhone, labels: ["a", "<s>", "|", "", "b", "<pad>", "c"], blank_id: 5 };
+  const result = decodePath(await raw([Math.log(.24), 0, 0, 0, Math.log(.18), Math.log(.4), -Infinity], phone), frames(1));
+  assert.equal(result.path[0].id, 0);
+  assert.deepEqual(result.phones[0].top_k.map(p => p.phoneme), ["a", "b"]);
+  for (const values of [[0, NaN, 0, 0], [0, Infinity, 0, 0], [0, 1, 0, 0], Array(4).fill(-Infinity)]) {
+    await assert.rejects(raw(values));
+  }
+  for (const phone of [{...rawPhone, blank_id: 99}, {...rawPhone, labels: ["<pad>", "a", "a", "c"]},
+    {...rawPhone, labels: ["<pad>", "not-a-phone", "b", "c"]}, {...rawPhone, value_semantics: "probability"}]) {
+    await assert.rejects(raw([0, -Infinity, -Infinity, -Infinity], phone));
+  }
+  await assert.rejects(raw([0, -Infinity, -Infinity, -Infinity], rawPhone, 2));
+  await assert.rejects(raw([], rawPhone, 0));
+  await assert.rejects(raw([], rawPhone, 2001));
+});
+
+test("ONNX stress argmax stays frame-local; nonblank is derived from phone blank, not auxiliary output", async () => {
+  const metadata = {schema_version: 1, frame_rate_ms: 20, heads: {phone: rawPhone}};
+  const phone = { dims: [1, 2, 4], data: Float32Array.from(Array(2).fill([Math.log(.4), Math.log(.24), Math.log(.18), Math.log(.18)]).flat()) };
+  const stress = { dims: [1, 2, 3], data: Float32Array.of(.1, .8, .1, .1, .2, .7) };
+  const outputs = {phone, stress, nonblank: {dims: [1, 2, 1], data: Float32Array.of(0, 0)}};
+  const {result, frames} = await decodeHeads(outputs, metadata);
+  assert.deepEqual(frames.map(f => f.stress), [1, 2]);
+  assert.equal(result.phones.length, 1);
+  assert.equal(result.phones[0].endFrame, 2);
+  await assert.rejects(decodeHeads({...outputs, stress: {...stress, dims: [1, 1, 3]}}, metadata), /do not align/);
+});
+
+// Optional exported run-2 vocabulary is validated through actual g2p WASM types.
+if (process.env.PRONUNCIATION_METADATA) {
+  test("run-2 vocabulary is accepted without remapping or bypassing g2p validation", async () => {
+    const {heads: {phone}} = JSON.parse(readFileSync(process.env.PRONUNCIATION_METADATA));
+    const values = new Float32Array(phone.labels.length).fill(-Infinity);
+    values[phone.blank_id] = 0;
+    const matrix = await raw(values, phone);
+    assert.deepEqual(decodePath(matrix, frames(1)).phones, []);
+  });
+}
 
 // Optional live artifacts from the authorized eval, through the actual WASM path.
 import { readFileSync, readdirSync } from "node:fs";
