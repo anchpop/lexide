@@ -77,7 +77,10 @@ def importer(data_dir, lang, source, state_dir):
 
 
 def convert_audio(root, row, path, max_seconds=None):
-    audio = decode_audio(path.read_bytes())
+    try:
+        audio = decode_audio(path.read_bytes())
+    except ValueError:  # empty or silent source clip
+        return False
     duration = len(audio) / 16000
     if not duration or (max_seconds is not None and duration > max_seconds):
         return False

@@ -146,7 +146,7 @@ fn strict_source(row: &Value) -> bool {
     )
 }
 
-fn strict_phones(
+fn audit_phones(
     row: &mut Value,
     language: g2p::Language,
     text: &str,
@@ -162,6 +162,12 @@ fn strict_phones(
         Err(g2p::Error::UnknownPhoneme(unknown)) => {
             row[format!("g2p_{side}_exclude_reason")] =
                 json!(format!("unknown_phoneme:{}", unknown.0));
+            return Ok(None);
+        }
+        // Whisper's text is never a label, so a backend crash on it just fails
+        // admission; the same crash on the reference would break labeling too.
+        Err(error) if side == "actual" => {
+            row["g2p_actual_exclude_reason"] = json!(format!("g2p_error:{error}"));
             return Ok(None);
         }
         Err(error) => return Err(error.into()),
@@ -204,8 +210,8 @@ pub fn score(mut row: Value, text_only: bool) -> Result<Value> {
         let language = corpus::language(&row, corpus::text(&row, "lang")?)?;
         row["g2p_language"] = serde_json::to_value(language)?;
         row["g2p_identity"] = json!(g2p::identity());
-        let expected = strict_phones(&mut row, language, &expected, "reference")?;
-        let actual = strict_phones(&mut row, language, &actual, "actual")?;
+        let expected = audit_phones(&mut row, language, &expected, "reference")?;
+        let actual = audit_phones(&mut row, language, &actual, "actual")?;
         row["phone_match_version"] = json!(1);
         match (expected, actual) {
             (Some(expected), Some(actual)) => {
@@ -229,21 +235,12 @@ pub fn score(mut row: Value, text_only: bool) -> Result<Value> {
         let language = corpus::language(&row, corpus::text(&row, "lang")?)?;
         row["g2p_language"] = serde_json::to_value(language)?;
         row["g2p_identity"] = json!(g2p::identity());
-        match g2p::phonemize(language, &expected) {
-            Ok(expected) => {
-                let actual = match g2p::phonemize(language, &actual) {
-                    Ok(p) => p.phonemes,
-                    Err(g2p::Error::Unlabelable(_)) => vec![],
-                    Err(error) => return Err(error.into()),
-                };
-                row["per"] = json!(distance(&expected.phonemes, &actual));
-                row["expected_phonemes"] = json!(expected.phonemes);
-                row["actual_phonemes"] = json!(actual);
-            }
-            Err(g2p::Error::Unlabelable(reason)) => {
-                row["g2p_reference_exclude_reason"] = json!(reason)
-            }
-            Err(error) => return Err(error.into()),
+        if let Some(expected) = audit_phones(&mut row, language, &expected, "reference")? {
+            // An unlabelable transcript scores as all-deleted, failing the PER gate.
+            let actual = audit_phones(&mut row, language, &actual, "actual")?.unwrap_or_default();
+            row["per"] = json!(distance(&expected, &actual));
+            row["expected_phonemes"] = json!(expected);
+            row["actual_phonemes"] = json!(actual);
         }
     }
     Ok(row)
@@ -645,11 +642,17 @@ mod tests {
         assert_eq!(row["phone_match"], true);
         assert!(
             score(
-                json!({"source":"mls","lang":"eng","expected":"hello","whisper_text":"a\u{0}b"}),
+                json!({"source":"mls","lang":"eng","expected":"a\u{0}b","whisper_text":"hello"}),
                 true
             )
             .is_err()
         );
+        let crashed = score(
+            json!({"source":"mls","lang":"eng","expected":"hello","whisper_text":"a\u{0}b"}),
+            true,
+        )
+        .unwrap();
+        assert_eq!(crashed["phone_match"], false);
     }
 
     #[test]
@@ -789,13 +792,20 @@ mod tests {
         assert!(refused.get("cer").is_some());
         let mismatch = score(row("नमस्ते", "१२३"), false).unwrap();
         assert_eq!(mismatch["per"], 1.0);
-        // An engine error must not become a rejection of the recording.
+        // An engine error on the reference must not become a rejection of the
+        // recording; on Whisper's text it only means the transcript disagrees.
         assert!(
             score(
-                json!({"lang": "eng", "expected": "hello", "whisper_text": "a\u{0}b"}),
+                json!({"lang": "eng", "expected": "a\u{0}b", "whisper_text": "hello"}),
                 false
             )
             .is_err()
         );
+        let crashed = score(
+            json!({"lang": "eng", "expected": "hello", "whisper_text": "a\u{0}b"}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(crashed["per"], 1.0);
     }
 }

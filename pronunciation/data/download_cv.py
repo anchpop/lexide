@@ -75,7 +75,7 @@ def candidates(path, lang):
     coverage = Counter()
     by_speaker = defaultdict(list)
     with path.open(newline='') as stream:
-        for row in csv.DictReader(stream, delimiter='\t'):
+        for row in csv.DictReader(stream, delimiter='\t', quoting=csv.QUOTE_NONE):
             coverage['validated_rows'] += 1
             for field in ('client_id','accents','accent','age','gender','locale'):
                 if row.get(field, '').strip():
@@ -174,10 +174,7 @@ def main():
     parser.add_argument('--hours',type=float,default=15)
     parser.add_argument('--data-dir',type=Path,default=Path(__file__).parent/'audio')
     parser.add_argument('--cache-dir',type=Path,required=True)
-    args = parser.parse_args()
-    if not 0 < args.hours <= 15:
-        parser.error('--hours must be in (0, 15]')
-    acquire(args)
+    acquire(parser.parse_args())
 
 
 if __name__ == '__main__':

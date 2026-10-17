@@ -1,3 +1,7 @@
 .work/
 # Historical local g2pW model directory.
 G2PWModel/
+# Per-clip Common Voice rows (speaker ids, transcripts). The CV terms forbid
+# re-sharing, so this sidecar lives in the private HF dataset
+# anchpop/lexide-pronunciation-pack under sidecars/.
+train/cv_asr_exclusions.jsonl

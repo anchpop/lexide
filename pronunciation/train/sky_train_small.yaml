@@ -11,6 +11,11 @@
 # and single-word TTS; padding augmentation): ~80 min/epoch, 8 epochs for ~$27.
 # 73.7% pass / 8.0% PER, nasal clips 62% — ahead of both run 1 and the 2B.
 # Most of the gain came late in the cosine decay; 17 h would fit ~11 epochs.
+#
+# Third run (2026-10-16, ~1,158 h: run 2's data plus strict-audited Common
+# Voice 27 in 16 languages and ElevenLabs eleven_v4_turbo TTS): ~2 h 10 min
+# per epoch, 7 epochs, ~18 h up for ~$36. The 182 GB pack takes ~2.5 h to sync
+# from the box. 74.9% pass / 7.2% PER, nasal clips 58%: a small gain on run 2.
 resources:
   cloud: lambda
   disk_size: 600
@@ -60,13 +65,13 @@ run: |
   # fragile knob: on a 2 h eng+spa smoke set, 5e-4 never left the all-blank
   # plateau even without augmentation, while 3e-4 learned with or without it.
   # Whole-backbone torch.compile did not finish warmup locally; leave it off.
-  # At $1.99/h, 17h training leaves just over two hours of the $38 budget
-  # for staging/setup and shutdown; the launch operator watches that phase.
+  # At $1.99/h, 17h training plus ~3 h of sync/setup stays within a $40
+  # budget; the launch operator watches the staging phase.
   timeout --signal=TERM --kill-after=120s 17h bash train/train.sh \
     --model-name scratch \
     --scratch-dim 256 --scratch-layers 16 --scratch-heads 4 \
     --scratch-ff 1024 --scratch-kernel 31 \
-    --epochs 8 --backbone-lr 0.0003 --head-lr 0.0003 \
+    --epochs 7 --backbone-lr 0.0003 --head-lr 0.0003 \
     --lr-warmup-steps 4000 --cr-ctc-weight 0.2 \
     --stress-warmup-steps 4000 \
     --random-padding --padding-prob 0.3 --no-use-narrowed \

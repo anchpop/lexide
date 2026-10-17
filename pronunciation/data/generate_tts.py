@@ -553,9 +553,156 @@ def generate_gemini(
           f"{tokens[0]:,} audio tokens ≈ ${tokens[0] / 1e6 * price_per_mtok:.2f}")
 
 
+ELEVENLABS_MODEL = "eleven_v4_turbo"  # 0.5 credits per character
+ELEVENLABS_CREDITS_PER_CHAR = 0.5
+
+# Native speakers only, by the voice's own language/accent labels: a voice
+# reading a foreign language carries its accent, and labels are native
+# citation forms. American English and Beijing/standard Mandarin match the
+# g2p voices; British and Taiwan voices would not. Spanish and Portuguese
+# voices name their variety's espeak voice. Library voices need no account add.
+ELEVENLABS_VOICES = {
+    "eng": {v: "en-us" for v in [
+        "hpp4J3VqNfWAUOO0d1Us", "CwhRBWXzGAHq8TQ4Fs17", "EXAVITQu4vr4xnSDxMaL",
+        "FGY2WhTYpPnrIDTdsKH5", "SAz9YHcvj6GT2YYXdXww", "TX3LPaxmHKxFdv7VOQHJ",
+        "XrExE9yKIg1WjnnlVkGX", "bIHbv24MWmeRgasZH58o", "cgSgspJ2msm6clMCkdW9",
+        "cjVigY5qzO86Huf0OWal", "iP95p4xoKVk53GoZ742B", "nPczCjzI2devNBz1zQrb",
+        "pqHfZKP75CvOlQylNhV4", "UgBBYS2sOqTuMpoF3BR0"]},
+    "deu": dict.fromkeys([
+        "IWm8DnJ4NGjFI7QAM5lM", "v3V1d2rk6528UrLKRuy8", "7eVMgwCnXydb3CikjV7a",
+        "FTNCalFNG5bRnkkaP5Ug", "AnvlJBAqSLDzEevYr9Ap", "aTTiK3YzK3dXETpuDE2h",
+        "ViKqgJNeCiWZlYgHiAOO", "Em6LomliZyRFu3w09pjD"]),
+    "fra": dict.fromkeys([
+        "ohItIVrXTBI80RrUECOD", "rbFGGoDXFHtVghjHuS3E", "aQROLel5sQbj1vuIVi6B",
+        "6vTyAgAT8PncODBcLjRf", "McVZB9hVxVSk3Equu8EH", "YxrwjAKoUKULGd0g8K9Y",
+        "FvmvwvObRqIHojkEGh5N", "txtf1EDouKke753vN8SL", "x10MLxaAmShMYt7vs7pl"]),
+    "ita": dict.fromkeys([
+        "sKbNSlHXq99bttvf8rRF", "W71zT1VwIFFx3mMGH2uZ", "gfKKsLN1k0oYYN9n2dXX",
+        "fzDFBB4mgvMlL36gPXcz", "13Cuh3NuYvWOVQtLbRN8", "uScy1bXtKz8vPzfdFsFw",
+        "fQmr8dTaOQq116mo2X7F"]),
+    "por": {"aLFUti4k8YKvtQGXv0UO": "pt", "IZipF5JhqPlWzpduTV0E": "pt",
+            "HOfBIVLhom4mc9WvXfyH": "pt-br", "tS45q0QcrDHqHoaWdCDR": "pt-br"},
+    "spa": {"Nh2zY9kknu6z4pZy6FhD": "es", "hyKxCTlAqtnW188CgltM": "es",
+            "x5O3bgPT2grYhry6qmWR": "es-419", "8mBRP99B2Ng2QwsJMFQl": "es-419",
+            "p4w8j6zCUDJ0nGJ3okKs": "es-419", "zl1Ut8dvwcVSuQSB9XkG": "es-419"},
+    "rus": dict.fromkeys([
+        "hLjwV7lYzk15SWLUmhEH", "3EuKHIEZbSzrHGNmdYsx", "txnCCHHGKmYIwrn7HfHQ",
+        "kwajW3Xh5svCeKU5ky2S", "TUQNWEvVPBLzMBSVDPUA", "ogi2DyUAKJb7CEdqqvlU",
+        "ymDCYd8puC7gYjxIamPt"]),
+    "tha": dict.fromkeys([
+        "v2NF9R77fF8wZRdbGYTg", "XLXcyPK1jTjw1pYLLcM9", "RIc0VzgLsI8EhceUkZx4",
+        "tAV9ucNkXgK2k9TLxWkM", "H9eYlNHpm1vah6PPgYAk", "B4NdgwdU97lHqA8Udh2D",
+        "mYcpTKg1oj1H5CtzUZNO"]),
+    "zho-hans": dict.fromkeys([
+        "pU9NaAwkoR3v0Mrg3uKz", "ByhETIclHirOlWnWKhHc", "4VZIsMPtgggwNg7OXbPY",
+        "MI36FIkp9wRP7cpWKPTl", "WuLq5z7nEcrhppO0ZQJw", "DowyQ68vDpgFYdWVGjc3",
+        "hkfHEbBvdQFNX4uWHqRF"]),
+    "hin": dict.fromkeys([
+        "K24eC7JpUgk8zMtQYrpV", "OtEfb2LVzIE45wdYe54M", "KYiVPerWcenyBTIvWbfY",
+        "zT03pEAEi0VHKciJODfn", "kiaJRdXJzloFWi6AtFBf", "9w21nMuk8CWXIME31V1S",
+        "gHu9GtaHOXcSqFTK06ux"]),
+    "jpn": dict.fromkeys([
+        "GxhGYQesaQaYKePCZDEC", "3JDquces8E8bkmvbh6Bc", "8EkOjt4xTPGMclNlh1pk",
+        "j210dv0vWm7fCknyQpbA", "RBnMinrYKeccY3vaUxlZ", "4lOQ7A2l7HPuG7UIHiKA",
+        "B8gJV1IhpuegLxdpXFOE", "fUjY9K2nAIwlALOwSiwc"]),
+    "kor": dict.fromkeys([
+        "nbrxrAz3eYm9NgojrmFK", "ZJCNdZEjYwkOElxugmW2", "uyVNoMrnUku1dZyVEXwD",
+        "PDoCXqBQFGsvfO0hNkEs", "z6Kj0hecH20CdetSElRT", "m3gJBS8OofDJfycyA2Ip",
+        "AW5wrnG1jVizOYY7R1Oo", "ksaI0TCD9BstzEzlxj4q"]),
+    "ara": dict.fromkeys([  # Modern Standard only; the text is MSA
+        "rPNcQ53R703tTmtue1AT", "JjTirzdD7T3GMLkwdd3a", "XTa3iQyMA6f1qrI4F6kZ",
+        "R6nda3uM038xEEKi7GFl", "G1HOkzin3NMwRHSq60UI"]),
+    "ces": dict.fromkeys([
+        "KIDKfqJyZ6ASuyzsKfh5", "MpbYQvoTmXjHkaxtLiSh", "uYFJyGaibp4N2VwYQshk",
+        "daJ4gHLkIVFskWuoLuDX", "U48DQ1c9SVmD2BVCSiHL", "bF7C2fCv7Zf30iT84wZ1"]),
+    "dan": dict.fromkeys([
+        "4RklGmuxoAskAbGXplXN", "xj6X4BCUsv9oxohm1E8o", "V34B5u5UbLdNJVEkcgXp",
+        "KLwMtB9otYg9CFf7AUWc", "C43bq5qXRueL1cBQEOt3"]),
+}
+
+
+def elevenlabs_request(api_key, path, body=None):
+    request = urllib.request.Request(
+        f"https://api.elevenlabs.io{path}", json.dumps(body).encode() if body else None,
+        {"xi-api-key": api_key, "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return response.read()
+
+
+def elevenlabs_credits_left(api_key):
+    sub = json.loads(elevenlabs_request(api_key, "/v1/user/subscription"))
+    return sub["character_limit"] - sub["character_count"]
+
+
+def synthesize_one_elevenlabs(api_key, sentence, voice, espeak_voice, lang, out_dir):
+    h = hashlib.sha256(f"elevenlabs:{lang}:{voice}:{sentence}".encode()).hexdigest()[:16]
+    path = f"/v1/text-to-speech/{voice}?output_format=pcm_{TARGET_SAMPLE_RATE}"
+    for attempt in range(5):
+        try:
+            pcm = elevenlabs_request(api_key, path, {
+                "text": sentence, "model_id": ELEVENLABS_MODEL,
+                "language_code": LANGUAGE_CODES[lang]})
+            break
+        except urllib.error.HTTPError as e:
+            # 409: a library voice is auto-added to the account on first use,
+            # and concurrent first uses race.
+            if e.code in (409, 429, 500, 502, 503, 504) and attempt < 4:
+                time.sleep(2 ** attempt)
+                continue
+            print(f"ElevenLabs HTTP {e.code} on '{sentence[:50]}': {e.read()[:200]!r}")
+            return None
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 4:
+                raise
+            time.sleep(2 ** attempt)
+    duration = write_pcm_as_wav(pcm, TARGET_SAMPLE_RATE, out_dir / f"{h}.wav")
+    return {
+        "file": f"{h}.wav", "sentence": sentence, "source": "tts",
+        "voice": f"elevenlabs:{voice}", "tts_backend": "elevenlabs",
+        "tts_model": ELEVENLABS_MODEL, "duration_sec": round(duration, 3),
+        **({"espeak_voice": espeak_voice} if espeak_voice else {}),
+    }
+
+
+LANGUAGE_CODES = {"eng": "en", "deu": "de", "fra": "fr", "ita": "it", "por": "pt",
+                  "spa": "es", "rus": "ru", "tha": "th", "zho-hans": "zh", "hin": "hi",
+                  "jpn": "ja", "kor": "ko", "ara": "ar", "ces": "cs", "dan": "da"}
+
+
+def generate_elevenlabs(langs, credits, output_root, seed, workers, rps):
+    """Spend at most `credits`, split evenly, on text each language lacks.
+
+    The plan is frozen before the first request, so the ledger is exact up to
+    retries of failed requests (which are not billed).
+    """
+    api_key = read_env_key("ELEVENLABS_API_KEY")
+    left = elevenlabs_credits_left(api_key)
+    if credits > left:
+        raise SystemExit(f"--elevenlabs-credits {credits} exceeds the {left} left")
+    for lang in langs:
+        out_dir = output_root / lang
+        manifest_path = out_dir / "manifest.jsonl"
+        with open(manifest_path) as f:
+            recorded = {json.loads(line)["sentence"] for line in f}
+        rng = random.Random(seed)
+        pool = [s for s in dict.fromkeys(load_sentences(lang)) if s not in recorded]
+        rng.shuffle(pool)
+        voices = list(ELEVENLABS_VOICES[lang].items())
+        todo, cost = [], 0.0
+        for sentence in pool:
+            cost += len(sentence) * ELEVENLABS_CREDITS_PER_CHAR
+            if cost > credits / len(langs):
+                break
+            voice, espeak_voice = rng.choice(voices)
+            todo.append((api_key, sentence, voice, espeak_voice, lang, out_dir))
+        print(f"{lang}: {len(todo)} sentences, {len(voices)} voices")
+        run_pool(todo, synthesize_one_elevenlabs, manifest_path, lang, workers, rps)
+    print(f"ElevenLabs credits: {left} before, {elevenlabs_credits_left(api_key)} after")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate TTS dataset from tagging sentences")
-    parser.add_argument("--backend", choices=["chirp3", "gemini"], default="chirp3",
+    parser.add_argument("--backend", choices=["chirp3", "gemini", "elevenlabs"], default="chirp3",
                         help="Which TTS service to synthesize with")
     parser.add_argument("--langs", nargs="+", default=list(LANG_CONFIG.keys()),
                         choices=list(LANG_CONFIG.keys()),
@@ -592,7 +739,13 @@ def main():
                              "(list price as of 2026-08; audio bills at ~25 tok/s)")
     parser.add_argument("--word-plan", type=Path,
                         help="Execute a frozen tts_words plan with its hard $20 ledger")
+    parser.add_argument("--elevenlabs-credits", type=float,
+                        help="Hard credit budget across all --langs (elevenlabs backend)")
     args = parser.parse_args()
+    if args.backend == "elevenlabs":
+        generate_elevenlabs(args.langs, args.elevenlabs_credits, args.output, args.seed,
+                            args.workers, args.rps)
+        return
     if args.word_plan:
         from tts_words import execute
         execute(args.word_plan, args.output, args.workers, args.rps)
