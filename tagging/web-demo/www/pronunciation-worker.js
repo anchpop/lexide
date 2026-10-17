@@ -5,8 +5,9 @@ import { decodeHeads } from "./pronunciation-decoder.mjs";
 ort.env.wasm.numThreads = 1;
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/";
 const modelId = "anchpop/lexide-pronunciation-small";
-// Run 2 (a5472e4a) plus its int8 export under onnx/.
-const revision = "58bd3171a23ec86876dd71ba4c9d9179aab2ce58";
+// Run 3 (99e0c60e) plus its int8 export under onnx/. The page reads the
+// revision from inference output, so this is the only pin.
+const revision = "3aa1e24a183f54d12fcf025700824280b33c3af2";
 const base = `https://huggingface.co/${modelId}/resolve/${revision}/onnx`;
 let session;
 let metadata;

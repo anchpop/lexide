@@ -251,7 +251,7 @@ function renderResult(result, output) {
   $("copy-ipa").disabled = !result.phones.length;
   $("frame-cursor").max = result.path.length - 1;
   $("frame-cursor").value = 0;
-  $("model-version").textContent = `Browser model · run 2 / ${output.model_revision.slice(0, 7)} · ${result.path.length} frames`;
+  $("model-version").textContent = `Browser model · ${output.model_revision.slice(0, 7)} · ${result.path.length} frames`;
   $("result").hidden = false;
   $("drop-zone").classList.add("has-result");
   paintFrames();
