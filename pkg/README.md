@@ -42,9 +42,9 @@ is ready or recording stops. Audio stays in the browser. Cancel terminates the
 inference worker, including model loading or an active run; Retry starts a fresh
 worker. Successful runs reuse the loaded session.
 
-The model is `anchpop/lexide-pronunciation-small` run 2 (`a5472e4a`, 24.93M
+The model is `anchpop/lexide-pronunciation-small` run 3 (`99e0c60e`, 24.93M
 parameters). Its int8 export lives in that repo under `onnx/`, and the worker pins
-the commit that added it (`58bd3171`). The module worker lazily loads that model and `onnxruntime-web@1.30.0` from jsDelivr
+the commit that added it (`3aa1e24a`). The module worker lazily loads that model and `onnxruntime-web@1.30.0` from jsDelivr
 on the first transcription. It uses the single-threaded WASM backend, so static
 Pages needs no cross-origin isolation headers. The browser supplies raw mono
 16 kHz float32 audio, matching the saved processor's `do_normalize=False`.
@@ -55,13 +55,13 @@ mean/variance per clip (`epsilon=1e-5`). JavaScript must not normalize again.
 ### Export the pinned model
 
 To re-export (e.g. for a new run), download the checkpoint into
-`pronunciation/.work/onnx-run2/checkpoint` with `huggingface_hub.snapshot_download`,
+`pronunciation/.work/onnx-small/checkpoint` with `huggingface_hub.snapshot_download`,
 then from the repository root:
 
 ```sh
 LEXIDE_DATA_VENV=~/.venv-lexide-tests pronunciation/scripts/py-linux.sh \
-  pronunciation/inference/export_onnx.py pronunciation/.work/onnx-run2/checkpoint \
-  --output pronunciation/.work/onnx-run2
+  pronunciation/inference/export_onnx.py pronunciation/.work/onnx-small/checkpoint \
+  --output pronunciation/.work/onnx-small
 ```
 
 The venv needs onnx, onnxscript and onnxruntime besides the training stack.
@@ -74,7 +74,7 @@ through the g2p types when that export directory exists.
 `www/pronunciation-decoder.mjs` loads the WASM bindings. Local phone log
 probabilities go directly into a float32 constructor with vocabulary/blank
 metadata; g2p types validate the vocabulary. The demo pins the same g2p revision
-as pronunciation preprocessing, supporting run 2's g2p 0.7.0 inventory.
+as pronunciation preprocessing (the g2p 0.7 inventory).
 Matrix validation and decoding reuse `lexide/src/pronunciation/mod.rs` via
 `#[path]`, with no JavaScript decoder. Legacy compressed float16 artifacts
 remain supported by the separate wire constructor for regression tests.
