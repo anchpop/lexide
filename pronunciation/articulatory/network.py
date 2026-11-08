@@ -1,26 +1,54 @@
 """Phone-conditioned controls. Speaker identity has no articulation path."""
+import math
+
 import torch
 from torch import nn
 
 import unicodedata
 
-from maeda import NAMES
+from maeda import NAMES, geometry
 
 
-class NasalLoss(nn.Module):
-    """Only the nasal velum hinge remains: PB1 has no MRI velum surface."""
+class GestureLoss(nn.Module):
+    """Weak phone-class inequalities, only in the middle 40% of a phone.
+
+    Native neutral PB1 dorsal vertices 12..20 map to sections 17..28;
+    front vertices 21..26 map to 30..37. Exclude lips from tongue targets.
+    These broad regions are heuristics, not gold articulator trajectories.
+    """
     def __init__(self, vocabulary):
         super().__init__()
         vowels = set('aeiouyæɑɒɔəɚɛɜɞɤɨɪɯɵœøʊʌɐʉʏ')
-        normalized = [unicodedata.normalize('NFD', p) for p in vocabulary]
-        self.register_buffer('nasal', torch.tensor([
-            p[0] in 'mnŋɲɴ' or (p[0] in vowels and '̃' in p)
-            for p in normalized], dtype=torch.bool))
+        consonants = set('bcdfghjklmnpqrstvwxyzðŋɕɖɟɡɣɥɦɫɲɴɸɹɻɽɾʁʂʃʈʋʎʑʒʔʕʝβθχçħ')
+        rows = []
+        for phone in vocabulary:
+            normalized = unicodedata.normalize('NFD', phone)
+            base = normalized[0]
+            nasal = base in 'mnŋɲɴ' or (base in vowels and '̃' in normalized)
+            rows.append([phone in {'m', 'b', 'p'}, nasal,
+                         base in consonants and not nasal,
+                         phone in {'t', 'd', 'n', 's', 'z', 'l', 'ɾ'},
+                         phone in {'k', 'g', 'ɡ', 'ŋ'}])
+        self.register_buffer('classes', torch.tensor(rows, dtype=torch.bool))
 
     def forward(self, art, scale, phone, relative):
-        coupling = .001 + 1.8 * art[:, 7].sigmoid()**3
-        mask = self.nasal[phone] & (relative >= .3) & (relative <= .7)
-        return ((((.3-coupling)/.3).relu().square())*mask).sum() / mask.sum().clamp_min(1)
+        areas, _, coupling, _ = geometry(art, scale, True)
+        masks = self.classes[phone] & ((relative >= .3) & (relative <= .7))[:, None]
+        # Normalize by each tolerance before squaring: cm² units must not make
+        # the nasal target weaker than the competing rest-posture prior.
+        violations = torch.stack((((areas[:, -1]-.3)/.3).relu(),
+            ((.3-coupling)/.3).relu(), ((coupling-.1)/.1).relu(),
+            ((areas[:, 29:38].amin(-1)-.5)/.5).relu(),
+            ((areas[:, 17:29].amin(-1)-.5)/.5).relu()), -1).square()
+        # The competing oral constriction includes the front tongue AND lips,
+        # but not the pharynx. A 1.25 area ratio demands a modest 20% dorsal
+        # advantage, independent of scale; it is a heuristic, not MRI-derived.
+        dorsal = areas[:, 17:29].amin(-1)
+        front_lips = areas[:, 29:40].amin(-1)
+        dominance = (dorsal.log()-front_lips.log()+math.log(1.25)).relu().square()
+        violations = violations + torch.nn.functional.pad(dominance[:, None], (4, 0))
+        # Per-class means keep rare gestures visible without a dense phone target.
+        return (violations*masks).sum(0) / masks.sum(0).clamp_min(1)
 
 
 

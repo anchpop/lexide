@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from evaluate import edit_distance, summarize
-from network import ControlNet, NasalLoss
+from network import ControlNet, GestureLoss
 from objective import AudioLoss, envelope, mel_bank
 from prepare import AUDIO, MODEL, OUT
 from maeda import NAMES, _native, _scaled_native, contours, preset
@@ -168,8 +168,8 @@ class Tests(unittest.TestCase):
 
     def test_nasal_mask(self):
         vocabulary = ['<pad>', 'm', 'n', 'ŋ', 'b', 't', 'ɾ', 'k', 'ɡ', 'a', 'õ', 'aː̃', 'ɐ̃ʊ̃']
-        loss = NasalLoss(vocabulary)
-        self.assertEqual(loss.nasal.tolist(),
+        loss = GestureLoss(vocabulary)
+        self.assertEqual(loss.classes[:, 1].tolist(),
                          [False, True, True, True, False, False, False, False, False, False, True, True, True])
         art = torch.zeros(len(vocabulary), len(NAMES), requires_grad=True)
         phones = torch.arange(len(vocabulary))

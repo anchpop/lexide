@@ -18,6 +18,55 @@ class Tests(unittest.TestCase):
     def setUpClass(cls):
         torch.set_num_threads(4)
 
+    def test_bilabial_lip_mask(self):
+        gestures = mt.GestureLoss(['p', 'b', 'm', 'a'])
+        phone = torch.tensor([0, 1, 2, 3])
+        values = torch.tensor([9., 8., 7., 2.], requires_grad=True)
+        errors = {k: values for k in (*mt.SURFACES, 'lip_gap')}
+        weights = {k: 1. for k in errors}
+        terms = mt.contour_terms(errors, phone, gestures, weights)
+        self.assertEqual(float(terms['lip_gap'].detach()), 2.)
+        self.assertEqual(float(terms['tongue'].detach()), 6.5)
+        terms['lip_gap'].backward()
+        torch.testing.assert_close(values.grad, torch.tensor([0., 0., 0., 1.]))
+        # No relative-position input: edges and centers are equally excluded.
+        all_bilabial = mt.contour_terms(errors, torch.zeros(4, dtype=torch.long), gestures, weights)
+        self.assertEqual(float(all_bilabial['lip_gap'].detach()), 0.)
+
+    def test_velar_dominance(self):
+        gestures = mt.GestureLoss(['k'])
+        art = torch.zeros(1, 8)
+        phone = torch.zeros(1, dtype=torch.long)
+        relative = torch.tensor([.5])
+        for dorsal, front, expected in [(0.4, 1., 0.), (0.4, .2, np.log(2.5)**2),
+                                         (1., 2., 1.)]:
+            areas = torch.full((1, 40), 2.)
+            areas[:, 17:29] = dorsal
+            areas[:, 29:40] = front
+            areas.requires_grad_()
+            with patch('network.geometry', return_value=(areas, None, torch.zeros(1), None)):
+                result = gestures(art, 1., phone, relative)
+                self.assertAlmostEqual(float(result[4].detach()), expected, places=6)
+                result.sum().backward()
+                self.assertTrue(torch.isfinite(areas.grad).all())
+                if dorsal > front:
+                    self.assertGreater(float(areas.grad[:, 17:29].sum()), 0.)
+                    self.assertLess(float(areas.grad[:, 29:40].sum()), 0.)
+                self.assertEqual(float(gestures(art, 1., phone, torch.zeros(1)).sum().detach()), 0.)
+
+    def test_cli_passes_output_directory(self):
+        import mri_evaluate
+        out = Path('/tmp/articulatory-output-test')
+        for stage, module, name, arguments in [
+                ('prepare', mt, 'prepare', (out,)),
+                ('train', mt, 'run_training', (65., out)),
+                ('evaluate', mri_evaluate, 'run', (out,))]:
+            with patch.object(sys, 'argv', ['mri_train.py', stage, '--out', str(out)]), \
+                    patch.object(module, name) as action:
+                mt.main()
+                action.assert_called_once_with(*arguments)
+        self.assertNotEqual(mt.OUT, out)
+
     def test_mapping(self):
         self.assertEqual(mt.phone_label('AH0'), 'ə')
         self.assertEqual(mt.phone_label('AH1'), 'ʌ')
@@ -93,17 +142,18 @@ class Tests(unittest.TestCase):
         self.assertTrue((np.diff(u.frames)>0).all())
 
     def test_pitch_fallback_preserves_voicing_and_labels(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(mt,'OUT',Path(directory)):
-            (mt.OUT/'data').mkdir()
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            (out/'data').mkdir()
             rows=[]
             for i,hz in enumerate([100.,110.,400.]):
                 rows.append(dict(stem=str(i),voice='speaker',f0_quantiles=[hz,hz,hz],voiced_fraction=.5))
-                np.savez(mt.OUT/'data'/f'{i}.npz',f0=np.full(2,hz,np.float32),
+                np.savez(out/'data'/f'{i}.npz',f0=np.full(2,hz,np.float32),
                          voiced=np.array([0.,1.],np.float32),phone=np.array([1,2]))
-            mt.dump('data.json',rows)
-            audit=mt.audit_pitch()
+            mt.dump(out, 'data.json',rows)
+            audit=mt.audit_pitch(out)
             self.assertEqual(len(audit['speaker']['replacements']),1)
-            data=mt.load(rows[-1])
+            data=mt.load(rows[-1], out)
             np.testing.assert_array_equal(data['f0'],[110.,110.])
             np.testing.assert_array_equal(data['voiced'],[0.,1.])
             np.testing.assert_array_equal(data['phone'],[1,2])
