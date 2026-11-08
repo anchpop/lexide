@@ -1,0 +1,28 @@
+VTCalcs / VocalTractModels
+Copyright [2013-2014] [Satrajit Ghosh, Shinji Maeda]
+
+Source: https://github.com/sensein/VocalTractModels
+Revision: 59b4b99c53ab2da9ad3e6df5bfe5ca2ba0c91cea
+
+pb1_spec.dat is an unchanged copy of vtcalcs/data/specdata/pb1_spec.dat.
+../maeda.py is a modified, differentiable PyTorch port of the geometry math in
+vtcalcs/src/lam_lib.c. Vowel presets are from vtcalcs/src/Vtcalcs.c (vowelpar)
+and the matching vtcalcs/arcb.m table (Copyright (c) 1999 Satrajit S. Ghosh).
+The original implementation is by Shinji Maeda, adapted to MATLAB by Satrajit Ghosh.
+
+Changes: batched tensors; sigmoid-bounded parameters; independent velum;
+cm coordinates mirrored to face +x, glottal midpoint origin; speaker scaling;
+cross-product quadrilateral areas; equal-midline-length area integration and
+contour interpolation; numerical floors. No original acoustic simulator or
+Track Draw code is included. The original 1.10 size correction and documented
+1.4 ad-hoc sagittal-to-area correction are retained.
+
+The seven-factor model is described in:
+Shinji Maeda (1990), Compensatory Articulation During Speech: Evidence from the
+Analysis and Synthesis of Vocal-Tract Shapes Using an Articulatory Model,
+Speech Production and Speech Modelling, pp. 131–149.
+https://doi.org/10.1007/978-94-009-2037-8_6
+The presets here are source-code examples, not verified values from that paper.
+
+LICENSE retains the upstream copyright/license notice.
+LICENSE-2.0.txt contains the full Apache License, Version 2.0.
