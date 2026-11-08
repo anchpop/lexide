@@ -111,7 +111,7 @@ def main():
                 saturation=config['saturation']*saturation)
             gesture = gestures(art, scale, args['phone'], args['relative'])
             terms.update({name: config['gesture']*value for name, value in zip(
-                ('bilabial', 'nasal', 'oral', 'alveolar', 'velar'), gesture)})
+                gestures.names, gesture, strict=True)})
             loss = sum(terms.values())
             assert torch.isfinite(loss), (epoch, row['file'])
             optimizer.zero_grad()

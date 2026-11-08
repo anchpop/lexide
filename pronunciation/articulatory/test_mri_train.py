@@ -54,6 +54,40 @@ class Tests(unittest.TestCase):
                     self.assertLess(float(areas.grad[:, 29:40].sum()), 0.)
                 self.assertEqual(float(gestures(art, 1., phone, torch.zeros(1)).sum().detach()), 0.)
 
+    def test_vowel_pharynx_class_and_mask(self):
+        phones = ['iː', 'ə', 'æ', 'aɪ', 'aʊ', 'ɛ', 'ã', 'ɑː', 'ɔɪ', 'ɒ', 'k', '<pad>']
+        gestures = mt.GestureLoss(phones)
+        torch.testing.assert_close(gestures.classes[:, -1],
+            torch.tensor([True]*7 + [False]*5))
+        count = len(phones)
+        areas = torch.full((count, 40), 2.)
+        areas[:, 5] = .25
+        areas.requires_grad_()
+        with patch('network.geometry', return_value=(areas, None, torch.zeros(count), None)):
+            args = (torch.zeros(count, 8), 1., torch.arange(count))
+            middle = torch.full((count,), .5)
+            result = gestures(*args, middle)
+            self.assertEqual(float(result[-1].detach()), .25)
+            terms = mt.gesture_terms(gestures, *args, middle)
+            self.assertEqual(set(terms), set(gestures.names))
+            self.assertAlmostEqual(float(terms['vowel_pharynx'].detach()), .025)
+            result[-1].backward()
+            self.assertTrue(torch.isfinite(areas.grad).all())
+            self.assertLess(float(areas.grad[:7, 5].sum()), 0.)
+            self.assertEqual(float(areas.grad[7:].abs().sum()), 0.)
+            self.assertEqual(float(gestures(*args, torch.zeros(count))[-1].detach()), 0.)
+
+    def test_vowel_pharynx_section_bounds_and_floor(self):
+        gestures = mt.GestureLoss(['ə'])
+        for section in (3, 4, 10, 11):
+            for area in (.25, .5, 1.):
+                areas = torch.full((1, 40), 2.)
+                areas[0, section] = area
+                with patch('network.geometry', return_value=(areas, None, torch.zeros(1), None)):
+                    value = gestures(torch.zeros(1, 8), 1., torch.tensor([0]), torch.tensor([.5]))[-1]
+                expected = max(0., (.5-area)/.5)**2 if 4 <= section <= 10 else 0.
+                self.assertEqual(float(value), expected)
+
     def test_cli_passes_output_directory(self):
         import mri_evaluate
         out = Path('/tmp/articulatory-output-test')

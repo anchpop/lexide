@@ -1,7 +1,7 @@
 """Direct MRI contour supervision of phone-conditioned controls; no fitted labels.
 
 Run with py-linux.sh -I mri_train.py {prepare,train,evaluate}. Annot16 outputs
-are local research artifacts in ignored out/network-mri-gestures, never redistribute.
+are local research artifacts in ignored out/network-mri-pharynx, never redistribute.
 """
 import argparse
 from collections import Counter, defaultdict
@@ -23,7 +23,7 @@ from objective import AudioLoss
 from synth import Synth, effort, effort_weights, smoothness
 import train as audio_train
 
-OUT = Path(__file__).resolve().parent / 'out/network-mri-gestures'
+OUT = Path(__file__).resolve().parent / 'out/network-mri-pharynx'
 OLD = OUT.parent / 'network-anatomy/epoch-19.pt'
 HOLDOUT = ('sub013', 'sub022')
 SURFACES = ('tongue', 'hard_palate', 'pharyngeal_wall')
@@ -194,8 +194,7 @@ def inference(net, data, row, speakers):
 
 def gesture_terms(gestures, art, scale, phone, relative):
     values = gestures(art, scale, phone, relative)
-    return {name: .1*value for name, value in zip(
-        ('bilabial', 'nasal', 'oral', 'alveolar', 'velar'), values)}
+    return {name: .1*value for name, value in zip(gestures.names, values, strict=True)}
 
 
 def contour_terms(errors, phone, gestures, weights):
