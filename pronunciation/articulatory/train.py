@@ -1,4 +1,4 @@
-"""Train phone→tract/source with audio and weak posture/gesture regularizers."""
+"""Train phone→tract/source with audio, posture regularizers and a nasal hinge."""
 import json
 from pathlib import Path
 import random
@@ -9,7 +9,7 @@ import soundfile as sf
 import torch
 
 from evaluate import score_files
-from network import ControlNet, GestureLoss
+from network import ControlNet, NasalLoss
 from objective import AudioLoss
 from prepare import MODEL, OUT
 from synth import SR, Synth, effort, effort_weights, smoothness
@@ -17,7 +17,7 @@ from synth import SR, Synth, effort, effort_weights, smoothness
 DATA = OUT / 'corpus'
 DEST = OUT / 'network-anatomy'
 CONFIG = dict(seed=43, epochs=19, learning_rate=.001, smoothness=.002, effort=1.,
-              saturation=.1, gesture=.1,
+              saturation=.1, nasal=.1,
               phone_embedding=32, language_embedding=4, speaker_embedding=8,
               context_channels=96, dilations=[1, 3, 9], kernel=5)
 
@@ -83,7 +83,7 @@ def main():
     vocabulary = json.loads((MODEL / 'frame_matrix.json').read_text())['heads']['phone']['labels']
     net = ControlNet(len(vocabulary), len(speakers)).cuda()
     synth = Synth(config['closures']).cuda()
-    gestures = GestureLoss(vocabulary).cuda()
+    nasal = NasalLoss(vocabulary).cuda()
     optimizer = torch.optim.Adam(net.parameters(), lr=config['learning_rate'])
     # RAM caches avoid re-reading small npz files each epoch; no GPU corpus cache.
     cached = {r['file']: load(r) for r in train}
@@ -109,9 +109,7 @@ def main():
                 smoothness=config['smoothness']*smoothness(art),
                 effort=config['effort']*effort(art, effort_weights(target)),
                 saturation=config['saturation']*saturation)
-            gesture = gestures(art, scale, args['phone'], args['relative'])
-            terms.update({name: config['gesture']*value for name, value in zip(
-                ('bilabial', 'nasal', 'oral', 'alveolar', 'velar'), gesture)})
+            terms['nasal'] = config['nasal']*nasal(art, scale, args['phone'], args['relative'])
             loss = sum(terms.values())
             assert torch.isfinite(loss), (epoch, row['file'])
             optimizer.zero_grad()

@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from evaluate import edit_distance, summarize
-from network import ControlNet, GestureLoss
+from network import ControlNet, NasalLoss
 from objective import AudioLoss, envelope, mel_bank
 from prepare import AUDIO, MODEL, OUT
 from maeda import NAMES, _native, _scaled_native, contours, preset
@@ -166,14 +166,11 @@ class Tests(unittest.TestCase):
         self.assertTrue(torch.isfinite(art.grad).all())
         self.assertTrue((effort_weights(torch.zeros(SR)) == 20).all())
 
-    def test_gesture_masks(self):
+    def test_nasal_mask(self):
         vocabulary = ['<pad>', 'm', 'n', 'ŋ', 'b', 't', 'ɾ', 'k', 'ɡ', 'a', 'õ', 'aː̃', 'ɐ̃ʊ̃']
-        loss = GestureLoss(vocabulary)
-        self.assertEqual(loss.classes[0].sum(), 0)
-        self.assertEqual(loss.classes[1].tolist(), [True, True, False, False, False])
-        self.assertEqual(loss.classes[5].tolist(), [False, False, True, True, False])
-        self.assertTrue(loss.classes[10:, 1].all())
-        self.assertFalse(loss.classes[9].any())
+        loss = NasalLoss(vocabulary)
+        self.assertEqual(loss.nasal.tolist(),
+                         [False, True, True, True, False, False, False, False, False, False, True, True, True])
         art = torch.zeros(len(vocabulary), len(NAMES), requires_grad=True)
         phones = torch.arange(len(vocabulary))
         masked = loss(art, 1., phones, torch.zeros(len(phones)))
