@@ -89,7 +89,8 @@ def _native(raw):
     # Soft minimum: a hard clamp zeroes the gradient of any section touching the
     # wall, so a fit that once pressed the tongue to the palate could not leave.
     tongue = wall - torch.nn.functional.softplus(wall - deform(tng, [0, 1, 2, 3])[..., 1:], beta=20)
-    lips = deform(lip, [0, 4, 5]).clamp_min(0)
+    # Soft for the same reason: shut lips must still feel the pull to open.
+    lips = torch.nn.functional.softplus(deform(lip, [0, 4, 5]), beta=100)
     larynx = deform(lrx, [0, 6])
     inside = origin + tongue[..., None]*normal
     outside = (origin + wall[..., None]*normal).expand_as(inside)
@@ -103,10 +104,12 @@ def _native(raw):
                        inside, lower[..., None, :], (lower+extension)[..., None, :]), -2)
     outer = torch.cat((outer0[..., None, :], ((outer0+outside[..., 0, :])/2)[..., None, :],
                        outside, upper[..., None, :], (upper+extension)[..., None, :]), -2)
-    # Mirror source's left-facing profile; translate the glottal midpoint to zero.
-    glottis = (inner0 + outer0)[..., None, :] / 2
+    # Mirror the source profile in a fixed anatomical frame. Only the NEUTRAL
+    # glottal midpoint is the origin; subtracting the current glottis would move
+    # the rigid palate whenever jaw/larynx controls changed.
+    neutral_glottis = (lrx[0][1:3] + lrx[0][3:5]) / 2
     transform = raw.new_tensor([-1.1, 1.1])  # source size_correction=1.10
-    inner, outer = (inner-glottis)*transform, (outer-glottis)*transform
+    inner, outer = (inner-neutral_glottis)*transform, (outer-neutral_glottis)*transform
     mid = (inner+outer)/2
     lengths = torch.linalg.vector_norm(mid.diff(dim=-2), dim=-1).clamp_min(1e-6)
     # Sum two triangle cross products instead of Heron's sqrt: finite at closure.
@@ -141,9 +144,14 @@ def _scaled_native(raw, scale):
     mid = (outer+inner)/2
     increments = mid.diff(dim=-2)*segment[..., None]
     center = torch.cat((torch.zeros_like(mid[..., :1, :]), increments.cumsum(-2)), -2)
-    outer = center + (outer-mid)*local[..., None]
-    inner = center + (inner-mid)*local[..., None]
-    return outer, inner, lengths*segment, areas*(left.square()+left*right+right.square())/3
+    scaled_outer = center + (outer-mid)*local[..., None]
+    scaled_inner = center + (inner-mid)*local[..., None]
+    # Integration has an arbitrary origin. Fix it at the rigid upper-incisor
+    # vertex (27), not the moving glottis. Equal region scales then agree with
+    # scalar scaling, and the whole rigid oral wall stays still at fixed anatomy.
+    shift = outer[..., 27:28, :]*scale[..., 1:, None] - scaled_outer[..., 27:28, :]
+    return (scaled_outer+shift, scaled_inner+shift, lengths*segment,
+            areas*(left.square()+left*right+right.square())/3)
 
 
 def _resample(raw, scale, closures):
@@ -167,7 +175,8 @@ def _resample(raw, scale, closures):
         return points.gather(-2, idx)*(1-fraction[..., None]) + points.gather(-2, idx+1)*fraction[..., None]
     outer, inner = sample(outer), sample(inner)
     floor = .001 if closures else .0001
-    areas = areas.clamp_min(floor)
+    # A soft floor, so that a seal keeps a gradient: within 2e-6 cm² of the floor at zero area.
+    areas = floor + torch.nn.functional.softplus(areas - floor, beta=5000)
     gap = torch.linalg.vector_norm(outer-inner, dim=-1)
     return areas, total/100, .001+1.8*raw[..., 7].sigmoid()**3, gap, outer, inner
 
@@ -182,5 +191,11 @@ def geometry(raw, scale=1., closures=False):
 
 
 def contours(raw, scale=1., closures=False):
-    """40×2 outer/inner landmarks, cm; +x facing, glottal midpoint at origin."""
+    """40×2 outer/inner landmarks, cm; +x facing, fixed anatomical frame.
+
+    The native neutral glottis defines the origin. The upper incisor anchors
+    two-region scaling. Saved
+    MRI registrations/trajectories from the former moving-glottis frame require
+    refitting; their frame-dependent translations are not a single rigid offset.
+    """
     return _resample(raw, scale, closures)[4:]

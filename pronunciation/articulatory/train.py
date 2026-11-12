@@ -12,7 +12,7 @@ from evaluate import score_files
 from network import ControlNet, GestureLoss
 from objective import AudioLoss
 from prepare import MODEL, OUT
-from synth import SR, Synth, effort, effort_weights, smoothness
+from synth import SR, Synth, effort, effort_weights, geometry, levels, smoothness
 
 DATA = OUT / 'corpus'
 DEST = OUT / 'network-anatomy'
@@ -48,13 +48,15 @@ def evaluate(net, synth, rows, speakers, epoch, out=DEST):
         args = inputs(data, row, speakers)
         art, source, scale = net(**args)
         generator = torch.Generator(device='cuda').manual_seed(193)
-        noise = torch.randn(2, len(data['audio']), device='cuda', generator=generator)
+        noise = torch.randn(1, len(data['audio']), device='cuda', generator=generator)
         waveform = synth(art, source, args['f0'], args['voiced'], len(data['audio']), scale, noise)
+        areas, _, coupling, _ = geometry(art, scale, synth.closures)
         assert torch.isfinite(waveform).all()
         sf.write(destination / (stem+'-fit.wav'), waveform.cpu().numpy(), SR, subtype='FLOAT')
         sf.write(destination / (stem+'-original.wav'), data['audio'], SR, subtype='FLOAT')
         np.savez(destination / (stem+'-fit.npz'), articulation=art.cpu().numpy(),
-            source=source.cpu().numpy(), scale=scale.cpu().numpy(), f0=data['f0'], voiced=data['voiced'],
+            source=levels(areas, coupling, source).cpu().numpy(), lung_glottis=source.cpu().numpy(),
+            scale=scale.cpu().numpy(), f0=data['f0'], voiced=data['voiced'],
             phone=data['phone'], relative=data['relative'], phonemes=data['phonemes'],
             boundaries=data['boundaries'], samples=len(data['audio']), sample_rate=SR,
             control_hz=100, closures=synth.closures, language='eng', speaker=row['voice'],

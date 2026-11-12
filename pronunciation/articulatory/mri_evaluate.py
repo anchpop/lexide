@@ -9,7 +9,7 @@ import maeda
 import mri_fit as fit
 import usc
 import mri_train as mt
-from synth import REST, Synth
+from synth import REST, Synth, geometry, levels
 
 CLASSES = dict(vowels=set('AA AE AH AO AW AY EH ER EY IH IY OW OY UH UW'.split()),
                bilabial={'M','B','P'}, alveolar=set('T D N S Z L'.split()), velar={'K','G','NG'})
@@ -156,8 +156,9 @@ def video(speaker, global_, nets, states, out):
         curves[name] = [v.cpu().numpy() for v in fit.register(maeda.contours(art[grid],scale),global_)]
         # Preserve the normal inference NPZ schema; registration is extra metadata.
         intervals = u.phone_intervals
+        areas, _, coupling, _ = geometry(art, scale, True)
         np.savez_compressed(out / f'{speaker}-{name}-fit.npz', articulation=art.cpu().numpy(),
-            source=source.cpu().numpy(), scale=scale.cpu().numpy(), f0=data['f0'], voiced=data['voiced'],
+            source=levels(areas, coupling, source).cpu().numpy(), lung_glottis=source.cpu().numpy(), scale=scale.cpu().numpy(), f0=data['f0'], voiced=data['voiced'],
             phone=data['phone'], relative=data['relative'], phonemes=np.array([mt.phone_label(p) or '<unk>' for a,b,p in intervals]),
             boundaries=np.array([a for a,b,p in intervals]+[intervals[-1][1]]),
             samples=len(data['phone'])*160, sample_rate=16000,control_hz=100,closures=True,

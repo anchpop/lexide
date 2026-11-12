@@ -1,92 +1,131 @@
-"""Direct low-rate trajectory fitting, with structured experiment settings."""
+"""Direct fit of one clip: audio → per-frame mouth, lung pressure and glottis.
+
+Free harmonic and noise envelopes are first fitted through the renderer alone.
+The tract and source are fitted to those envelopes, then refined on the
+waveform. No phone information enters.
+"""
 import json
 from pathlib import Path
-import time
 
 import numpy as np
 import soundfile as sf
 import torch
+from torch import nn
 from torch.nn import functional as F
 
-from objective import AudioLoss
-from synth import NAMES, SR, Synth, effort, effort_weights, smoothness
+from maeda import NAMES, geometry
+from objective import AudioLoss, mel_bank
+from synth import FFT, SR, Synth, effort, effort_weights, levels, smoothness
 
 OUT = Path(__file__).parent / 'out'
-# Neutral PB1 initialization; old Gaussian codebooks are not compatible.
-DEFAULT = dict(loss='linear', closures=True, initialization='neutral', updates=1000,
-               seed=7, learning_rate=.04, smoothness=.002, effort=1.)
+SMOOTHNESS, EFFORT = 1e-4, .1
+KNOT = 20  # frames per lung-pressure knot: it moves slowly
 
 
-def expand(raw, frames):
-    return F.interpolate(raw.T[None], size=frames, mode='linear', align_corners=True)[0].T
+class Maeda(nn.Module):
+    """Seven factors and velum per frame; pharynx and oral scale for the clip."""
+    junction = 16
+
+    def __init__(self, frames):
+        super().__init__()
+        raw = torch.zeros(frames, len(NAMES))
+        raw[:, -1] = -2.
+        self.raw = nn.Parameter(raw)
+        self.scale = nn.Parameter(torch.zeros(2))
+
+    def anatomy(self):
+        return .8 + .4*self.scale.sigmoid()
+
+    def forward(self):
+        return geometry(self.raw, self.anatomy(), True)[:3]
+
+    def penalty(self, weights):
+        return SMOOTHNESS*smoothness(self.raw) + EFFORT*effort(self.raw, weights)
 
 
-def fit(rows, data_dir, destination, config):
-    destination.mkdir(parents=True, exist_ok=True)
-    (destination / 'config.json').write_text(json.dumps(config, indent=2))
-    torch.manual_seed(config['seed'])
-    torch.set_num_threads(4)
-    synth = Synth(closures=config['closures']).cuda()
-    summary = []
-    for row in rows:
-        stem = Path(row['file']).stem
-        data = np.load(data_dir / (stem+'.npz'))
-        target, f0, voiced = [torch.tensor(data[k], device='cuda') for k in ('audio', 'f0', 'voiced')]
-        frames, knots = len(f0), len(f0)//4+1
-        noise = torch.randn(2, len(target), device='cuda')
-        assert config['initialization'] == 'neutral'
-        neutral = torch.zeros((knots, len(NAMES)), device='cuda')
-        neutral[:, -1] = -2.
-        articulation = torch.nn.Parameter(neutral)
-        source = torch.nn.Parameter(torch.tensor([0., -7., -7., 0.], device='cuda').repeat(knots, 1))
-        anatomy = torch.nn.Parameter(torch.zeros((), device='cuda'))
-        parameters = [articulation, source, anatomy]
-        optimizer = torch.optim.Adam(parameters, lr=config['learning_rate'])
-        objective = AudioLoss(target, config['loss'])
-        weights = effort_weights(target)
-        curve, start = [], time.monotonic()
-        for step in range(config['updates']+1):
-            art, src = expand(articulation, frames), expand(source, frames)
-            scale = .85 + .3 * anatomy.sigmoid()
-            output = synth(art, src, f0, voiced, len(target), scale, noise)
-            sizes = (128, 256) if step < 100 else (256, 512, 1024)
-            reconstruction = objective(output, sizes)
-            regularizers = dict(smoothness=config['smoothness']*smoothness(art),
-                                effort=config.get('effort', 0)*effort(art, weights))
-            loss = reconstruction + sum(regularizers.values())
-            assert torch.isfinite(loss), (stem, step)
-            if step % 100 == 0 or step == config['updates']:
-                with torch.no_grad():
-                    full = float(objective(output))
-                item = dict(step=step, objective=float(loss.detach()), full_audio_loss=full,
-                            seconds=time.monotonic()-start,
-                            **{k: float(v.detach()) for k, v in regularizers.items()})
-                curve.append(item)
-                print(destination.name, stem, item, flush=True)
-                (destination / f'{stem}-curve.json').write_text(json.dumps(curve, indent=2))
-            if step == 0:
-                sf.write(destination / f'{stem}-initial.wav', output.detach().cpu().numpy(), SR, subtype='FLOAT')
-            if step < config['updates']:
-                optimizer.zero_grad()
-                loss.backward()
-                assert all(torch.isfinite(p.grad).all() for p in parameters)
-                torch.nn.utils.clip_grad_norm_(parameters, 10.)
-                optimizer.step()
-        sf.write(destination / f'{stem}-fit.wav', output.detach().cpu().numpy(), SR, subtype='FLOAT')
-        sf.write(destination / f'{stem}-original.wav', data['audio'], SR, subtype='FLOAT')
-        np.savez(destination / f'{stem}-fit.npz', articulation=art.detach().cpu().numpy(),
-                 source=src.detach().cpu().numpy(), scale=float(scale.detach()), f0=data['f0'],
-                 voiced=data['voiced'], phone=data['phone'], relative=data['relative'],
-                 phonemes=data['phonemes'], boundaries=data['boundaries'],
-                 samples=len(target), sample_rate=SR, control_hz=100, closures=config['closures'])
-        summary.append(dict(file=stem, sentence=row['sentence'], initial=curve[0]['full_audio_loss'],
-                            final=curve[-1]['full_audio_loss'], seconds=curve[-1]['seconds']))
-    (destination / 'fit-summary.json').write_text(json.dumps(summary, indent=2))
+def vocode(synth, audio, f0, noise, steps=600):
+    """Free per-frame harmonic and noise envelopes through the renderer: what any tract could at best say."""
+    bank = mel_bank(FFT, audio.device)
+    unmel = bank / bank.sum(0).clamp_min(1e-8)
+    envelopes = nn.Parameter(torch.full((len(f0), 2, 80), -4., device=audio.device))
+    optimizer = torch.optim.Adam([envelopes], lr=.05)
+    objective = AudioLoss(audio)
+    for _ in range(steps):
+        harmonic, aperiodic = (envelopes @ unmel).exp().unbind(1)
+        loss = objective(synth.render(synth.at_harmonics(harmonic, f0), aperiodic[None], f0, len(audio), noise))
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    return harmonic.detach(), aperiodic.detach()
+
+
+def fit(audio, f0, voiced, tract=None, steps=(400, 1000), log=None):
+    """Returns the tract, raw source [frames, 2], speaker colour and the waveform."""
+    frames = len(f0)
+    synth = Synth(closures=True).to(audio.device)
+    tract = (tract or Maeda(frames)).to(audio.device)
+    noise = torch.randn(1, len(audio), device=audio.device)
+    lung = nn.Parameter(torch.zeros(frames//KNOT + 2, device=audio.device))
+    # The folds start together where there is pitch and apart elsewhere.
+    glottis = nn.Parameter(2 - 4*voiced.round())
+    colour = nn.Parameter(torch.zeros(3, 8, device=audio.device))
+    parameters = [*tract.parameters(), lung, glottis, colour]
+    targets = vocode(synth, audio, f0, noise)
+    bank = mel_bank(FFT, audio.device)
+    objective, weights = AudioLoss(audio), effort_weights(audio)
+    number = (synth.frequencies / f0[:, None]).clamp_min(1.)
+
+    def source():
+        # Recording level is unknown, so the clip's peak pressure is 8 cmH2O by definition.
+        return torch.stack((F.interpolate((lung-lung.max())[None, None], size=frames, mode='linear', align_corners=True)[0, 0],
+                            glottis), -1)
+
+    for count, waveform in zip(steps, (False, True)):
+        optimizer = torch.optim.Adam(parameters, lr=.03)
+        schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, count, .003)
+        for step in range(count):
+            if waveform:
+                output = synth.sound(*tract(), source(), f0, voiced, len(audio), noise, colour, tract.junction)
+                loss = objective(output, (128, 256) if step < 100 else (256, 512, 1024))
+            else:
+                harmonic, aperiodic, tilt = synth.spectra(*tract(), source(), colour, tract.junction)
+                loss = sum((((model @ bank.T).clamp_min(1e-5).log() - (target @ bank.T).clamp_min(1e-5).log()).abs().mean(-1)
+                            * weight).mean() for model, target, weight in (
+                                (harmonic / number**tilt[:, None], targets[0], voiced), (aperiodic, targets[1], 1.)))
+            if log and step % 100 == 0:
+                print(log, 'waveform' if waveform else 'envelope', step, round(float(loss.detach()), 4), flush=True)
+            # Blowing is effort too, where nothing at all is heard.
+            loss = (loss + tract.penalty(weights) + SMOOTHNESS*smoothness(glottis)
+                    + 20*EFFORT*((weights > 19)*source()[:, 0].sigmoid().square()).mean())
+            assert torch.isfinite(loss), step
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(parameters, 10.)
+            optimizer.step()
+            schedule.step()
+    with torch.no_grad():
+        return tract, source(), colour.detach(), synth.sound(*tract(), source(), f0, voiced, len(audio), noise, colour, tract.junction)
 
 
 def main():
-    rows = json.loads((OUT / 'ablation-data/clips.json').read_text())
-    fit(rows, OUT / 'ablation-data', OUT / 'fit', DEFAULT)
+    destination = OUT / 'fit'
+    destination.mkdir(parents=True, exist_ok=True)
+    torch.manual_seed(7)
+    for row in json.loads((OUT / 'ablation-data/clips.json').read_text()):
+        stem = Path(row['file']).stem
+        data = np.load(OUT / 'ablation-data' / (stem+'.npz'))
+        audio, f0, voiced = [torch.tensor(data[k], device='cuda') for k in ('audio', 'f0', 'voiced')]
+        tract, source, colour, output = fit(audio, f0, voiced, log=stem)
+        sf.write(destination / f'{stem}-fit.wav', output.cpu().numpy(), SR, subtype='FLOAT')
+        sf.write(destination / f'{stem}-original.wav', data['audio'], SR, subtype='FLOAT')
+        with torch.no_grad():
+            areas, _, coupling = tract()
+            np.savez(destination / f'{stem}-fit.npz', articulation=tract.raw.cpu().numpy(),
+                     source=levels(areas, coupling, source).cpu().numpy(), lung_glottis=source.cpu().numpy(),
+                     colour=colour.cpu().numpy(), scale=tract.anatomy().cpu().numpy(), f0=data['f0'],
+                     voiced=data['voiced'], phone=data['phone'], relative=data['relative'],
+                     phonemes=data['phonemes'], boundaries=data['boundaries'], sentence=row['sentence'],
+                     samples=len(audio), sample_rate=SR, control_hz=100, closures=True)
 
 
 if __name__ == '__main__':

@@ -70,13 +70,13 @@ class ControlNet(nn.Module):
             nn.Conv1d(96, 96, 5, dilation=3, padding=6), nn.SiLU(),
             nn.Conv1d(96, 96, 5, dilation=9, padding=18), nn.SiLU())
         self.articulation = nn.Linear(96, len(NAMES))
-        self.source = nn.Linear(98, 4)
-        self.character = nn.Linear(8, 6)
+        self.source = nn.Linear(98, 2)
+        self.character = nn.Linear(8, 4)
         nn.init.zeros_(self.articulation.weight)
         nn.init.zeros_(self.articulation.bias)
         self.articulation.bias.data[-1] = -2.
         nn.init.zeros_(self.source.weight)
-        self.source.bias.data.copy_(torch.tensor([0., -7., -7., 0.]))
+        self.source.bias.data.copy_(torch.tensor([0., -2.]))
         nn.init.zeros_(self.character.weight)
         nn.init.zeros_(self.character.bias)
 

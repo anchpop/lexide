@@ -49,16 +49,16 @@ def main():
     torch.manual_seed(0)
     synth = Synth().to(device)
     art = torch.zeros(101, len(NAMES), device=device, requires_grad=True)
-    source = torch.tensor([[-40., -40., -6., 0.]], device=device).repeat(101, 1)
+    source = torch.tensor([[0., 1.]], device=device).repeat(101, 1)
     narrow = art.detach().clone()
     narrow[:, 3] = 3.  # Tip constriction (~0.11 cm²), not an almost sealed tube.
-    noise = torch.randn(2, SR, device=device)
+    noise = torch.randn(1, SR, device=device)
     pitch = torch.full((101,), 140., device=device)
     y = synth(narrow, source, pitch, torch.zeros_like(pitch), SR, noise=noise)
     assert y.square().mean().sqrt() > .001
     demo = .8*y/y.abs().max()
     sf.write(OUT / 'sanity-frication.wav', demo.detach().cpu().numpy(), SR, subtype='FLOAT')
-    voiced = synth(art, source*0, pitch, torch.ones_like(pitch), SR, noise=noise)
+    voiced = synth(art, source*torch.tensor([1., -2.], device=device), pitch, torch.ones_like(pitch), SR, noise=noise)
     voiced.square().mean().backward()
     assert torch.isfinite(art.grad).all() and art.grad.abs().sum() > 0
     narrow_areas, *_ = geometry(narrow)
