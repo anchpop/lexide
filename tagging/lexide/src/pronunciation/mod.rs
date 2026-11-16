@@ -118,6 +118,27 @@ impl Default for PredictRequest {
     }
 }
 
+/// Parse one label the deployed checkpoint emits. It was trained on g2p labels
+/// from before 0.7.0, so a few of its labels have since been renamed or split.
+/// Delete the table after the retrain on current labels (YAP-294).
+pub(crate) fn parse_checkpoint_label(
+    label: &str,
+) -> Result<Vec<Phoneme>, g2p_types::UnknownPhoneme> {
+    current_labels(label).iter().map(|p| p.parse()).collect()
+}
+
+/// Today's labels for one checkpoint label (see [`parse_checkpoint_label`]).
+pub(crate) fn current_labels(label: &str) -> Vec<&str> {
+    match label {
+        "ai\u{32f}" => vec!["aɪ"],
+        "au\u{32f}" => vec!["aʊ"],
+        "ei\u{32f}" => vec!["eɪ"],
+        "ou\u{32f}" => vec!["oʊ"],
+        "ɴː" => vec!["ɴ", "ɴ"],
+        _ => vec![label],
+    }
+}
+
 /// A bare-phone alternative; stress is reported separately on the emission.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PhonemeAlternative {
@@ -565,18 +586,18 @@ impl FrameMatrix {
     /// Decode into the shared inventory. Unknown emitted checkpoint labels
     /// are errors; the original matrix and its raw vocabulary remain available.
     pub fn phonemes(&self) -> Result<Vec<Phoneme>> {
-        self.decode_path()?
-            .runs
-            .iter()
-            .map(|run| {
-                self.vocab[run.id].parse().with_context(|| {
+        let mut phonemes = Vec::new();
+        for run in &self.decode_path()?.runs {
+            phonemes.extend(
+                parse_checkpoint_label(&self.vocab[run.id]).with_context(|| {
                     format!(
                         "unsupported checkpoint label at vocabulary index {}",
                         run.id
                     )
-                })
-            })
-            .collect()
+                })?,
+            );
+        }
+        Ok(phonemes)
     }
 
     /// The model's own reading, with blanks and repeats collapsed.
@@ -988,6 +1009,15 @@ mod tests {
         assert_eq!(unknown.greedy_ids(), [1]);
         assert!(unknown.phonemes().is_err()); // never substitute the runner-up
         assert_eq!(m.phonemes().unwrap(), [Phoneme::A]);
+        let retired = matrix(
+            &["<pad>", "ai̯", "ɴː"],
+            0,
+            &[&lp(&[0.1, 0.8, 0.1]), &lp(&[0.1, 0.1, 0.8])],
+        );
+        assert_eq!(
+            retired.phonemes().unwrap(),
+            ["aɪ", "ɴ", "ɴ"].map(|p| p.parse::<Phoneme>().unwrap())
+        );
         assert_eq!(
             m.score_target(&["x".parse().unwrap(), "y".parse().unwrap()])
                 .oov,

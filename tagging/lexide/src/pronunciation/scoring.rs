@@ -53,8 +53,11 @@ pub fn normalize_phonemes(phone: Phoneme, language: Option<Language>) -> Vec<Pho
 ///
 /// Only explicit tie bars split tokens: preserve untied diphthongs/diacritics.
 fn normalize_token(token: &str, language: Option<Language>) -> Vec<String> {
-    token
-        .split(['\u{0361}', '\u{035c}'])
+    // Stress is stripped below anyway; trimming it first lets retired
+    // checkpoint labels match.
+    super::current_labels(token.trim_start_matches(['ˈ', 'ˌ']))
+        .into_iter()
+        .flat_map(|label| label.split(['\u{0361}', '\u{035c}']))
         .filter_map(|component| normalize_phoneme(component, language))
         .collect()
 }
@@ -104,10 +107,18 @@ fn canonicalize_for_language(token: &str, language: Option<Language>) -> String 
         // German inventory: 43,267 rows / 1,079,676 tokens in lexide's
         // pronunciation/data/audio/deu/phonemes.jsonl contain neither ʔ nor
         // U+032F. Strip these reference-only marks, not vowels or diphthongs.
-        Some(Language::German) => token
-            .chars()
-            .filter(|c| !matches!(c, 'ʔ' | '\u{032f}'))
-            .collect(),
+        // English aɚ̯ has no bare form, so it keeps its mark.
+        Some(Language::German) => {
+            let bare: String = token
+                .chars()
+                .filter(|c| !matches!(c, 'ʔ' | '\u{032f}'))
+                .collect();
+            if bare.parse::<Phoneme>().is_ok() || bare.is_empty() {
+                bare
+            } else {
+                token.to_string()
+            }
+        }
         Some(Language::French) => match token {
             // R variants: ground truth uses ʁ (uvular fricative); the
             // multilingual model emits any of: r (alveolar trill, common
@@ -353,15 +364,13 @@ impl PredictResponse {
     /// Typed segmental output; strip the wire stress prefix (the original
     /// response retains stress), and reject unsupported labels explicitly.
     pub fn phonemes(&self) -> anyhow::Result<Vec<Phoneme>> {
-        self.phonemes
-            .iter()
-            .map(|p| {
-                p.phoneme
-                    .trim_start_matches(['ˈ', 'ˌ'])
-                    .parse()
-                    .map_err(Into::into)
-            })
-            .collect()
+        let mut phonemes = Vec::new();
+        for p in &self.phonemes {
+            phonemes.extend(super::parse_checkpoint_label(
+                p.phoneme.trim_start_matches(['ˈ', 'ˌ']),
+            )?);
+        }
+        Ok(phonemes)
     }
 
     /// Compare supplied readings. Ties keep the first reading; an empty set
@@ -504,6 +513,20 @@ mod tests {
             .failure_reason(1.0)
             .unwrap()
             .starts_with("word /x y/ not heard"));
+    }
+
+    #[test]
+    fn retired_checkpoint_labels_score_as_their_current_names() {
+        let prediction: PredictResponse = serde_json::from_value(serde_json::json!({
+            "phonemes": [
+                {"phoneme": "ˈai̯", "top_k": [{"phoneme": "ei̯", "probability": 0.2}]},
+                {"phoneme": "ɴː", "top_k": []}
+            ]
+        }))
+        .unwrap();
+        let target = Phonemized::from_ipa_tokens("aɪ ɴ ɴ").unwrap();
+        let score = prediction.score(&[target], None).unwrap().unwrap();
+        assert_eq!(score.edit_distance, 0);
     }
 
     #[test]
