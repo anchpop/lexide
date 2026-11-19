@@ -1,0 +1,47 @@
+# Spike: tiny-voca recipe on ~1.1 h of English Google Chirp 3 HD (Achernar),
+# labelled with yap's pack phonemes and lexide-phonetizer alignments.
+# Build features/ locally first (python -m voca.build); they upload with workdir.
+resources:
+  cloud: lambda
+  accelerators: A100:1
+  disk_size: 100
+  autostop:
+    idle_minutes: 5
+    down: true
+
+workdir: .
+
+# Pass with --secret HF_TOKEN --secret WANDB_API_KEY (values from the local environment).
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null
+
+setup: |
+  set -euo pipefail
+  pip install --index-url https://download.pytorch.org/whl/cu128 torch
+  pip install librosa soundfile numpy scipy huggingface_hub wandb transformers
+  python -c 'import torch; assert torch.cuda.is_available(), "CUDA required"; print(torch.__version__, torch.cuda.get_device_name())'
+
+run: |
+  set -euo pipefail
+  cd ~/sky_workdir
+  RUN=runs/${RUN_NAME:-eng-gemini}
+  FEATURES=features/${FEATURES:-eng_gemini_achernar}
+  # Feature sets too big to upload with workdir (.skyignore) live as one tar in
+  # the private dataset anchpop/lexide-tts-features (scripts/push_features.py).
+  if [ ! -f $FEATURES/train.jsonl ]; then
+    TAR=$(python -c "import sys; from huggingface_hub import hf_hub_download as d; print(d('anchpop/lexide-tts-features', sys.argv[1] + '.tar', repo_type='dataset'))" $(basename $FEATURES))
+    tar xf $TAR -C features && rm -f $TAR
+  fi
+  # Clusters tear themselves down 5 idle minutes after the job: push the run to HF as it goes.
+  (while true; do sleep 300; python scripts/sync_run.py $RUN || true; done) &
+  SYNC=$!
+  python -m voca.train ${CONFIG:+--config $CONFIG} --train $FEATURES/train.jsonl --validation $FEATURES/validation.jsonl \
+    --output $RUN --steps ${STEPS:-40000} --gan-start ${GAN_START:-8000} --gan-ratio 0.7 --teacher-final 0 \
+    --max-seconds 18000 --save-every 2000 --keep-every 10000 --log-every 50
+  python -m voca.speak --checkpoint $RUN/inference.pt --script data/eng_script.jsonl --split validation \
+    --output $RUN/samples-validation --device cuda
+  python -m voca.speak --checkpoint $RUN/inference.pt --script data/eng_script.jsonl --split validation \
+    --output $RUN/samples-cpu-timing --device cpu --limit 20
+  kill $SYNC
+  python scripts/sync_run.py $RUN

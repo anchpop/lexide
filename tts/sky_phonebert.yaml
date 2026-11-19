@@ -1,0 +1,35 @@
+# Phoneme BERT pretraining (voca.phonebert): text only, no audio.
+# Features: python -m voca.phonebert prepare ..., then scripts/push_features.py.
+resources:
+  cloud: lambda
+  accelerators: A100:1
+  disk_size: 100
+  autostop:
+    idle_minutes: 5
+    down: true
+
+workdir: .
+
+secrets:
+  HF_TOKEN: null
+  WANDB_API_KEY: null
+
+setup: |
+  set -euo pipefail
+  pip install --index-url https://download.pytorch.org/whl/cu128 torch
+  pip install numpy huggingface_hub wandb
+
+run: |
+  set -euo pipefail
+  cd ~/sky_workdir
+  RUN=runs/${RUN_NAME:-phonebert-eng}
+  FEATURES=features/${FEATURES:-eng_phonebert}
+  if [ ! -f $FEATURES/train.pt ]; then
+    TAR=$(python -c "import sys; from huggingface_hub import hf_hub_download as d; print(d('anchpop/lexide-tts-features', sys.argv[1] + '.tar', repo_type='dataset'))" $(basename $FEATURES))
+    tar xf $TAR -C features && rm -f $TAR
+  fi
+  (while true; do sleep 300; python scripts/sync_run.py $RUN || true; done) &
+  SYNC=$!
+  python -m voca.phonebert train $FEATURES $RUN --steps ${STEPS:-30000} --layers ${LAYERS:-10} --wandb
+  kill $SYNC
+  python scripts/sync_run.py $RUN
