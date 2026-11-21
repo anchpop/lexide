@@ -78,7 +78,12 @@ class Config:
     style_encoder_channels: int = 64      # training-only style encoders
     style_encoder_max: int = 512
     crop_frames: int = 256                # training window for the decoder (StyleTTS 2 trains on crops)
-    phoneme_encoder_width: int = 0        # >0: a pretrained phoneme encoder (voca.phonebert) feeds the prosody predictor
+    # A pretrained phoneme encoder (voca.phonebert) feeding the prosody predictor;
+    # 0 layers: none. voca.train --phoneme-encoder fills these from its checkpoint.
+    phoneme_encoder_layers: int = 0
+    phoneme_encoder_width: int = 256
+    phoneme_encoder_heads: int = 4
+    phoneme_encoder_feedforward: int = 1024
     max_tokens: int = 512
     max_frames: int = 3000
     mel_mean: float = -5.0

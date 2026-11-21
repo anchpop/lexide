@@ -7,6 +7,7 @@ downloads and no infrastructure management happen here.
 """
 
 import argparse
+import dataclasses
 from collections import defaultdict
 import json
 import math
@@ -17,7 +18,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from .config import CHECKPOINT_FORMAT, Config
-from .data import AnnotatedDataset, BucketSampler, collate
+from .data import AnnotatedDataset, BucketSampler, collate, prefetch
 from .losses import (Discriminators, MelConvergenceLoss, SpectralLoss, StyleCritics, discriminator_loss, generator_gan_loss,
                      masked_mean, slm_feature_loss)
 from .model import TinyVoca
@@ -146,15 +147,17 @@ class StyleTrainingSystem(nn.Module):
     def critics(self):
         return StyleCritics(self.model.config.sample_rate)
 
+
     def objective(self, batch, teacher_probability, weights=WEIGHTS, random_phase=True):
         m, c = self.model, self.model.config
         tokens, token_lengths, speakers, durations = batch["tokens"], batch["token_lengths"], batch["speakers"], batch["durations"]
         hidden, token_mask = m.encode(tokens, batch["stress"], token_lengths, speakers)
-        index, frame_mask, lengths = m.align(durations, token_mask)
-        if not torch.equal(lengths, batch["frame_lengths"]):
-            raise ValueError("durations do not sum to the acoustic frame count")
+        # The dataset checked that durations sum to the frame counts. Shapes come
+        # from the host copies of the lengths, so nothing here waits for the GPU.
+        host = batch["host"]
+        index, frame_mask, lengths = m.align(durations, token_mask, frames=batch["mel"].shape[1])
         # One window per utterance, the same length across the batch; centred when validating.
-        size = min(c.crop_frames, int(lengths.min()))
+        size = min(c.crop_frames, int(host["frame_lengths"].min()))
         offset = torch.rand(len(lengths), device=lengths.device) if self.training else torch.full_like(lengths, 0.5, dtype=torch.float)
         window = (offset * (lengths - size + 1)).long().clamp(max=lengths - size)[:, None] + torch.arange(size, device=lengths.device)
         mel = batch["mel"].gather(1, window[..., None].expand(-1, -1, c.n_mels))
@@ -164,7 +167,7 @@ class StyleTrainingSystem(nn.Module):
             m.observe_style(torch.cat((acoustic_style, prosodic_style), dim=-1).detach(), speakers)
         else:
             acoustic_style, prosodic_style = m.style[speakers].chunk(2, dim=-1)
-        states, logits = m.predict_tokens(hidden, tokens, batch["stress"], token_mask, token_lengths, prosodic_style)
+        states, logits = m.predict_tokens(hidden, tokens, batch["stress"], token_mask, host["token_lengths"], prosodic_style)
         logits = logits.float()
         # Durations as StyleTTS 2 learns them (bins "longer than k" + L1 on their sum),
         # on tokens that have frames; whether a pause-capable token has any is the presence logit.
@@ -175,7 +178,7 @@ class StyleTrainingSystem(nn.Module):
         pausable = token_mask & ~m.phone_tokens[tokens]
         pause = masked_mean(F.binary_cross_entropy_with_logits(logits[..., -1], (durations > 0).float(), reduction="none"), pausable)
         crop = index.gather(1, window)
-        prediction = m.predictor.F0Ntrain(frames_of(states, crop), prosodic_style, torch.full_like(lengths, size)).float()
+        prediction = m.predictor.F0Ntrain(frames_of(states, crop), prosodic_style, torch.full((len(lengths),), size)).float()
         target, trusted = batch["prosody"].gather(1, window[..., None].expand(-1, -1, 3)), batch["pitch_trusted"].gather(1, window)
         prosody, prosody_metrics = prosody_terms(prediction, target, trusted, torch.ones_like(trusted))
         teacher = torch.rand(len(lengths), device=lengths.device) < teacher_probability
@@ -186,14 +189,14 @@ class StyleTrainingSystem(nn.Module):
         real = batch["wave"].gather(1, samples)
         terms = dict(duration=duration, duration_bins=duration_bins, pause=pause, **prosody, mel_convergence=self.mel_convergence(wave, real))
         if self.training:
-            terms["slm"] = slm_feature_loss(wave, real, c.sample_rate)
+            terms["slm"], slm = slm_feature_loss(wave, real, c.sample_rate)
         loss = sum(weights[name] * value for name, value in terms.items())
         with torch.no_grad():
             stft, mel = self.spectral(wave, real, torch.full_like(lengths, size * c.hop))
             predicted = m.predict_durations(logits, tokens, token_mask)
         terms.update(base_loss=loss.detach(), teacher_fraction=teacher.float().mean(), stft=stft, mel=mel, **prosody_metrics,
                      **duration_metrics(predicted, logits[..., -1], durations, pausable, lengths))
-        return loss, terms, {"wave": wave, "real": real}
+        return loss, terms, {"wave": wave, "real": real, "slm": slm if self.training else None}
 
     def adversarial(self, loss, auxiliary, batch, critics, critic_optimizer, step, recipe):
         """StyleTTS 2's GAN step with fixed weights: critics first (the WavLM head
@@ -201,18 +204,18 @@ class StyleTrainingSystem(nn.Module):
         fake, real = auxiliary["wave"], auxiliary["real"]
         weights = recipe["weights"]
         critic_optimizer.zero_grad(set_to_none=True)
-        d_loss = critics.discriminator_loss(real, fake.detach(), slm=step % 10 == 0)
+        d_loss = critics.discriminator_loss(real, fake.detach(), slm=auxiliary["slm"] if step % 10 == 0 else None)
         d_loss.backward()
-        nn.utils.clip_grad_norm_(critics.parameters(), 10, error_if_nonfinite=True)
+        critic_grad = nn.utils.clip_grad_norm_(critics.parameters(), 10)
         critic_optimizer.step()
         critics.requires_grad_(False)
         try:
-            gan, slm_gan = critics.generator_loss(real, fake)
+            gan, slm_gan = critics.generator_loss(real, fake, auxiliary["slm"]["fake"])
             loss = loss + weights["gan"] * gan + weights["slm_gan"] * slm_gan
             loss.backward()
         finally:
             critics.requires_grad_(True)
-        return loss, dict(discriminator=d_loss, adversarial=gan, slm_adversarial=slm_gan)
+        return loss, dict(discriminator=d_loss, adversarial=gan, slm_adversarial=slm_gan, critic_grad_norm=critic_grad)
 
 
 TRAINING_SYSTEMS = {"tinyvoca": TrainingSystem, "styletts": StyleTrainingSystem}
@@ -245,7 +248,7 @@ def adversarial_backward(loss, reconstruction, wave, fake, real, index, critics,
     critic_optimizer.zero_grad(set_to_none=True)
     d_loss = discriminator_loss(critics(real), critics(fake.detach()))
     d_loss.backward()
-    nn.utils.clip_grad_norm_(critics.parameters(), 10, error_if_nonfinite=True)
+    critic_grad = nn.utils.clip_grad_norm_(critics.parameters(), 10)
     critic_optimizer.step()
     critics.requires_grad_(False)
     try:
@@ -266,14 +269,14 @@ def adversarial_backward(loss, reconstruction, wave, fake, real, index, critics,
         loss.backward()
     finally:
         critics.requires_grad_(True)
-    return loss, dict(discriminator=d_loss, adversarial=adversarial, feature_matching=matching, gan_scale=scale)
+    return loss, dict(discriminator=d_loss, adversarial=adversarial, feature_matching=matching, gan_scale=scale, critic_grad_norm=critic_grad)
 
 
 def optimize_step(system, critics, optimizer, critic_optimizer, batch, step, recipe):
     weights = recipe["weights"]
     start = (recipe.get("branched_from") or {}).get("step", 0)
     for group in optimizer.param_groups:
-        group["lr"] = learning_rate(step, recipe["learning_rate"], recipe["warmup"], recipe["lr_half_life"], start)
+        group["lr"] = group.get("scale", 1.0) * learning_rate(step, recipe["learning_rate"], recipe["warmup"], recipe["lr_half_life"], start)
     for group in critic_optimizer.param_groups:
         group["lr"] = learning_rate(step, recipe["learning_rate"], 1, recipe["lr_half_life"], start)
     optimizer.zero_grad(set_to_none=True)
@@ -284,10 +287,11 @@ def optimize_step(system, critics, optimizer, critic_optimizer, batch, step, rec
         metrics.update(gan_metrics)
     else:
         loss.backward()
-    grad = nn.utils.clip_grad_norm_(system.parameters(), recipe["grad_clip"], error_if_nonfinite=True)
+    # Gradient norms are returned, not checked: checking would make every step wait
+    # for the GPU. The training loop stops at the next log step on a non-finite one.
+    grad = nn.utils.clip_grad_norm_(system.parameters(), recipe["grad_clip"])
     optimizer.step()
-    return {**{k: float(v.detach()) for k, v in metrics.items()}, "loss": float(loss.detach()), "grad_norm": float(grad),
-            "frames": int(batch["frame_lengths"].sum()), "utterances": len(batch["frame_lengths"])}
+    return {**{k: torch.as_tensor(v).detach() for k, v in metrics.items()}, "loss": loss.detach(), "grad_norm": grad}
 
 
 def start_tracking(name, config):
@@ -305,10 +309,23 @@ def atomic_save(value, path):
     os.replace(temporary, path)
 
 
-def export_model(model, path, step, annotation=None):
+def export_model(model, path, step, annotation=None, weights=None):
+    """``weights``: a state dict to ship instead of the model's own (the EMA)."""
     atomic_save({"format_version": CHECKPOINT_FORMAT, "config": model.config.to_dict(), "step": step,
                  "frontend": {**frontend_identity(), "fingerprint": frontend_fingerprint()}, "annotation": annotation,
-                 "model": {k: v.detach().cpu() for k, v in model.state_dict().items()}}, path)
+                 "model": {k: v.detach().cpu() for k, v in (weights or model.state_dict()).items()}}, path)
+
+
+@torch.no_grad()
+def update_ema(ema, model, decay):
+    """Exponential moving average of the weights, which is what ships: it smooths
+    out the step-to-step jitter of adversarial training at no inference cost."""
+    names = [name for name, value in model.state_dict().items() if value.dtype.is_floating_point]
+    state = model.state_dict()
+    torch._foreach_lerp_([ema[name] for name in names], [state[name] for name in names], 1 - decay)
+    for name, value in state.items():
+        if not value.dtype.is_floating_point:
+            ema[name].copy_(value)
 
 
 def load_compatible(module, state):
@@ -398,6 +415,9 @@ def main():
     parser.add_argument("--validation", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--phoneme-encoder", type=Path, help="voca.phonebert encoder.pt to start the prosody predictor's text encoder from")
+    parser.add_argument("--phoneme-encoder-lr-scale", type=float, default=0.1)
+    parser.add_argument("--ema-decay", type=float, default=0.999, help="0 ships the raw weights")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--steps", type=int, default=100000)
     parser.add_argument("--batch-frames", type=int, default=9000, help="Padded acoustic frames per batch")
@@ -462,6 +482,11 @@ def main():
     if time.time() >= deadline():
         raise SystemExit("the cloud budget deadline has passed (or is too close); not starting")
     c = Config.from_dict(json.loads(args.config.read_text())) if args.config else Config()
+    if args.phoneme_encoder:
+        pretrained = torch.load(args.phoneme_encoder, map_location="cpu", weights_only=True)
+        e = pretrained["config"]
+        c = dataclasses.replace(c, phoneme_encoder_layers=pretrained["layers"], phoneme_encoder_width=e["channels"],
+                                phoneme_encoder_heads=e["heads"], phoneme_encoder_feedforward=e["feedforward"])
     weights = TRAINING_SYSTEMS[c.architecture].WEIGHTS
     if set(args.weights) - set(weights):
         parser.error(f"--weights may only override {sorted(weights)}")
@@ -485,14 +510,23 @@ def main():
     count = sum(p.numel() for p in system.model.parameters())
     if count > system.model.PARAMETER_BUDGET:
         raise ValueError(f"inference parameter budget exceeded: {count:,}")
-    optimizer = torch.optim.AdamW(system.parameters(), lr=args.learning_rate, betas=(0.8, 0.99), weight_decay=0.01)
-    critic_optimizer = torch.optim.AdamW(critics.parameters(), lr=args.learning_rate, betas=(0.8, 0.99), weight_decay=0.0)
+    if args.phoneme_encoder:
+        system.model.bert.load_state_dict(pretrained["encoder"])
+    # StyleTTS 2 fine-tunes its pretrained PL-BERT at a tenth of the learning rate.
+    encoder = getattr(system.model, "bert", None)
+    bert = {id(p) for p in encoder.parameters()} if encoder else set()
+    groups = [{"params": [p for p in system.parameters() if id(p) not in bert], "scale": 1.0}]
+    if bert:
+        groups.append({"params": list(encoder.parameters()), "scale": args.phoneme_encoder_lr_scale})
+    fused = str(args.device).startswith("cuda")   # one kernel per step instead of several per tensor; same update
+    optimizer = torch.optim.AdamW(groups, lr=args.learning_rate, betas=(0.8, 0.99), weight_decay=0.01, fused=fused)
+    critic_optimizer = torch.optim.AdamW(critics.parameters(), lr=args.learning_rate, betas=(0.8, 0.99), weight_decay=0.0, fused=fused)
     sampler = BucketSampler([train.lengths[i] for i in pool], args.batch_frames, args.max_batch, args.seed)
     fingerprints = [train.fingerprint, validation.fingerprint]
     recipe = {key: getattr(args, key) for key in ("batch_frames", "max_batch", "learning_rate", "warmup", "lr_half_life", "grad_clip",
                                                    "gan_start", "gan_ratio", "gan_ramp", "feature_matching", "gan_scale_max",
                                                    "crop_samples", "crops", "teacher_hold", "teacher_ramp", "teacher_final",
-                                                   "subset", "validation_size", "seed")}
+                                                   "subset", "validation_size", "seed", "ema_decay", "phoneme_encoder_lr_scale")}
     recipe["voiced_vowel_targets"] = not args.recorded_voicing
     recipe["weights"] = {**weights, **{key: float(value) for key, value in args.weights.items()}}
     recipe["branched_from"] = None
@@ -518,6 +552,7 @@ def main():
         optimizer.load_state_dict(state["optimizer"])
         critic_optimizer.load_state_dict(state["critic_optimizer"])
         sampler.load_state(state["sampler"])
+        ema = state["ema"]
         torch.set_rng_state(state["torch_rng"].cpu())
         if str(args.device).startswith("cuda") and state["cuda_rng"] is not None:
             torch.cuda.set_rng_state_all([x.cpu() for x in state["cuda_rng"]])
@@ -538,7 +573,10 @@ def main():
             critic_optimizer.load_state_dict(state["critic_optimizer"])
         loaded["optimizer"] = not loaded["grown"] and not loaded["new"] and not loaded["dropped"]
         if loaded["optimizer"]:
-            optimizer.load_state_dict(state["optimizer"])
+            scales = [group["scale"] for group in optimizer.param_groups]
+            optimizer.load_state_dict(state["optimizer"])   # restores the checkpoint's scales too: keep this run's
+            for group, scale in zip(optimizer.param_groups, scales):
+                group["scale"] = scale
         recipe["branched_from"] = {"step": step, "recipe": state["recipe"], "datasets": state["datasets"], "loaded": loaded}
         if args.new_data:
             recipe["branched_from"].update(frontend=state["frontend"], annotation=state["annotation"])
@@ -551,23 +589,37 @@ def main():
     print(json.dumps({"inference_parameters": count, "training_only_parameters": sum(p.numel() for p in system.parameters()) - count
                       + sum(p.numel() for p in critics.parameters()), "train_utterances": len(pool), "start_step": step,
                       "branched": bool(args.init_from), "resumed": bool(args.resume)}), flush=True)
+    if not args.resume:
+        ema = {k: v.detach().clone() for k, v in system.model.state_dict().items()}
     start = time.monotonic()
     system.train()
 
     def snapshot():
         return {"format_version": CHECKPOINT_FORMAT, "config": c.to_dict(), "frontend": frontend_fingerprint(), "annotation": train.annotation,
                 "step": step, "datasets": fingerprints, "recipe": recipe, "system": system.state_dict(), "critics": critics.state_dict(),
-                "optimizer": optimizer.state_dict(), "critic_optimizer": critic_optimizer.state_dict(), "sampler": sampler.state(),
+                "optimizer": optimizer.state_dict(), "critic_optimizer": critic_optimizer.state_dict(), "sampler": sampler_state, "ema": ema,
                 "torch_rng": torch.get_rng_state(), "cuda_rng": torch.cuda.get_rng_state_all() if str(args.device).startswith("cuda") else None}
+    sampler_state = sampler.state()   # as of the last batch trained on, not the prefetched ones
     if step == args.gan_start and not args.resume:
         atomic_save(snapshot(), args.output / f"step-{step:08d}.pt")
-    window, window_steps, window_start = defaultdict(float), 0, time.monotonic()
+    # Metrics stay on the GPU between log steps: reading one makes the CPU wait for
+    # the GPU, which then idles while the next step's kernels are being queued.
+    window, window_steps, window_start = None, 0, time.monotonic()
+    totals = {"frames": 0, "utterances": 0}
+    def draw():
+        indices = sampler.next()
+        return sampler.state(), collate([train[pool[i]] for i in indices], args.device)
+    batches = prefetch(draw)
     while step < args.steps:
-        batch = collate([train[pool[i]] for i in sampler.next()], args.device)
+        sampler_state, batch = next(batches)
         metrics = optimize_step(system, critics, optimizer, critic_optimizer, batch, step, recipe)
+        update_ema(ema, system.model, args.ema_decay)
         step += 1
-        for key, value in metrics.items():
-            window[key] += value
+        names = sorted(metrics)
+        values = torch.stack([metrics[name].float().reshape(()) for name in names])
+        window = values if window is None else window + values
+        totals["frames"] += int(batch["host"]["frame_lengths"].sum())
+        totals["utterances"] += len(batch["host"]["frame_lengths"])
         window_steps += 1
         elapsed = time.monotonic() - start
         should_stop = (elapsed >= args.max_seconds or step == args.steps or time.time() >= deadline()
@@ -578,15 +630,19 @@ def main():
             if str(args.device).startswith("cuda"):
                 torch.cuda.synchronize()
             seconds = time.monotonic() - window_start
-            record = {key: (value if key in ("frames", "utterances") else value / window_steps) for key, value in window.items()}
+            record = dict(zip(names, (window / window_steps).tolist()), **totals)
+            if not all(math.isfinite(record[key]) for key in ("grad_norm", "critic_grad_norm") if key in record):
+                raise FloatingPointError(f"non-finite gradient norm before step {step}; last saved checkpoint is intact")
             record.update(step=step, elapsed_seconds=elapsed, steps_per_second=window_steps / max(seconds, 1e-9),
-                          audio_seconds_per_second=window["frames"] * c.hop / c.sample_rate / max(seconds, 1e-9),
+                          audio_seconds_per_second=totals["frames"] * c.hop / c.sample_rate / max(seconds, 1e-9),
                           learning_rate=optimizer.param_groups[0]["lr"])
             if save:
                 record.update(validate(system, validation, validation_indices, args.device, recipe["weights"]))
                 state = snapshot()
                 atomic_save(state, args.output / "last.pt")
-                export_model(system.model, args.output / "inference.pt", step, train.annotation)
+                # inference.pt ships the EMA weights; validation metrics are of the raw ones.
+                export_model(system.model, args.output / "inference.pt", step, train.annotation, ema)
+                export_model(system.model, args.output / "inference-raw.pt", step, train.annotation)
                 if retain:
                     atomic_save(state, args.output / f"step-{step:08d}.pt")
             with (args.output / "metrics.jsonl").open("a") as stream:
@@ -594,7 +650,8 @@ def main():
             print(json.dumps(record), flush=True)
             if tracker:
                 tracker.log(record, step=step)
-            window, window_steps, window_start = defaultdict(float), 0, time.monotonic()
+            window, window_steps, window_start = None, 0, time.monotonic()
+            totals = {"frames": 0, "utterances": 0}
         if should_stop:
             break
 

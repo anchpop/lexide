@@ -30,6 +30,7 @@ run: |
   # Clusters tear themselves down 5 idle minutes after the job: push the run to HF as it goes.
   (while true; do sleep 300; python scripts/sync_run.py $RUN || true; done) &
   SYNC=$!
+  trap "kill $SYNC 2>/dev/null || true" EXIT   # a failed step must not leave the job alive, holding the GPU
   python -m voca.refine --base $BASE --train $FEATURES/train.jsonl --validation $FEATURES/validation.jsonl \
     --output $RUN --steps ${STEPS:-30000} --max-seconds 9000
   python -m voca.speak --checkpoint $BASE --refiner $RUN/refiner.pt --script data/eng_script.jsonl --split validation \

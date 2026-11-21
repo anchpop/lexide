@@ -39,7 +39,8 @@ from .model import Voca
 
 
 def run_lstm(lstm, x, lengths):
-    """Bidirectional LSTM over [B, T, C] that stops at each row's length."""
+    """Bidirectional LSTM over [B, T, C] that stops at each row's length. Packing
+    needs the lengths on the CPU: pass them from there to avoid a GPU wait."""
     packed = nn.utils.rnn.pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
     return nn.utils.rnn.pad_packed_sequence(lstm(packed)[0], batch_first=True, total_length=x.shape[1])[0]
 
@@ -305,15 +306,18 @@ class StyleEncoder(nn.Module):
 class StyleVoca(Voca):
     PARAMETER_BUDGET = 30_000_000
 
-    def __init__(self, config=Config(), bert=None):
-        """``bert``: optional pretrained phoneme encoder, ``(tokens, stress, mask) ->
-        [B, N, phoneme_encoder_width]`` (voca.phonebert.PhoneEncoder). As in Kokoro
-        its features reach the prosody predictor through ``bert_encoder``; without
-        one, the predictor reads the text encoder."""
+    def __init__(self, config=Config()):
+        """With ``phoneme_encoder_layers`` set, a phoneme encoder pretrained on text
+        (voca.phonebert) feeds the prosody predictor through ``bert_encoder``, as in
+        Kokoro; without one, the predictor reads the text encoder."""
         super().__init__(config)
         c = config
-        self.bert = bert
-        self.bert_encoder = nn.Linear(c.phoneme_encoder_width or c.channels, c.style_prosody_channels)
+        self.bert = None
+        if c.phoneme_encoder_layers:
+            from .phonebert import PhoneEncoder, encoder_config
+            self.bert = PhoneEncoder(encoder_config(c.phoneme_encoder_width, c.phoneme_encoder_heads, c.phoneme_encoder_feedforward,
+                                                    c.dropout), c.phoneme_encoder_layers)
+        self.bert_encoder = nn.Linear(c.phoneme_encoder_width if self.bert else c.channels, c.style_prosody_channels)
         self.predictor = ProsodyPredictor(c)
         self.decoder = Decoder(c)
         # Per voice: the mean [acoustic | prosodic] style of the training clips, what inference uses.
@@ -326,8 +330,10 @@ class StyleVoca(Voca):
     @torch.no_grad()
     def observe_style(self, style, speakers, momentum=0.01):
         """Running mean of the training clips' styles (exponential, like batch norm's)."""
-        for voice in speakers.unique():
-            self.style[voice].lerp_(style[speakers == voice].mean(0).float(), momentum)
+        total = torch.zeros_like(self.style).index_add_(0, speakers, style.float())
+        count = torch.zeros(len(self.style), device=style.device).index_add_(0, speakers, torch.ones_like(speakers, dtype=torch.float))
+        seen = (count > 0)[:, None]
+        self.style.copy_(torch.where(seen, self.style.lerp(total / count.clamp_min(1)[:, None], momentum), self.style))
 
     def predict_durations(self, logits, tokens, mask, speed=1.0):
         frames = torch.round(torch.sigmoid(logits[..., :-1].float()).sum(-1) / speed).long()

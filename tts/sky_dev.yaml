@@ -1,0 +1,27 @@
+# A GPU box for profiling and benchmarking (scripts/profile_step.py); work runs
+# as `sky exec` jobs so autostop sees it. Pick the GPU with --gpus.
+resources:
+  cloud: lambda
+  accelerators: GH200:1
+  disk_size: 100
+  autostop:
+    idle_minutes: 20
+    down: true
+
+workdir: .
+
+secrets:
+  HF_TOKEN: null
+
+setup: |
+  set -euo pipefail
+  pip install --index-url https://download.pytorch.org/whl/cu128 torch
+  pip install -U brotli  # the image's Brotli 1.0.9 breaks huggingface_hub downloads of compressed files
+  pip install librosa soundfile numpy scipy huggingface_hub transformers
+  python -c 'import torch; assert torch.cuda.is_available(), "CUDA required"; print(torch.__version__, torch.cuda.get_device_name())'
+  cd ~/sky_workdir
+  if [ ! -f features/eng_gemini_10h/train.jsonl ]; then
+    TAR=$(python -c "from huggingface_hub import hf_hub_download as d; print(d('anchpop/lexide-tts-features', 'eng_gemini_10h.tar', repo_type='dataset'))")
+    tar xf $TAR -C features && rm -f $TAR
+  fi
+  python -c "from transformers import AutoModel; AutoModel.from_pretrained('microsoft/wavlm-base-plus')"

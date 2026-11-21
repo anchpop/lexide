@@ -30,6 +30,7 @@ run: |
   fi
   (while true; do sleep 300; python scripts/sync_run.py $RUN || true; done) &
   SYNC=$!
+  trap "kill $SYNC 2>/dev/null || true" EXIT   # a failed step must not leave the job alive, holding the GPU
   python -m voca.phonebert train $FEATURES $RUN --steps ${STEPS:-30000} --layers ${LAYERS:-10} --wandb
   kill $SYNC
   python scripts/sync_run.py $RUN

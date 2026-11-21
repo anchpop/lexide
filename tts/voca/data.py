@@ -133,12 +133,38 @@ class AnnotatedDataset:
 
 
 def collate(items, device="cpu"):
-    batch = {key: pad_sequence([x[key] for x in items], batch_first=True).to(device)
+    """A padded batch on ``device``; ``batch["host"]`` keeps the lengths on the CPU,
+    so shapes and LSTM packing never wait for the GPU."""
+    batch = {key: pad_sequence([x[key] for x in items], batch_first=True)
              for key in ("tokens", "stress", "durations", "mel", "prosody", "pitch_trusted", "wave")}
-    batch["token_lengths"] = torch.tensor([x["tokens"].numel() for x in items], device=device)
-    batch["frame_lengths"] = torch.tensor([x["mel"].shape[0] for x in items], device=device)
-    batch["speakers"] = torch.tensor([x["speaker"] for x in items], device=device)
-    return batch
+    batch["token_lengths"] = torch.tensor([x["tokens"].numel() for x in items])
+    batch["frame_lengths"] = torch.tensor([x["mel"].shape[0] for x in items])
+    batch["speakers"] = torch.tensor([x["speaker"] for x in items])
+    host = {"token_lengths": batch["token_lengths"], "frame_lengths": batch["frame_lengths"]}
+    pin = torch.device(device).type == "cuda"
+    batch = {key: (value.pin_memory() if pin else value).to(device, non_blocking=True) for key, value in batch.items()}
+    return {**batch, "host": host}
+
+
+def prefetch(make, depth=2):
+    """``make()`` batches in a background thread, ``depth`` ahead of the consumer.
+    Order is preserved, so a seeded sampler gives the same data as without it."""
+    import queue
+    import threading
+    ready = queue.Queue(depth)
+
+    def work():
+        try:
+            while True:
+                ready.put(make())
+        except BaseException as error:
+            ready.put(error)
+    threading.Thread(target=work, daemon=True).start()
+    while True:
+        item = ready.get()
+        if isinstance(item, BaseException):
+            raise item
+        yield item
 
 
 class BucketSampler:

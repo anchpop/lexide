@@ -643,23 +643,28 @@ class Voca(nn.Module):
     def encode(self, tokens, stress, lengths, speakers):
         if tokens.ndim != 2 or stress.shape != tokens.shape or lengths.shape != (tokens.shape[0],) or speakers.shape != lengths.shape:
             raise ValueError("expected tokens[B,N], stress[B,N], lengths[B], speakers[B]")
-        if tokens.shape[1] > self.config.max_tokens or bool((lengths < 1).any()) or bool((lengths > tokens.shape[1]).any()):
+        # Value checks wait for the GPU; training data was validated when it was loaded.
+        if tokens.shape[1] > self.config.max_tokens or not self.training and bool(((lengths < 1) | (lengths > tokens.shape[1])).any()):
             raise ValueError("invalid token length")
         mask = length_mask(lengths, tokens.shape[1])
         x = (self.tokens(tokens) + self.stress(stress) + self.voices(speakers)[:, None]) * mask[..., None]
         return self.encoder(x, mask), mask
 
-    def align(self, durations, token_mask):
+    def align(self, durations, token_mask, frames=None):
         """Integer durations (zero is allowed for pause tokens) -> the token each
-        frame belongs to [B, F], the frame mask and the frame counts."""
-        if durations.shape != token_mask.shape or bool((durations < 0).any()) or bool((durations[~token_mask] != 0).any()):
+        frame belongs to [B, F], the frame mask and the frame counts. ``frames``:
+        the longest utterance's frame count when the caller knows it (no GPU wait)."""
+        if durations.shape != token_mask.shape:
             raise ValueError("invalid durations")
         lengths = durations.sum(1)
-        if bool((lengths < 1).any()):
-            raise ValueError("utterance has no frames")
-        if bool((lengths > self.config.max_frames).any()):
-            raise UtteranceTooLong("utterance exceeds max_frames; split the input")
-        size = int(lengths.max())
+        if not self.training:
+            if bool((durations < 0).any()) or bool((durations[~token_mask] != 0).any()):
+                raise ValueError("invalid durations")
+            if bool((lengths < 1).any()):
+                raise ValueError("utterance has no frames")
+            if bool((lengths > self.config.max_frames).any()):
+                raise UtteranceTooLong("utterance exceeds max_frames; split the input")
+        size = int(lengths.max()) if frames is None else frames
         frame = torch.arange(size, device=durations.device)[None].expand(durations.shape[0], size).contiguous()
         index = torch.searchsorted(durations.cumsum(1), frame, right=True).clamp(max=durations.shape[1] - 1)
         return index, frame < lengths[:, None], lengths

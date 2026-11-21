@@ -220,7 +220,8 @@ class WavLMDiscriminator(nn.Module):
         self.conv_post = weight_norm(nn.Conv1d(channels * 4, 1, 3, padding=1))
 
     def forward(self, states):
-        x = self.pre(states)
+        """All WavLM hidden states [B, 13, frames, 768] -> per-frame scores."""
+        x = self.pre(states.transpose(-1, -2).flatten(1, 2))
         for conv in self.convs:
             x = F.leaky_relu(conv(x), 0.1)
         return self.conv_post(x).flatten(1)
@@ -241,17 +242,19 @@ def resample(wave, source, target):
 
 
 def slm_states(wave, sample_rate):
-    """All 13 WavLM hidden states of 24 kHz audio, as [B, 13 * 768, frames]."""
+    """All 13 WavLM hidden states of 24 kHz audio, as [B, 13, frames, 768]."""
     states = wavlm(wave.device)(input_values=resample(wave, sample_rate, 16000), output_hidden_states=True).hidden_states
-    return torch.stack(states, dim=1).transpose(-1, -2).flatten(1, 2)
+    return torch.stack(states, dim=1)
 
 
 def slm_feature_loss(predicted, target, sample_rate):
-    """StyleTTS 2's ``WavLMLoss.forward``: L1 between the WavLM layers of recording and output."""
+    """StyleTTS 2's ``WavLMLoss.forward``: L1 between the WavLM layers of recording
+    and output. Also returns both states: WavLM is frozen, so the critics reuse
+    them instead of running it again on the same audio (same values, same gradient)."""
     with torch.no_grad():
-        real = wavlm(target.device)(input_values=resample(target, sample_rate, 16000), output_hidden_states=True).hidden_states
-    fake = wavlm(predicted.device)(input_values=resample(predicted, sample_rate, 16000), output_hidden_states=True).hidden_states
-    return sum((r - f).abs().mean() for r, f in zip(real, fake))
+        real = slm_states(target, sample_rate)
+    fake = slm_states(predicted, sample_rate)
+    return (real - fake).abs().mean((0, 2, 3)).sum(), {"real": real, "fake": fake}
 
 
 def relativistic_loss(real, fake):
@@ -260,7 +263,8 @@ def relativistic_loss(real, fake):
     total = 0.0
     for r, f in zip(real, fake):
         median = torch.median(r - f)
-        spread = (((r - f) - median).square())[r < f + median].mean()
+        below = (r < f + median).float()   # a masked mean, not boolean indexing: no GPU wait
+        spread = ((((r - f) - median).square()) * below).sum() / below.sum().clamp_min(1)
         total = total + 0.04 - F.relu(0.04 - spread)
     return total
 
@@ -280,22 +284,22 @@ class StyleCritics(nn.Module):
         return [critic(wave) for critic in (*self.mpd, *self.mrd)]
 
     def discriminator_loss(self, real, fake, slm):
-        """``slm``: also train the WavLM head (StyleTTS 2 does every 10th step)."""
+        """``slm``: the WavLM states {"real", "fake"} of these clips, to also train
+        the WavLM head (StyleTTS 2 does every 10th step), or None."""
         real_out, fake_out = self.outputs(real), self.outputs(fake)
         r, f = [o for o, _ in real_out], [o for o, _ in fake_out]
         loss = sum((1 - a).square().mean() + b.square().mean() for a, b in zip(r, f)) + relativistic_loss(r, f)
-        if slm:
-            with torch.no_grad():
-                real_states, fake_states = slm_states(real, self.sample_rate), slm_states(fake, self.sample_rate)
-            loss = loss + (1 - self.wd(real_states)).square().mean() + self.wd(fake_states).square().mean()
+        if slm is not None:
+            loss = loss + (1 - self.wd(slm["real"])).square().mean() + self.wd(slm["fake"].detach()).square().mean()
         return loss
 
-    def generator_loss(self, real, fake):
-        """Returns (MPD + MRD adversarial with TPRLS and 2x feature matching, SLM adversarial)."""
+    def generator_loss(self, real, fake, fake_states):
+        """Returns (MPD + MRD adversarial with TPRLS and 2x feature matching, SLM
+        adversarial on ``fake_states``, the output's WavLM states)."""
         with torch.no_grad():
             real_out = self.outputs(real)
         fake_out = self.outputs(fake)
         r, f = [o for o, _ in real_out], [o for o, _ in fake_out]
         matching = 2 * sum((a - b).abs().mean() for (_, ra), (_, fa) in zip(real_out, fake_out) for a, b in zip(ra, fa))
         gan = sum((1 - b).square().mean() for b in f) + matching + relativistic_loss(f, r)
-        return gan, (1 - self.wd(slm_states(fake, self.sample_rate))).square().mean()
+        return gan, (1 - self.wd(fake_states)).square().mean()

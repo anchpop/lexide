@@ -19,6 +19,7 @@ secrets:
 setup: |
   set -euo pipefail
   pip install --index-url https://download.pytorch.org/whl/cu128 torch
+  pip install -U brotli  # the image's Brotli 1.0.9 breaks huggingface_hub downloads of compressed files
   pip install librosa soundfile numpy scipy huggingface_hub wandb transformers
   python -c 'import torch; assert torch.cuda.is_available(), "CUDA required"; print(torch.__version__, torch.cuda.get_device_name())'
 
@@ -33,12 +34,15 @@ run: |
     TAR=$(python -c "import sys; from huggingface_hub import hf_hub_download as d; print(d('anchpop/lexide-tts-features', sys.argv[1] + '.tar', repo_type='dataset'))" $(basename $FEATURES))
     tar xf $TAR -C features && rm -f $TAR
   fi
+  # PHONEME_ENCODER=phonebert-eng/encoder.pt: a voca.phonebert run's encoder, from the runs repo.
+  ENCODER=${PHONEME_ENCODER:+$(python -c "import sys; from huggingface_hub import hf_hub_download as d; print(d('anchpop/lexide-tts-runs', sys.argv[1]))" $PHONEME_ENCODER)}
   # Clusters tear themselves down 5 idle minutes after the job: push the run to HF as it goes.
   (while true; do sleep 300; python scripts/sync_run.py $RUN || true; done) &
   SYNC=$!
-  python -m voca.train ${CONFIG:+--config $CONFIG} --train $FEATURES/train.jsonl --validation $FEATURES/validation.jsonl \
+  trap "kill $SYNC 2>/dev/null || true" EXIT   # a failed step must not leave the job alive, holding the GPU
+  python -m voca.train ${CONFIG:+--config $CONFIG} ${ENCODER:+--phoneme-encoder $ENCODER} --train $FEATURES/train.jsonl --validation $FEATURES/validation.jsonl \
     --output $RUN --steps ${STEPS:-40000} --gan-start ${GAN_START:-8000} --gan-ratio 0.7 --teacher-final 0 \
-    --max-seconds 18000 --save-every 2000 --keep-every 10000 --log-every 50
+    --max-batch ${MAX_BATCH:-32} --max-seconds 18000 --save-every 2000 --keep-every 10000 --log-every 50
   python -m voca.speak --checkpoint $RUN/inference.pt --script data/eng_script.jsonl --split validation \
     --output $RUN/samples-validation --device cuda
   python -m voca.speak --checkpoint $RUN/inference.pt --script data/eng_script.jsonl --split validation \
