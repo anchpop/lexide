@@ -58,7 +58,7 @@ scripts/language_data.py jpn
 VOCA_LANGUAGE=jpn python -m voca.phonebert prepare data/jpn_sentences.jsonl features/jpn_phonebert_v4 --exclude data/scripts/jpn_*.jsonl
 set -a; . ../.env; set +a   # HF_TOKEN, WANDB_API_KEY
 sky launch -c pb-jpn sky_phonebert.yaml --env LANGUAGE=jpn --secret HF_TOKEN --secret WANDB_API_KEY
-sky launch -c tts-x sky_train.yaml --env LANGUAGE=jpn --env RUN_NAME=jpn-x --env CONFIG=configs/styletts.json --secret HF_TOKEN --secret WANDB_API_KEY
+sky launch -c tts-x sky_train.yaml --env LANGUAGE=jpn --env RUN_NAME=jpn-x --env CONFIG=configs/styletts.json --env TEXTS=jpn_phonebert_v5 --secret HF_TOKEN --secret WANDB_API_KEY
 # runs push to the private HF repo anchpop/lexide-tts-runs every 5 min and log to W&B project lexide-tts
 scripts/score.py runs/eng-gemini/samples-validation --language eng
 ```
@@ -73,13 +73,19 @@ StyleTTS 2's prosody predictor, AdaIN decoder and Kokoro's iSTFTNet generator
 with the harmonic NSF source, trained from scratch on our phonemes, durations,
 pitch, voicing and energy (see the module docstring for what differs from
 upstream). Training adds StyleTTS 2's style encoders, multi-period,
-multi-resolution and WavLM critics and its loss weights (`voca/losses.py`);
+multi-resolution and WavLM critics, plus DAC's complex multi-resolution one, and its loss weights (`voca/losses.py`), with mHuBERT-147 as the speech model;
 none of that ships in `inference.pt`, which stores the mean training style
 instead. Training ends on exactly the inputs inference gives: the share of
 utterances whose prosody predictor and decoder get the stored styles instead of
 the recording's own is 0 for `--fixed-style-hold` steps (2000), then rises to 1
-by 70% of training (`--fixed-style-ramp`). Training needs `transformers`
-(WavLM-base-plus) and `praat-parselmouth`. The adversarial terms keep StyleTTS 2's
+by 70% of training (`--fixed-style-ramp`). From the GAN start the
+critics also judge the model's own speech, with its own timing and melody (`own_timing`,
+after StyleTTS 2's `slmadv.py`; everything else in training hears the recording's
+durations): for half of every batch, half of it from
+the phonebert corpus (`--texts`; `sky_train.yaml` `TEXTS=eng_phonebert_v4`; other languages `<lang>_phonebert_v5`).
+Its gradient reaches the prosody predictor, the durations included, and the
+decoder (`--weights` `own_gan`, `own_slm`). Training needs `transformers`
+(mHuBERT-147) and `praat-parselmouth`. The adversarial terms keep StyleTTS 2's
 fixed weights (`--weights` `gan`, `slm_gan`; `--feature-matching` 2) and fade in over
 `--gan-ramp` steps (`gan_scale` logs ramp x weight); `--gan-ratio` and
 `--gan-scale-max` balance TinyVoca's only. The generator low-passes its source
@@ -112,7 +118,7 @@ and boundary type, so the pack dump and scripts carry each gram's `pos` and
 the predictor LSTMs grow inputs for the word features).
 
 ```sh
-sky launch -c tts-x sky_train.yaml --env RUN_NAME=eng-styletts --env CONFIG=configs/styletts.json --secret HF_TOKEN --secret WANDB_API_KEY
+sky launch -c tts-x sky_train.yaml --env RUN_NAME=eng-styletts --env CONFIG=configs/styletts.json --env TEXTS=eng_phonebert_v4 --secret HF_TOKEN --secret WANDB_API_KEY
 # CPU real-time factors against the current model and Kokoro-82M (random weights, forced durations)
 PYTHONPATH=. python scripts/time_cpu.py --output runs/cpu-timing.json
 ```

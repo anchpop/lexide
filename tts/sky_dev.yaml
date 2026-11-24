@@ -24,4 +24,4 @@ setup: |
     TAR=$(python -c "from huggingface_hub import hf_hub_download as d; print(d('anchpop/lexide-tts-features', 'eng_gemini_10h_v3.tar', repo_type='dataset'))")
     mkdir -p features && tar xf $TAR -C features && rm -f $TAR
   fi
-  python -c "from transformers import AutoModel; AutoModel.from_pretrained('microsoft/wavlm-base-plus')"
+  python -c "from transformers import AutoModel; AutoModel.from_pretrained('utter-project/mHuBERT-147')"

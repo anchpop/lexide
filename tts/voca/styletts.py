@@ -49,9 +49,10 @@ from torch.nn import functional as F
 from torch.nn.utils.parametrizations import spectral_norm, weight_norm
 from .config import Config
 from .data import SHAPES
-from .model import Voca, position_in_token
+from .model import Voca, length_mask, position_in_token
 
 WORD_SEMITONES = 6.0                     # the word head's pitch outputs are in units of this many semitones
+WORD_GRADIENT = 0.1                      # share of the downstream losses' gradient that reaches the word head through its features
 WORD_FEATURES = 1 + len(SHAPES) + 2      # word_features: prominence, shape probabilities, excursion, final movement
 
 # run_lstm passes each direction's weights separately; compacting these small tensors per call is cheap.
@@ -96,15 +97,33 @@ def frames_of(values, index):
     return values.gather(1, index[..., None].expand(-1, -1, values.shape[-1]))
 
 
+def moving_frames(values, durations, soft, index, width=2.0):
+    """``frames_of(values, index)`` with a gradient for the durations: the integer
+    ``durations`` [B, N] decide the value (what ships), and the gradient of ``soft`` [B, N], their continuous
+    counterpart, is that of moving each token's boundaries, its states blending into its neighbours'
+    over about ``width`` frames. ``values`` get their gradient from the hard repetition only."""
+    ends = (durations + (soft - soft.detach())).cumsum(1)
+    frame = torch.arange(index.shape[1], device=index.device)[:, None] + 0.5
+    past = torch.sigmoid((frame - F.pad(ends, (1, 0))[:, None]) / width)     # [B, F, N + 1]: is this frame past the boundary
+    blend = (past[..., :-1] - past[..., 1:]).to(values.dtype) @ values.detach()
+    return frames_of(values, index) + (blend - blend.detach())
+
+
 class AdaIN1d(nn.Module):
     def __init__(self, style_dim, channels):
         super().__init__()
         self.norm = nn.InstanceNorm1d(channels, affine=False)
         self.fc = nn.Linear(style_dim, channels * 2)
 
-    def forward(self, x, s):
+    def forward(self, x, s, mask=None):
+        """``mask`` [B, 1, T]: normalize over those frames only and zero the others, as if each row came unpadded."""
         gamma, beta = self.fc(s)[..., None].chunk(2, dim=1)
-        return (1 + gamma) * self.norm(x) + beta
+        if mask is None:
+            return (1 + gamma) * self.norm(x) + beta
+        x, count = x.float(), mask.sum(-1, keepdim=True).clamp_min(1)
+        mean = (x * mask).sum(-1, keepdim=True) / count
+        variance = ((x - mean).square() * mask).sum(-1, keepdim=True) / count
+        return ((1 + gamma) * ((x - mean) / (variance + self.norm.eps).sqrt()) + beta) * mask
 
 
 class AdaLayerNorm(nn.Module):
@@ -130,9 +149,9 @@ class AdainResBlk1d(nn.Module):
         self.conv1x1 = weight_norm(nn.Conv1d(dim_in, dim_out, 1, 1, 0, bias=False)) if dim_in != dim_out else None
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, s):
-        y = self.conv1(self.dropout(F.leaky_relu(self.norm1(x, s), 0.2)))
-        y = self.conv2(self.dropout(F.leaky_relu(self.norm2(y, s), 0.2)))
+    def forward(self, x, s, mask=None):
+        y = self.conv1(self.dropout(F.leaky_relu(self.norm1(x, s, mask), 0.2)))
+        y = self.conv2(self.dropout(F.leaky_relu(self.norm2(y, s, mask), 0.2)))
         return (y + (x if self.conv1x1 is None else self.conv1x1(x))) * math.sqrt(0.5)
 
 
@@ -256,7 +275,8 @@ class ProsodyPredictor(nn.Module):
         targets [B, W, 4], [B] whether to use them): where measured, the recording's word features replace the predicted ones."""
         d = self.text_encoder(text, style, lengths, mask)
         outputs = self.words(torch.cat((text, d), dim=-1), words)
-        features = word_features(outputs.detach(), words)    # the word head learns only from its own targets
+        # The word head learns from its own targets, and a little from what its features do downstream.
+        features = word_features(outputs.detach() + WORD_GRADIENT * (outputs - outputs.detach()), words)
         if teacher is not None:
             values, measured = target_features(teacher[0], words)
             features = torch.where(measured & teacher[1][:, None, None], values, features)
@@ -264,13 +284,15 @@ class ProsodyPredictor(nn.Module):
         return states, self.duration_proj(run_lstm(self.lstm, states, lengths)), outputs
 
     def F0Ntrain(self, frames, style, lengths):
-        """Repeated token states with positions [B, F, d + s + WORD_FEATURES + 3] -> [B, F, 3] pitch, voicing logit, energy."""
+        """Repeated token states with positions [B, F, d + s + WORD_FEATURES + 3] -> [B, F, 3] pitch, voicing
+        logit, energy. Each row's are the same whatever it is padded to."""
         x = run_lstm(self.shared, frames, lengths).transpose(1, 2)
+        mask = length_mask(lengths, frames.shape[1])[:, None].float()
         f0, n = x, x
         for block in self.F0:
-            f0 = block(f0, style)
+            f0 = block(f0, style, mask)
         for block in self.N:
-            n = block(n, style)
+            n = block(n, style, mask)
         return torch.cat((self.F0_proj(f0), self.N_proj(n)), dim=1).transpose(1, 2)
 
 
@@ -522,10 +544,11 @@ class StyleVoca(Voca):
         words = self.words(tokens, mask)
         return (*self.predictor(self.bert_encoder(text), prosodic_style, lengths, mask, words, teacher), words)
 
-    @staticmethod
-    def frame_states(states, durations, index, frame):
-        """Token states repeated for the frames ``frame`` [B, F] they own (``index``), with each frame's place in its phone."""
-        return torch.cat((frames_of(states, index), position_in_token(durations, index, frame).to(states.dtype)), dim=-1)
+    def melody(self, states, durations, index, style, lengths):
+        """Token states already repeated over whole utterances (``frames_of``) -> [B, F, 3] pitch, voicing logit, energy."""
+        frame = torch.arange(index.shape[1], device=index.device)[None]
+        frames = torch.cat((states, position_in_token(durations, index, frame).to(states.dtype)), dim=-1)
+        return self.predictor.F0Ntrain(frames, style, lengths).float()
 
     @torch.no_grad()
     def observe_style(self, style, speakers, momentum=0.01):
@@ -538,6 +561,11 @@ class StyleVoca(Voca):
     def predict_durations(self, logits, tokens, mask, speed=1.0):
         frames = torch.round(torch.sigmoid(logits[..., :-1].float()).sum(-1) / speed).long()
         return self.gate_pauses(frames, logits[..., -1], tokens, mask)
+
+    def soft_durations(self, logits, tokens):
+        """``predict_durations`` without its rounding and its pause decisions, for their gradient: each pause weighs its probability."""
+        logits = logits.float()
+        return torch.sigmoid(logits[..., :-1]).sum(-1) * torch.where(self.phone_tokens[tokens], 1.0, torch.sigmoid(logits[..., -1]))
 
     @torch.inference_mode()
     def synthesize(self, tokens, lexical, lengths, speakers, speed=1.0, pitch_shift=0.0, seed=0, pitch_range=1.0, pitch_jitter=0.0,
@@ -552,8 +580,7 @@ class StyleVoca(Voca):
         states, logits, _, _ = self.predict_tokens(hidden, tokens, lexical, mask, lengths, prosodic_style)
         durations = self.pause_floors(self.predict_durations(logits, tokens, mask, speed), tokens, lengths, mask, comma_pause, stop_pause)
         index, frame_mask, frame_lengths = self.align(durations, mask)
-        frames = self.frame_states(states, durations, index, torch.arange(index.shape[1], device=index.device)[None])
-        prosody = self.predictor.F0Ntrain(frames, prosodic_style, frame_lengths)
+        prosody = self.melody(frames_of(states, index), durations, index, prosodic_style, frame_lengths)
         if voiced_vowels:
             prosody = self.voice_vowels(prosody, tokens, index, frame_mask)
         prosody = self.widen_pitch(prosody, frame_mask, pitch_range)

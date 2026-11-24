@@ -32,19 +32,22 @@ run: |
   FEATURES=features/${FEATURES:-${VOCA_LANGUAGE}_gemini_multi_v1}
   # Feature sets too big to upload with workdir (.skyignore) live as one tar in
   # the private dataset anchpop/lexide-tts-features (scripts/push_features.py).
-  if [ ! -f $FEATURES/train.jsonl ]; then
-    TAR=$(python -c "import sys; from huggingface_hub import hf_hub_download as d; print(d('anchpop/lexide-tts-features', sys.argv[1] + '.tar', repo_type='dataset'))" $(basename $FEATURES))
-    mkdir -p features && tar xf $TAR -C features && rm -f $TAR
-  fi
+  # TEXTS=eng_phonebert_v4: the voca.phonebert set whose sentences a styletts model also speaks in training (voca.data.OwnTexts).
+  for SET in $FEATURES ${TEXTS:+features/$TEXTS}; do
+    if ! ls $SET/train.* >/dev/null 2>&1; then
+      TAR=$(python -c "import sys; from huggingface_hub import hf_hub_download as d; print(d('anchpop/lexide-tts-features', sys.argv[1] + '.tar', repo_type='dataset'))" $(basename $SET))
+      mkdir -p features && tar xf $TAR -C features && rm -f $TAR
+    fi
+  done
   # PHONEME_ENCODER=phonebert-eng/encoder.pt: a voca.phonebert run's encoder, from the runs repo.
   ENCODER=${PHONEME_ENCODER:+$(python -c "import sys; from huggingface_hub import hf_hub_download as d; print(d('anchpop/lexide-tts-runs', sys.argv[1]))" $PHONEME_ENCODER)}
   # Clusters tear themselves down 5 idle minutes after the job: push the run to HF as it goes.
   (while true; do sleep 300; python scripts/sync_run.py $RUN || true; done) &
   SYNC=$!
   trap "kill $SYNC 2>/dev/null || true" EXIT   # a failed step must not leave the job alive, holding the GPU
-  python -m voca.train ${CONFIG:+--config $CONFIG} ${ENCODER:+--phoneme-encoder $ENCODER} --train $FEATURES/train.jsonl --validation $FEATURES/validation.jsonl \
+  python -m voca.train ${CONFIG:+--config $CONFIG} ${ENCODER:+--phoneme-encoder $ENCODER} --train $FEATURES/train.jsonl --validation $FEATURES/validation.jsonl ${TEXTS:+--texts features/$TEXTS/train.pt} \
     --output $RUN --steps ${STEPS:-40000} --gan-start ${GAN_START:-8000} --teacher-final 0 \
-    --max-batch ${MAX_BATCH:-32} --max-seconds 18000 --save-every 2000 --keep-every 10000 --log-every 50 ${EXTRA_ARGS:-}
+    --max-batch ${MAX_BATCH:-32} --max-seconds ${MAX_SECONDS:-18000} --save-every 2000 --keep-every 10000 --log-every 50 ${EXTRA_ARGS:-}
   # Every voice reads the same validation sentences.
   SCRIPT=data/scripts/${VOCA_LANGUAGE}_achernar.jsonl
   for SPEAKER in $(python -c "import json, sys; print(' '.join(json.load(open(sys.argv[1]))['speakers']))" $RUN/config.json); do

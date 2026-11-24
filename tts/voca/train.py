@@ -7,7 +7,9 @@ downloads and no infrastructure management happen here.
 """
 
 import argparse
+import contextlib
 import dataclasses
+from types import SimpleNamespace
 from collections import defaultdict
 import json
 import math
@@ -18,12 +20,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from .config import CHECKPOINT_FORMAT, Config, check_format
-from .data import AnnotatedDataset, BucketSampler, collate, pin, prefetch, to_device
+from .data import AnnotatedDataset, BucketSampler, OwnTexts, collate, pin, prefetch, to_device
 from .losses import (Discriminators, MelConvergenceLoss, SpectralLoss, StyleCritics, discriminator_loss, generator_gan_loss,
-                     masked_mean, slm_feature_loss)
+                     masked_mean, slm_feature_loss, slm_states)
 from .evaluate import DeployedEvaluation
-from .model import TinyVoca, build_model
-from .styletts import WORD_SEMITONES, StyleEncoder, StyleVoca, frames_of
+from .speak import COMMA_PAUSE, STOP_PAUSE
+from .model import Attention, TinyVoca, build_model, length_mask
+from .styletts import WORD_SEMITONES, StyleEncoder, StyleVoca, frames_of, moving_frames
 from .text import frontend_fingerprint, frontend_identity, sentence_type
 
 SEMITONES = 12 / math.log(2)
@@ -55,6 +58,22 @@ def prosody_terms(prediction, target, trusted, frame_mask):
                        pitch_spread_ratio=masked_mean(predicted_spread / recorded_spread.clamp_min(1e-3), enough),
                        voicing_accuracy=masked_mean(((prediction[..., 1] > 0) == target[..., 1].bool()).float(), frame_mask))
     return dict(pitch=pitch, pitch_spread=pitch_spread, voicing=voicing, energy=energy), metrics
+
+
+def contour_loss(prediction, target, sung):
+    """How the trusted recorded pitch moves, in semitones, at each of three scales: the difference between
+    neighbouring windows' mean pitch (a fall after a rise, which the pitch spread and the error per frame
+    both let through as a level)."""
+    total = 0.0
+    for width in (4, 11, 33):      # frames: about 45, 120 and 350 ms
+        count = len(prediction[0]) // width
+        weight = sung[:, :count * width].reshape(len(sung), count, width)
+        support = (weight.sum(-1) >= 0.5 * width).float()
+        means = [((x[:, :count * width].reshape(len(x), count, width) * weight).sum(-1) / weight.sum(-1).clamp_min(1)) for x in (prediction, target)]
+        pair = support[:, 1:] * support[:, :-1]
+        steps = [SEMITONES * (m[:, 1:] - m[:, :-1]) for m in means]
+        total = total + masked_mean(F.smooth_l1_loss(*steps, reduction="none"), pair)
+    return total / 3
 
 
 def word_terms(outputs, targets, words):
@@ -98,6 +117,23 @@ def duration_metrics(predicted, presence, durations, pausable, lengths):
                 pause_length_ratio=(predicted * pausable).sum() / (durations * pausable).sum().clamp_min(1),
                 duration_length_ratio=(predicted_frames / lengths).mean(),
                 duration_length_error=((predicted_frames - lengths).abs() / lengths).mean())
+
+
+@contextlib.contextmanager
+def undropped(model):
+    """``model`` without dropout, as it speaks in the app, but still in training mode (whose shape checks would
+    wait for the GPU in eval mode)."""
+    dropouts = [m for m in model.modules() if isinstance(m, (nn.Dropout, Attention))]
+    rates = [m.p if isinstance(m, nn.Dropout) else m.dropout for m in dropouts]
+
+    def set_rates(values):
+        for module, rate in zip(dropouts, values):
+            setattr(module, "p" if isinstance(module, nn.Dropout) else "dropout", rate)
+    set_rates([0.0] * len(dropouts))
+    try:
+        yield
+    finally:
+        set_rates(rates)
 
 
 class TrainingSystem(nn.Module):
@@ -151,6 +187,11 @@ class TrainingSystem(nn.Module):
         return loss, terms, {"wave": wave, "reconstruction": weights["stft"] * stft + weights["mel"] * mel}
 
     FEATURE_MATCHING = 30.0    # the default of --feature-matching
+    GRADIENT_LIMITS = {"model": 10.0}
+
+    def parts(self):
+        """Parameter groups by what their gradients come from, each with its own limit (``GRADIENT_LIMITS``)."""
+        return {"model": list(self.parameters())}
 
     def critics(self):
         return Discriminators()
@@ -166,11 +207,12 @@ class StyleTrainingSystem(nn.Module):
     """StyleTTS 2's second-stage objective, minus its aligner, pitch network,
     diffusion and PL-BERT: style encoders read each clip's mel; the prosody
     predictor is supervised by our durations, pitch, voicing and energy, and its
-    word head by word-level targets (``word_terms``) on whole sentences; the
-    decoder and the F0/energy branches run on equal-length random windows
-    (``config.crop_frames``) as in StyleTTS 2. Weights are StyleTTS 2's
+    word head by word-level targets (``word_terms``); both work on whole
+    sentences, as they do at inference (StyleTTS 2 predicts pitch and energy on crops, which alone moved
+    eng-style-voices-v3's pitch by 0.3-0.9 semitones). The decoder and the generator run on
+    equal-length random windows (``config.crop_frames``) as in StyleTTS 2. Weights are StyleTTS 2's
     (lambda_mel 5, lambda_ce 20, lambda_dur 1, lambda_gen 1, lambda_slm 1) and ours
-    for the prosody targets. The style encoders, critics and WavLM never ship.
+    for the prosody targets. The style encoders, critics and speech model never ship.
 
     Fixed styles (``schedule``'s fourth value, ramped from 0 to 1): the
     per-utterance chance that both the prosody predictor and the decoder get the
@@ -180,17 +222,26 @@ class StyleTrainingSystem(nn.Module):
 
     The adversarial terms are at StyleTTS 2's fixed weights (``gan``, with
     ``feature_matching`` on the waveform critics' feature matching, and
-    ``slm_gan``), faded in over ``gan_ramp`` steps from the GAN start."""
+    ``slm_gan``), faded in over ``gan_ramp`` steps from the GAN start.
+
+    From then on the model's own speech is judged too (``own_timing``, after StyleTTS 2's
+    ``SLMAdversarialLoss``), by the same critics: everything above hears the recording's durations."""
 
     WEIGHTS = {"duration": 1.0, "duration_bins": 20.0, "pause": 1.0, "pitch": 2.0, "pitch_spread": 2.0, "voicing": 1.0, "energy": 1.0,
                "word_rank": 1.0, "word_shape": 1.0, "word_excursion": 1.0, "word_final": 1.0,
-               "mel_convergence": 5.0, "slm": 1.0, "gan": 1.0, "slm_gan": 1.0,
+               "mel_convergence": 5.0, "slm": 1.0, "gan": 1.0, "slm_gan": 1.0, "own_gan": 1.0, "own_slm": 1.0, "contour": 0.1, "prosody_gan": 0.2,
                "shift": 0.0}    # shift_consistency; opt in with --weights '{"shift": 1}'
     CROP_ENDS, CROP_STARTS = 0.25, 0.15    # shares of training windows anchored to the utterance's end and start
     SHIFT_ITEMS = 2                  # utterances of each batch the shift-consistency loss renders a second time
     SHIFT_BAND = (1000.0, 4500.0)    # Hz: where the generator's clock images were measured
     FEATURE_MATCHING = 2.0     # StyleTTS 2's
-    SLM_EVERY = 10   # the WavLM critic head trains every this many steps
+    GRADIENT_LIMITS = {"prosody": 50.0, "sound": 500.0}
+    SLM_EVERY = 10   # the speech-model critic head trains every this many steps
+    # own_timing: the share of the critics' gradient that reaches the durations. In full it is as large as their own
+    # targets' (measured on eng-style-voices-v3), and noisier; StyleTTS 2 gives its durations 0.01 of a normalized one.
+    DURATION_GRADIENT = 0.1
+    OWN_WINDOW = 0.75  # own_timing's window, as a share of the recordings': the model is often a little faster
+    OWN_ROOM = 1.5     # own_timing: unrecorded sentences may come out this much longer than the batch's longest recording
 
     def __init__(self, config):
         super().__init__()
@@ -221,9 +272,72 @@ class StyleTrainingSystem(nn.Module):
         weight = voiced[:k, frame] * F.pad(torch.ones(a.shape[-1] - 4, device=wave.device), (2, 2))
         return ((a - b).abs().square() * weight[:, None]).sum() / ((a.abs().square() * weight[:, None]).sum() + 1e-6)
 
-    def critics(self):
-        return channels_last(StyleCritics(self.model.config.sample_rate))
+    def own_prosody(self, tokens, lexical, lengths, speakers, room, floors=False):
+        """What the model would say: its durations, melody and voicing with the stored voice styles, over whole sentences
+        (at most ``room`` frames). Its durations' gradient is ``soft``'s, scaled by ``DURATION_GRADIENT``.
+        ``floors``: the app's minimum pauses after punctuation, as speech is rendered; the delivery itself is
+        judged without them, because the recordings do not have them."""
+        m = self.model
+        prosodic_style = m.style[speakers].chunk(2, dim=-1)[1]
+        with undropped(m):
+            with torch.no_grad():
+                hidden, mask = m.encode(tokens, lexical, lengths, speakers)
+            states, logits, _, _ = m.predict_tokens(hidden, tokens, lexical, mask, lengths, prosodic_style)
+            durations = m.predict_durations(logits, tokens, mask)
+            if floors:
+                durations = m.pause_floors(durations, tokens, lengths, mask, COMMA_PAUSE, STOP_PAUSE)
+            index, frame_mask, frames = m.align(durations, mask, frames=room)
+            soft = m.soft_durations(logits, tokens)
+            soft = soft.detach() + self.DURATION_GRADIENT * (soft - soft.detach())
+            text, states = (moving_frames(x, durations, soft, index) for x in (hidden, states))
+            melody = m.melody(states, durations, index, prosodic_style, frames.clamp(max=room))
+        prosody = m.voice_vowels(melody, tokens, index, frame_mask)
+        return SimpleNamespace(text=text, durations=durations, soft=soft, prosody=prosody, index=index, frame_mask=frame_mask,
+                               frames=frames, mask=mask)
 
+    def own_timing(self, batch, offset, size):
+        """The model's own speech as it ships: its durations, melody and voicing, with the stored voice styles,
+        for the first half of the batch (``OwnTexts``) in windows of ``size`` frames (``OWN_WINDOW``), placed by ``offset`` [B] (0 the
+        start, 1 the end) as the recordings' are. Returns the waveforms and which rows count: at least a window
+        long, and no longer than ``OWN_ROOM`` times the batch's frames.
+
+        StyleTTS 2's judges the same audio with its WavLM critic alone and updates the prosody predictor and
+        phoneme BERT, never the decoder. Here the decoder learns from it too (it otherwise never hears the timing
+        it ships with) and so do the waveform critics. As there, the text encoder gets no gradient and the
+        durations a fraction (``DURATION_GRADIENT``). The source's pitch is detached (Kokoro's whole source
+        is): the gradient of a phase grows with every frame it was integrated over."""
+        m = self.model
+        tokens, lexical, lengths = batch["own_tokens"], batch["own_lexical"], batch["own_lengths"]
+        speakers = batch["speakers"][:len(tokens)]
+        acoustic_style = m.style[speakers].chunk(2, dim=-1)[0]
+        room = int(self.OWN_ROOM * batch["mel"].shape[1])     # a fixed shape
+        own = self.own_prosody(tokens, lexical, lengths, speakers, room, floors=True)
+        frames, text, prosody = own.frames.clamp(max=room), own.text, own.prosody
+        valid = (own.frames >= size) & (own.frames <= room)
+        window = (offset[:len(tokens)] * (frames - size + 1)).long().clamp(max=frames - size).clamp_min(0)[:, None]
+        window = window + torch.arange(size, device=window.device)
+        text, condition = frames_of(text, window), m.prosody_condition(frames_of(prosody, window))
+        generator, features = m.decoder.generator, m.decoder.features(text, condition, acoustic_style)
+        source = generator.excitation(m.frequency(condition[..., 0].detach()), condition[..., 1], features)
+        return generator.render(features, acoustic_style, source), valid.float()
+
+    def batch_tokens(self, batch):
+        """The batch's token mask, voices and the recording's (index, frame_mask) over whole sentences."""
+        mask = length_mask(batch["token_lengths"], batch["tokens"].shape[1])
+        index, frame_mask, _ = self.model.align(batch["durations"], mask, frames=batch["mel"].shape[1])
+        return mask, batch["speakers"], (index, frame_mask)
+
+    def parts(self):
+        """The prosody predictor with what only it reads, and what makes the sound."""
+        m = self.model
+        prosody = [m.predictor, m.bert_encoder, self.predictor_encoder] + ([m.bert] if m.bert else [])
+        prosody = [p for module in prosody for p in module.parameters()]
+        inside = {id(p) for p in prosody}
+        return {"prosody": prosody, "sound": [p for p in self.parameters() if id(p) not in inside]}
+
+    def critics(self):
+        c = self.model.config
+        return channels_last(StyleCritics(c.sample_rate, c.vocab_size, len(c.speakers)))
 
     def objective(self, batch, scheduled, weights=WEIGHTS, random_phase=True):
         """``scheduled`` (``schedule``): the per-utterance chances that the decoder gets recorded
@@ -274,20 +388,28 @@ class StyleTrainingSystem(nn.Module):
         duration = masked_mean((torch.sigmoid(logits[..., :-1]).sum(-1) - durations.clamp(max=c.style_max_duration)).abs(), present)
         pausable = token_mask & ~m.phone_tokens[tokens]
         pause = masked_mean(F.binary_cross_entropy_with_logits(logits[..., -1], (durations > 0).float(), reduction="none"), pausable)
-        crop = index.gather(1, window)
-        prediction = m.predictor.F0Ntrain(m.frame_states(states, durations, crop, window), prosodic_style, torch.full_like(lengths, size)).float()
-        target, trusted = batch["prosody"].gather(1, window[..., None].expand(-1, -1, 3)), batch["pitch_trusted"].gather(1, window)
-        prosody, prosody_metrics = prosody_terms(prediction, target, trusted, torch.ones_like(trusted))
+        prediction = m.melody(frames_of(states, index), durations, index, prosodic_style, lengths)
+        prosody, prosody_metrics = prosody_terms(prediction, batch["prosody"], batch["pitch_trusted"], frame_mask.float())
+        whole, target, prediction = prediction, frames_of(batch["prosody"], window), frames_of(prediction, window)
+        # The waveform losses teach the predicted melody too, through the decoder (as in StyleTTS 2). The source
+        # always follows the recorded pitch and voicing, because the waveform target does (StyleTTS 2's follows
+        # the predicted pitch, without a gradient).
         teacher = torch.rand(len(lengths), device=lengths.device) < scheduled[0]
-        condition = torch.where(teacher[:, None, None], target, m.prosody_condition(prediction.detach()))
-        # The source always follows the recorded pitch and voicing, because the waveform target does.
-        generator, features = m.decoder.generator, m.decoder.features(frames_of(hidden, crop), condition, acoustic_style)
+        condition = torch.where(teacher[:, None, None], target, m.prosody_condition(prediction))
+        generator, features = m.decoder.generator, m.decoder.features(frames_of(hidden, index.gather(1, window)), condition, acoustic_style)
         source = generator.excitation(m.frequency(target[..., 0]), target[..., 1], features)
         wave = generator.render(features, acoustic_style, source)
+        second = None
+        if self.training:    # another take for half the batch, from fresh source noise
+            k = len(wave) - len(wave) // 2
+            retake = generator.excitation(m.frequency(target[:k, :, 0]), target[:k, :, 1], features[:k])
+            second = generator.render(features[:k], acoustic_style[:k], retake)
         samples = (window[:, :1] * c.hop + torch.arange(size * c.hop, device=lengths.device))
         real = batch["wave"].gather(1, samples)
+        sung = frame_mask * batch["prosody"][..., 1] * batch["pitch_trusted"]
+        mel_convergence, takes = self.mel_convergence(wave, real, second)
         terms = dict(duration=duration, duration_bins=duration_bins, pause=pause, **prosody, **word,
-                     mel_convergence=self.mel_convergence(wave, real))
+                     contour=contour_loss(whole[..., 0], batch["prosody"][..., 0], sung), mel_convergence=mel_convergence)
         if self.training:
             terms["slm"], slm = slm_feature_loss(wave, real, c.sample_rate)
             if weights["shift"]:
@@ -301,28 +423,50 @@ class StyleTrainingSystem(nn.Module):
                      **duration_metrics(predicted, logits[..., -1], durations, pausable, lengths))
         if self.training:
             terms["fixed_style_fraction"] = fixed.float().mean()
-        return loss, terms, {"wave": wave, "real": real, "slm": slm if self.training else None,
+            terms["take_distance"] = takes
+        return loss, terms, {"wave": wave, "real": real, "slm": slm if self.training else None, "offset": offset, "size": size,
                              "reconstruction": weights["mel_convergence"] * terms["mel_convergence"]}
 
     def adversarial(self, loss, auxiliary, batch, critics, critic_optimizer, step, recipe, ramp):
-        """StyleTTS 2's GAN step: critics first (the WavLM head every 10th step), then
-        backward of ``loss`` plus the generator terms at their fixed weights, ramped."""
-        fake, real = auxiliary["wave"], auxiliary["real"]
+        """StyleTTS 2's GAN step, with the model's own speech (``own_timing``): critics first (the speech-model head every
+        10th step), then backward of ``loss`` plus the generator terms at their fixed weights, ramped."""
+        fake, real, weights = auxiliary["wave"], auxiliary["real"], recipe["weights"]
+        size = int(self.OWN_WINDOW * auxiliary["size"])
+        own, valid = self.own_timing(batch, auxiliary["offset"], size)
+        hop, rate = self.model.config.hop, self.model.config.sample_rate
+        start = (auxiliary["offset"][:len(own)] * (auxiliary["size"] - size + 1)).long().clamp(max=auxiliary["size"] - size)[:, None] * hop
+        short = real[:len(own)].gather(1, start + torch.arange(size * hop, device=real.device))     # the recordings in windows of the same length
+        slm = {**auxiliary["slm"], "own": slm_states(own, rate)}
+        if step % self.SLM_EVERY == 0:
+            with torch.no_grad():
+                slm["short"] = slm_states(short, rate)
+        # How every sentence of the batch is delivered: the recording's against what the model would say (``ProsodyCritic``).
+        token_mask, speakers, index = self.batch_tokens(batch)
+        told = self.own_prosody(batch["tokens"], batch["lexical"], batch["token_lengths"], speakers, int(self.OWN_ROOM * batch["mel"].shape[1]))
+        rows = (told.frames <= told.frame_mask.shape[1]).float()
+        recorded = critics.prosody.delivery(batch["durations"], None, batch["prosody"], *index)
+        spoken = critics.prosody.delivery(told.durations, told.soft, told.prosody, told.index, told.frame_mask)
+        text = (batch["tokens"], batch["lexical"], speakers)
         critic_optimizer.zero_grad(set_to_none=True)
-        d_loss = critics.discriminator_loss(real, fake.detach(), slm=auxiliary["slm"] if step % self.SLM_EVERY == 0 else None)
-        d_loss.backward()
+        d_loss = critics.discriminator_backward(real, fake.detach(), own.detach(), valid, slm if step % self.SLM_EVERY == 0 else None, short)
+        prosody_d = critics.prosody.discriminator_loss(critics.prosody(*text, recorded, token_mask), critics.prosody(*text, spoken.detach(), token_mask), rows)
+        prosody_d.backward()
         critic_grad = nn.utils.clip_grad_norm_(critics.parameters(), 10)
         critic_optimizer.step()
         critics.requires_grad_(False)
         try:
-            adversarial, matching, slm_gan = critics.generator_loss(real, fake, auxiliary["slm"]["fake"])
-            scale = torch.as_tensor(ramp * recipe["weights"]["gan"], device=fake.device)
-            loss = loss + scale * (adversarial + recipe["feature_matching"] * matching) + ramp * recipe["weights"]["slm_gan"] * slm_gan
-            loss.backward()
+            scale = torch.as_tensor(ramp * weights["gan"], device=fake.device)
+            own_scale = torch.as_tensor(ramp * weights["own_gan"], device=fake.device)
+            adversarial, matching, own_gan, at_fake, at_own = critics.generator_gradients(real, fake, own, valid, scale, recipe["feature_matching"], own_scale)
+            slm_gan, own_slm = critics.speech_model_losses(valid, slm)
+            prosody_gan = critics.prosody.generator_loss(critics.prosody(*text, spoken, token_mask), rows)
+            loss = loss + ramp * (weights["slm_gan"] * slm_gan + weights["own_slm"] * own_slm + weights["prosody_gan"] * prosody_gan)
+            torch.autograd.backward([loss, fake, own], [None, at_fake, at_own])
+            loss = loss.detach() + scale * (adversarial + recipe["feature_matching"] * matching) + own_scale * own_gan
         finally:
             critics.requires_grad_(True)
-        return loss, dict(discriminator=d_loss, adversarial=adversarial, feature_matching=matching, slm_adversarial=slm_gan,
-                          critic_grad_norm=critic_grad, gan_scale=scale)
+        return loss, dict(discriminator=d_loss + prosody_d, adversarial=adversarial, feature_matching=matching, slm_adversarial=slm_gan,
+                          own_adversarial=own_gan, own_slm_adversarial=own_slm, prosody_discriminator=prosody_d, prosody_adversarial=prosody_gan, own_valid=valid.mean(), critic_grad_norm=critic_grad, gan_scale=scale)
 
 
 TRAINING_SYSTEMS = {"tinyvoca": TrainingSystem, "styletts": StyleTrainingSystem}
@@ -436,9 +580,10 @@ def train_step(system, critics, optimizer, critic_optimizer, batch, step, recipe
             loss.backward()
     # Gradient norms are returned, not checked: checking would make every step wait
     # for the GPU. The training loop stops at the next log step on a non-finite one.
-    grad = nn.utils.clip_grad_norm_(system.parameters(), recipe["grad_clip"])
+    norms = {f"{part}_grad_norm": nn.utils.clip_grad_norm_(parameters, system.GRADIENT_LIMITS[part])
+             for part, parameters in system.parts().items()}
     optimizer.step()
-    return {**{k: torch.as_tensor(v).detach() for k, v in metrics.items()}, "loss": loss.detach(), "grad_norm": grad}
+    return {**{k: torch.as_tensor(v).detach() for k, v in metrics.items()}, "loss": loss.detach(), **norms}
 
 
 class ChannelsLast(nn.Module):
@@ -462,11 +607,11 @@ def channels_last(module):
 
 class GraphedSteps:
     """``optimize_step`` replayed from CUDA graphs, one per batch shape and phase
-    (before the GAN, GAN, GAN with the WavLM head's update). Replaying skips the
+    (before the GAN, GAN, GAN with the speech-model head's update). Replaying skips the
     ~14k kernel launches per step that otherwise keep the GPU waiting on Python.
 
     The first step of each shape and phase runs eagerly, which creates what a
-    capture must not (optimizer state, WavLM, cuFFT plans), and its graph is
+    capture must not (optimizer state, the speech model, cuFFT plans), and its graph is
     captured right after. Eager steps allocate from the graphs' memory pool, so
     they reuse the graphs' scratch memory instead of needing their own.
 
@@ -672,7 +817,7 @@ def validate(system, dataset, indices, device, weights, batch_size=8):
     so the spectra are comparable with the recording, which also means neither
     is what a learner hears (``voca.evaluate`` scores that). Durations and
     pauses are the free-running predictors'; pitch and voicing are predicted at
-    the recorded durations, on the decoder's centred window. This is a
+    the recorded durations. This is a
     training monitor; pronunciation is judged separately with ASR and by listening.
     """
     system.eval()
@@ -701,6 +846,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--phoneme-encoder", type=Path, help="voca.phonebert encoder.pt to start the prosody predictor's text encoder from")
+    parser.add_argument("--texts", type=Path, help="styletts: voca.phonebert prepare's train.pt, sentences for the own-timing pass (voca.data.OwnTexts)")
     parser.add_argument("--phoneme-encoder-lr-scale", type=float, default=0.1)
     parser.add_argument("--ema-decay", type=float, default=0.999, help="0 ships the raw weights")
     parser.add_argument("--device", default="cuda")
@@ -710,7 +856,6 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--warmup", type=int, default=1000)
     parser.add_argument("--lr-half-life", type=float, default=100000)
-    parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--weights", type=json.loads, default={}, help="JSON overrides for the loss weights, e.g. '{\"mel\": 5}'")
     parser.add_argument("--gan-start", type=int, default=8000)
     parser.add_argument("--gan-ratio", type=float, default=0.7, help="tinyvoca: adversarial gradient as a fraction of the "
@@ -788,6 +933,8 @@ def main():
         c = dataclasses.replace(c, phoneme_encoder_layers=pretrained["layers"], phoneme_encoder_distinct=pretrained.get("distinct", 0),
                                 phoneme_encoder_width=e["channels"],
                                 phoneme_encoder_heads=e["heads"], phoneme_encoder_feedforward=e["feedforward"])
+    if (c.architecture == "styletts") != bool(args.texts):
+        parser.error("--texts is for styletts, which needs it")
     weights = TRAINING_SYSTEMS[c.architecture].WEIGHTS
     if set(args.weights) - set(weights):
         parser.error(f"--weights may only override {sorted(weights)}")
@@ -830,8 +977,9 @@ def main():
     critic_optimizer = adamw([{"params": list(critics.parameters())}], args.device, lr=args.learning_rate, betas=(0.8, 0.99), weight_decay=0.0)
     sampler = BucketSampler([train.lengths[i] for i in pool], [train.token_counts[i] for i in pool], [train.speakers[i] for i in pool],
                             args.batch_frames, args.max_batch, args.seed, args.sampling_alpha)
-    fingerprints = [train.fingerprint, validation.fingerprint]
-    recipe = {key: getattr(args, key) for key in ("batch_frames", "max_batch", "learning_rate", "warmup", "lr_half_life", "grad_clip",
+    texts = OwnTexts(args.texts) if c.architecture == "styletts" else None
+    fingerprints = [train.fingerprint, validation.fingerprint, texts and texts.fingerprint]
+    recipe = {key: getattr(args, key) for key in ("batch_frames", "max_batch", "learning_rate", "warmup", "lr_half_life",
                                                    "gan_start", "gan_ratio", "gan_ramp", "feature_matching", "gan_scale_max",
                                                    "crop_samples", "crops", "teacher_hold", "teacher_ramp", "teacher_final",
                                                    "word_teacher_hold", "word_teacher_ramp", "sampling_alpha",
@@ -839,6 +987,7 @@ def main():
                                                    "fixed_style_hold", "fixed_style_ramp", "deployed_size")}
     recipe["voiced_vowel_targets"] = not args.recorded_voicing
     recipe["weights"] = {**weights, **{key: float(value) for key, value in args.weights.items()}}
+    recipe["gradient_limits"] = system.GRADIENT_LIMITS
     recipe["branched_from"] = None
     tracker = start_tracking(args.output.name, {"model": c.to_dict(), "recipe": recipe})
     step = 0
@@ -919,7 +1068,10 @@ def main():
     totals = {"frames": 0, "utterances": 0}
     def draw():
         indices, shape = sampler.next()
-        return sampler.state(), pin(collate([train[pool[i]] for i in indices], shape))
+        batch = collate([train[pool[i]] for i in indices], shape)
+        if texts:
+            batch = texts.add(batch, sampler.generator)
+        return sampler.state(), pin(batch)
     batches = prefetch(draw)
     if args.cuda_graphs:
         graphed = GraphedSteps(system, critics, optimizer, critic_optimizer, recipe)
@@ -947,7 +1099,7 @@ def main():
                 torch.cuda.synchronize()
             seconds = time.monotonic() - window_start
             record = dict(zip(names, (window / window_steps).tolist()), **totals)
-            if not all(math.isfinite(record[key]) for key in ("grad_norm", "critic_grad_norm") if key in record):
+            if not all(math.isfinite(value) for key, value in record.items() if key.endswith("grad_norm")):
                 raise FloatingPointError(f"non-finite gradient norm before step {step}; last saved checkpoint is intact")
             record.update(step=step, elapsed_seconds=elapsed, steps_per_second=window_steps / max(seconds, 1e-9),
                           audio_seconds_per_second=totals["frames"] * c.hop / c.sample_rate / max(seconds, 1e-9),

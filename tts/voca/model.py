@@ -769,7 +769,8 @@ class Voca(nn.Module):
         """Minimum pauses (seconds) after punctuation inside the utterance. The
         teacher barely pauses at commas, and learners need the phrasing. The
         punctuation right before EOS is left alone: trailing silence is just latency."""
-        floors = torch.tensor([0.0, comma_pause, stop_pause], device=tokens.device)[self.pause_kind[tokens]]
+        kind = self.pause_kind[tokens]
+        floors = comma_pause * (kind == 1) + stop_pause * (kind == 2)     # no host tensor: training captures this in a CUDA graph
         floors = torch.ceil(floors * self.config.sample_rate / self.config.hop).long()
         inside = torch.arange(tokens.shape[1], device=tokens.device)[None] < (lengths - 2)[:, None]
         return torch.where(inside & mask, torch.maximum(durations, floors), durations)
