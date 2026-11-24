@@ -1,9 +1,7 @@
 data/eng_achernar/
-data/eng_sentences.jsonl
+data/*_gemini_*/
+data/*_sentences.jsonl
 g2p-jsonl/
 runs/
 __pycache__/
-data/eng_gemini_achernar/
-features/eng_achernar/
-features/eng_gemini_10h/
-features/eng_phonebert/
+features/

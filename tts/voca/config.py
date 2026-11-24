@@ -3,8 +3,20 @@ import hashlib
 import json
 import math
 
-CHECKPOINT_FORMAT = 5  # 5: aperiodic harmonic cutoff + post-filter. 2-3: byte tokens + learned aligner.
-ANNOTATION_VERSION = 3
+# 6: the StyleTTS generator upsamples by interpolation and trains its source (noise gain, mixer).
+# 7: the generator reads its source spectrum as real and imaginary parts (was magnitude and angle).
+# 8: the generator low-passes its source coefficients before each strided injection (no aliased source lines).
+# 9: soft voicing: the source and the decoder take the voicing probability, not a 0/1 decision.
+# 10: the source's sines (amplitude and phase) and noise bands are predicted per frame, not fixed.
+# 5: aperiodic harmonic cutoff + post-filter. 2-3: byte tokens + learned aligner.
+CHECKPOINT_FORMAT = 10
+
+
+def check_format(state, what):
+    """Refuse a checkpoint written by another model format."""
+    if state.get("format_version") != CHECKPOINT_FORMAT:
+        raise ValueError(f"{what} is format {state.get('format_version')}, this code reads format {CHECKPOINT_FORMAT} "
+                         "(see voca.config.CHECKPOINT_FORMAT); retrain it")
 
 
 def _digest(value):
@@ -13,7 +25,7 @@ def _digest(value):
 
 @dataclass(frozen=True)
 class Config:
-    # Acoustic features (unchanged since feature schema 2; existing files are reused).
+    # Acoustic features (see ``acoustic_config`` for their version).
     sample_rate: int = 24000
     hop: int = 256
     n_fft: int = 1024
@@ -68,6 +80,7 @@ class Config:
     style_dim: int = 128                  # each of the acoustic and the prosodic half
     style_prosody_channels: int = 192
     style_prosody_layers: int = 3
+    style_prosody_distinct: int = 0       # looped duration encoder: distinct LSTMs repeated to the depth (0: none shared)
     style_max_duration: int = 64          # frames; duration = sum of this many sigmoids
     decoder_channels: int = 448
     generator_channels: int = 320          # ~8M generator; 224 ~4M, 144 ~2M
@@ -81,6 +94,7 @@ class Config:
     # A pretrained phoneme encoder (voca.phonebert) feeding the prosody predictor;
     # 0 layers: none. voca.train --phoneme-encoder fills these from its checkpoint.
     phoneme_encoder_layers: int = 0
+    phoneme_encoder_distinct: int = 0     # looped: this many distinct blocks repeated to the full depth (0: none shared)
     phoneme_encoder_width: int = 256
     phoneme_encoder_heads: int = 4
     phoneme_encoder_feedforward: int = 1024
@@ -128,22 +142,12 @@ class Config:
     @property
     def acoustic_config(self):
         """Settings that determine stored wave/mel/prosody tensors. Tokens and
-        durations are versioned separately by the annotation layer."""
+        durations are versioned separately by the annotation layer.
+        Feature version 3 added ``pitch_check``, a second pitch tracker's track."""
         fields = ("sample_rate", "hop", "n_fft", "n_mels", "f0_min", "f0_max")
-        return {**{key: getattr(self, key) for key in fields}, "feature_version": 2,
+        return {**{key: getattr(self, key) for key in fields}, "feature_version": 3,
                 "pitch_reference_hz": 200, "log_floor": 1e-5}
 
     @property
     def acoustic_fingerprint(self):
         return _digest(self.acoustic_config)
-
-    @property
-    def legacy_feature_fingerprint(self):
-        """Fingerprint written by the byte-token preparation (front end 2).
-
-        Feature files carrying it hold compatible acoustics and STALE tokens;
-        only the annotation step may read them, and it ignores their tokens.
-        """
-        fields = ("sample_rate", "hop", "n_fft", "n_mels", "f0_min", "f0_max", "speakers")
-        return _digest({**{key: getattr(self, key) for key in fields}, "vocab_size": 259, "feature_version": 2,
-                        "frontend_version": 2, "pitch_reference_hz": 200, "log_floor": 1e-5})

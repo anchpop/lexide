@@ -6,7 +6,13 @@ No audio. Every sentence of a pack dump is tokenized exactly as TTS input is
 
 * masked phonemes: whole words have their phones hidden (UNK stands in for a
   mask token, so the inventory does not change) and the encoder must restore them;
-* phoneme to word: at every phone, name the word it belongs to.
+* phoneme to word: at every phone, name the word it belongs to (where the
+  frontend could match the gram's words to its phone groups; elsewhere the
+  word is still masked as a whole but not named);
+* masked part of speech and rarity: a masked word's part of speech and its
+  gram's rarity (on all of the gram's phones, or its other words would give it
+  away) are hidden too, and restored from context. Every other word keeps
+  them as inputs, as in TTS.
 
 Each job has a single linear head, too small to do any thinking, so the
 encoder's per-phone vectors have to carry which words are present and how the
@@ -14,9 +20,12 @@ sentence is built: what intonation depends on. The heads are thrown away;
 `encoder.pt` holds only the embeddings and the transformer, sized to plug in
 where TinyVoca's text encoder is (through a projection if the widths differ).
 
-    python -m voca.phonebert prepare data/eng_sentences.jsonl features/eng_phonebert \
-        --exclude data/eng_script_10h.jsonl
-    python -m voca.phonebert train features/eng_phonebert runs/phonebert-eng
+One per language, like the TTS model: run it with that language's
+inventory (``VOCA_LANGUAGE``, see voca.text).
+
+    VOCA_LANGUAGE=jpn python -m voca.phonebert prepare data/jpn_sentences.jsonl features/jpn_phonebert_v1 \
+        --exclude data/scripts/jpn_*.jsonl
+    VOCA_LANGUAGE=jpn python -m voca.phonebert train features/jpn_phonebert_v1 runs/phonebert-jpn-v1
 """
 
 import argparse
@@ -33,11 +42,12 @@ from torch import nn
 from torch.nn import functional as F
 
 from .config import Config
-from .model import Stack, length_mask
-from .text import SYMBOL_TO_ID, UNK, PHONE_IDS, tokenize
+from .model import Stack, add_lexical_embeddings, embed_tokens, length_mask
+from .text import LEXICAL, SYMBOL_TO_ID, UNK, PHONE_IDS, frontend_fingerprint, tokenize
 
 MASK = SYMBOL_TO_ID[UNK]
 IGNORE = -100
+POS, RARITY = list(LEXICAL).index("pos"), list(LEXICAL).index("rarity")
 
 
 def encoder_config(channels=256, heads=4, feedforward=1024, dropout=0.1):
@@ -45,28 +55,30 @@ def encoder_config(channels=256, heads=4, feedforward=1024, dropout=0.1):
 
 
 class PhoneEncoder(nn.Module):
-    """Phone + stress embeddings and a transformer stack: what ships."""
+    """Phone + lexical-feature embeddings and a transformer stack: what ships."""
 
-    def __init__(self, c, layers):
+    def __init__(self, c, layers, distinct=0):
         super().__init__()
         self.tokens = nn.Embedding(c.vocab_size, c.channels, padding_idx=0)
-        self.stress = nn.Embedding(3, c.channels)
-        self.stack = Stack(c, layers)
+        add_lexical_embeddings(self, c.channels)
+        self.stack = Stack(c, layers, distinct)
 
-    def forward(self, tokens, stress, mask):
-        return self.stack((self.tokens(tokens) + self.stress(stress)) * mask[..., None], mask)
+    def forward(self, tokens, lexical, mask):
+        return self.stack(embed_tokens(self, tokens, lexical) * mask[..., None], mask)
 
 
 class PhoneBert(nn.Module):
-    def __init__(self, c, layers, words):
+    def __init__(self, c, layers, words, distinct=0):
         super().__init__()
-        self.encoder = PhoneEncoder(c, layers)
+        self.encoder = PhoneEncoder(c, layers, distinct)
         self.phone_head = nn.Linear(c.channels, c.vocab_size)
         self.word_head = nn.Linear(c.channels, words)
+        self.pos_head = nn.Linear(c.channels, LEXICAL["pos"])
+        self.rarity_head = nn.Linear(c.channels, LEXICAL["rarity"])
 
-    def forward(self, tokens, stress, mask):
-        hidden = self.encoder(tokens, stress, mask)
-        return self.phone_head(hidden), self.word_head(hidden)
+    def forward(self, tokens, lexical, mask):
+        hidden = self.encoder(tokens, lexical, mask)
+        return self.phone_head(hidden), self.word_head(hidden), self.pos_head(hidden), self.rarity_head(hidden)
 
 
 def prepare(args):
@@ -86,71 +98,95 @@ def prepare(args):
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     (out / "words.json").write_text(json.dumps(vocabulary, ensure_ascii=False))
-    for split, rows in (("validation", sentences[:args.validation]), ("train", sentences[args.validation:])):
+    # Quoted dialogue is 0.5-2% of a pack: repeat it in training so the quote token is learned in context.
+    train = [p for p in sentences[args.validation:] for _ in range(args.quoted_repeat if '"' in p.symbols else 1)]
+    random.Random(1).shuffle(train)
+    for split, rows in (("validation", sentences[:args.validation]), ("train", train)):
         lengths = torch.tensor([len(p) for p in rows])
-        torch.save({"lengths": lengths,
+        torch.save({"frontend": frontend_fingerprint(), "lengths": lengths,
                     "tokens": torch.tensor([i for p in rows for i in p.ids], dtype=torch.int16),
-                    "stress": torch.tensor([s for p in rows for s in p.stress], dtype=torch.int8),
-                    "words": torch.tensor([IGNORE if w is None else index.get(w, 0) for p in rows for w in p.words],
+                    "lexical": torch.tensor([f for p in rows for f in p.lexical()], dtype=torch.int8),
+                    # Each phone's word occurrence (-1 elsewhere), and that word's vocabulary
+                    # index: IGNORE where the frontend could not name the word.
+                    "occurrence": torch.tensor([w for p in rows for w in p.word], dtype=torch.int16),
+                    "gram": torch.tensor([g for p in rows for g in p.gram], dtype=torch.int16),
+                    "words": torch.tensor([IGNORE if w is None else index.get(w, 0) for p in rows for w in p.word_names()],
                                           dtype=torch.int32)}, out / f"{split}.pt")
         print(f"{split}: {len(rows)} sentences, {int(lengths.sum())} tokens")
     covered = sum(c for w, c in counts.items() if w in index) / sum(counts.values())
-    print(f"{len(counts)} distinct words; the top {len(vocabulary) - 1} cover {covered:.1%} of word occurrences")
+    unnamed = sum(w is None for p in sentences for w in p.words) / sum(len(p.words) for p in sentences)
+    print(f"{len(counts)} distinct words; the top {len(vocabulary) - 1} cover {covered:.1%} of word occurrences; "
+          f"{unnamed:.3%} of occurrences have no name (masked from the word target)")
 
 
 class Corpus:
+    FIELDS = ("tokens", "lexical", "occurrence", "words", "gram")
+
     def __init__(self, path):
         data = torch.load(path)
+        if data["frontend"] != frontend_fingerprint():
+            raise ValueError(f"{path} was prepared by a different front end; re-run voca.phonebert prepare")
         self.lengths = data["lengths"]
         self.starts = torch.cumsum(self.lengths, 0) - self.lengths
-        self.tokens, self.stress, self.words = data["tokens"].long(), data["stress"].long(), data["words"].long()
+        self.data = {name: data[name].long() for name in self.FIELDS}
 
     def __len__(self):
         return len(self.lengths)
 
     def batch(self, rows):
+        """tokens, lexical, occurrence, words, gram (padded with 0, 0, -1, IGNORE, -1), lengths."""
         lengths = self.lengths[rows]
         size = int(lengths.max())
-        out = [torch.zeros(len(rows), size, dtype=torch.long) for _ in range(3)]
-        out[2].fill_(IGNORE)
-        for b, r in enumerate(rows.tolist()):
-            span = slice(int(self.starts[r]), int(self.starts[r] + self.lengths[r]))
-            for o, source in zip(out, (self.tokens, self.stress, self.words)):
-                o[b, :int(self.lengths[r])] = source[span]
+        out = []
+        for name, fill in zip(self.FIELDS, (0, 0, -1, IGNORE, -1), strict=True):
+            source = self.data[name]
+            o = source.new_full((len(rows), size, *source.shape[1:]), fill)
+            for b, r in enumerate(rows.tolist()):
+                o[b, :int(self.lengths[r])] = source[int(self.starts[r]):int(self.starts[r] + self.lengths[r])]
+            out.append(o)
         return (*out, lengths)
 
 
-def mask_words(tokens, stress, words, rate, generator):
-    """Whole-word masking: pick `rate` of the words; of their phones 80% become the
-    mask token, 10% a random phone, 10% stay. Returns inputs and phone targets."""
+def mask_words(tokens, lexical, occurrence, gram, rate, generator):
+    """Whole-word masking: pick `rate` of the word occurrences; of their phones 80%
+    become the mask token, 10% a random phone, 10% stay, their features are
+    hidden, and so is the rarity of every gram one of them is in. Returns the
+    inputs, their features, and per phone the targets of the masked words: phone,
+    part of speech and rarity (IGNORE elsewhere, and where a feature is "none")."""
     phone = torch.tensor(sorted(PHONE_IDS), device=tokens.device)
-    # A word occurrence is a run of positions sharing a word label; give each run one draw.
-    # Words are separated by unlabelled boundary tokens, so a run starts wherever the label changes.
-    starts = (words != IGNORE) & torch.cat((torch.ones_like(words[:, :1], dtype=torch.bool), words[:, 1:] != words[:, :-1]), 1)
-    run = torch.cumsum(starts.long(), 1)
-    draw = torch.rand(run.shape[0], run.shape[1] + 1, generator=generator, device=tokens.device)
-    chosen = (words != IGNORE) & (draw.gather(1, run) < rate)
+    # One draw per word occurrence: occurrence k of a row reads that row's k-th draw.
+    draw = torch.rand(tokens.shape, generator=generator, device=tokens.device)
+    chosen = (occurrence >= 0) & (draw.gather(1, occurrence.clamp_min(0)) < rate)
     action = torch.rand(tokens.shape, generator=generator, device=tokens.device)
     random_phone = phone[torch.randint(len(phone), tokens.shape, generator=generator, device=tokens.device)]
     inputs = torch.where(chosen & (action < 0.8), MASK, tokens)
     inputs = torch.where(chosen & (action >= 0.8) & (action < 0.9), random_phone, inputs)
-    return inputs, torch.where(chosen, stress.new_zeros(()), stress), torch.where(chosen, tokens, IGNORE)
+    slot = gram.clamp_min(0)     # gram k of a row is counted in that row's k-th slot
+    hidden_gram = (gram >= 0) & (torch.zeros_like(gram).scatter_add_(1, slot, chosen.long()).gather(1, slot) > 0)
+    features = torch.where(chosen[..., None], lexical.new_zeros(()), lexical)
+    features[..., RARITY] = torch.where(hidden_gram, 0, features[..., RARITY])
+
+    def target(column):
+        return torch.where(chosen & (lexical[..., column] > 0), lexical[..., column], IGNORE)
+    return inputs, features, torch.where(chosen, tokens, IGNORE), target(POS), target(RARITY)
 
 
 def losses(model, batch, generator, rate):
-    tokens, stress, words, lengths = batch
+    tokens, lexical, occurrence, words, gram, lengths = batch
     mask = length_mask(lengths, tokens.shape[1])
-    inputs, input_stress, phone_targets = mask_words(tokens, stress, words, rate, generator)
+    inputs, input_lexical, *targets = mask_words(tokens, lexical, occurrence, gram, rate, generator)
     with torch.autocast(tokens.device.type, dtype=torch.bfloat16, enabled=tokens.is_cuda):
-        phone_logits, word_logits = model(inputs, input_stress, mask)
-    phone_loss = F.cross_entropy(phone_logits.float().transpose(1, 2), phone_targets, ignore_index=IGNORE)
-    word_loss = F.cross_entropy(word_logits.float().transpose(1, 2), words, ignore_index=IGNORE)
-    masked = phone_targets != IGNORE
-    stats = {"phone_loss": phone_loss.item(), "word_loss": word_loss.item(),
-             "masked_phone_accuracy": (phone_logits.argmax(-1) == phone_targets)[masked].float().mean().item(),
-             "word_accuracy": (word_logits.argmax(-1) == words)[words != IGNORE].float().mean().item(),
-             "masked_word_accuracy": (word_logits.argmax(-1) == words)[masked].float().mean().item()}
-    return phone_loss + word_loss, stats
+        phone_logits, word_logits, pos_logits, rarity_logits = model(inputs, input_lexical, mask)
+    stats, total = {}, 0
+    for name, logits, target in zip(("phone", "word", "pos", "rarity"), (phone_logits, word_logits, pos_logits, rarity_logits),
+                                    (targets[0], words, targets[1], targets[2])):
+        loss = F.cross_entropy(logits.float().transpose(1, 2), target, ignore_index=IGNORE)
+        total = total + loss
+        stats[f"{name}_loss"] = loss.item()
+        stats[f"{name}_accuracy"] = (logits.argmax(-1) == target)[target != IGNORE].float().mean().item()
+    # The word head names every phone's word; how well it names the masked ones is the harder half.
+    stats["masked_word_accuracy"] = (word_logits.argmax(-1) == words)[targets[0] != IGNORE].float().mean().item()
+    return total, stats
 
 
 def train(args):
@@ -159,7 +195,7 @@ def train(args):
     corpus, validation = Corpus(data / "train.pt"), Corpus(data / "validation.pt")
     vocabulary = json.loads((data / "words.json").read_text())
     c = encoder_config(args.channels, args.heads, args.feedforward)
-    model = PhoneBert(c, args.layers, len(vocabulary)).to(device)
+    model = PhoneBert(c, args.layers, len(vocabulary), args.distinct).to(device)
     print(f"encoder {sum(p.numel() for p in model.encoder.parameters()) / 1e6:.2f}M parameters, "
           f"heads {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M in total")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.98), weight_decay=0.01)
@@ -167,7 +203,7 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-    meta = {"config": dataclasses.asdict(c), "layers": args.layers, "args": vars(args)}
+    meta = {"config": dataclasses.asdict(c), "layers": args.layers, "distinct": args.distinct, "args": vars(args)}
     (out / "recipe.json").write_text(json.dumps(meta, indent=1))
     run = None
     if args.wandb:
@@ -208,8 +244,8 @@ def train(args):
             log.write(json.dumps(evaluation) + "\n")
             if run:
                 run.log({f"validation/{k}": v for k, v in evaluation.items() if k not in ("step", "split")}, step=step)
-            torch.save({"config": dataclasses.asdict(c), "layers": args.layers, "encoder": model.encoder.state_dict()},
-                       out / "encoder.pt")
+            torch.save({"config": dataclasses.asdict(c), "layers": args.layers, "distinct": args.distinct, "frontend": frontend_fingerprint(),
+                        "encoder": model.encoder.state_dict()}, out / "encoder.pt")
         if record:
             print(json.dumps(record), flush=True)
             log.write(json.dumps(record) + "\n")
@@ -229,6 +265,7 @@ def main():
     p.add_argument("--exclude", nargs="*", default=[], help="scripts whose sentences must stay unseen (TTS validation)")
     p.add_argument("--words", type=int, default=32768, help="word vocabulary size, including <unk>")
     p.add_argument("--validation", type=int, default=2000)
+    p.add_argument("--quoted-repeat", type=int, default=5, help="times each quoted training sentence appears")
     p.add_argument("--max-tokens", type=int, default=256)
     t = commands.add_parser("train")
     t.add_argument("features")
@@ -237,6 +274,7 @@ def main():
     t.add_argument("--heads", type=int, default=4)
     t.add_argument("--feedforward", type=int, default=1024)
     t.add_argument("--layers", type=int, default=10)
+    t.add_argument("--distinct", type=int, default=0, help="loop this many distinct blocks to --layers depth (0: all distinct)")
     t.add_argument("--steps", type=int, default=30000)
     t.add_argument("--batch", type=int, default=256, help="sentences per step")
     t.add_argument("--lr", type=float, default=5e-4)

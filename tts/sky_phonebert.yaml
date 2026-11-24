@@ -22,11 +22,12 @@ setup: |
 run: |
   set -euo pipefail
   cd ~/sky_workdir
-  RUN=runs/${RUN_NAME:-phonebert-eng}
-  FEATURES=features/${FEATURES:-eng_phonebert}
+  export VOCA_LANGUAGE=${LANGUAGE:-eng}     # one phonebert per language, on its inventory
+  RUN=runs/${RUN_NAME:-phonebert-${VOCA_LANGUAGE}-v5}
+  FEATURES=features/${FEATURES:-${VOCA_LANGUAGE}_phonebert_v5}
   if [ ! -f $FEATURES/train.pt ]; then
     TAR=$(python -c "import sys; from huggingface_hub import hf_hub_download as d; print(d('anchpop/lexide-tts-features', sys.argv[1] + '.tar', repo_type='dataset'))" $(basename $FEATURES))
-    tar xf $TAR -C features && rm -f $TAR
+    mkdir -p features && tar xf $TAR -C features && rm -f $TAR
   fi
   (while true; do sleep 300; python scripts/sync_run.py $RUN || true; done) &
   SYNC=$!

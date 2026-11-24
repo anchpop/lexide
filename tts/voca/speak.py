@@ -11,32 +11,57 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from .config import Config
+from .config import Config, check_format
 from .model import build_model
-from .text import frontend_fingerprint, tokenize
+from .text import frontend_fingerprint, frontend_identity, tokenize
+
+
+# Minimum pauses (seconds) after commas and sentence stops inside an utterance:
+# the teacher barely pauses at commas, and learners need the phrasing.
+COMMA_PAUSE, STOP_PAUSE = 0.15, 0.3
 
 
 def load_model(path, device="cpu"):
     state = torch.load(path, map_location="cpu", weights_only=True)
+    check_format(state, path)
     if state["frontend"]["fingerprint"] != frontend_fingerprint():
-        raise ValueError("checkpoint was trained with a different token inventory")
+        raise ValueError(f"{path} was trained with another front end (language {state['frontend'].get('language')}, version "
+                         f"{state['frontend'].get('version', 1)}; this process reads {frontend_identity()['language']}, version "
+                         f"{frontend_identity()['version']}): set VOCA_LANGUAGE to its language, or retrain it")
     model = build_model(Config.from_dict(state["config"]))
     model.load_state_dict(state["model"], strict=True)
     return model.to(device).eval()
 
 
-def speak(model, grams, device="cpu", speaker=0, speed=1.0, pitch_range=1.0, seed=0, comma_pause=0.15, stop_pause=0.3,
+def speak(model, grams, device="cpu", speaker=None, speed=1.0, pitch_range=1.0, seed=0, comma_pause=COMMA_PAUSE, stop_pause=STOP_PAUSE,
           refiner=None, pitch_jitter=0.0):
+    """``speaker``: a name from the model's configuration (default: its first)."""
     phonemized = tokenize(grams)
     tokens = torch.tensor([phonemized.ids], device=device)
-    stress = torch.tensor([phonemized.stress], device=device)
-    audio, lengths, details = model.synthesize(tokens, stress, torch.tensor([len(phonemized)], device=device),
+    lexical = torch.tensor([phonemized.lexical()], device=device)
+    speaker = model.config.speakers.index(speaker or model.config.speakers[0])
+    audio, lengths, details = model.synthesize(tokens, lexical, torch.tensor([len(phonemized)], device=device),
                                                torch.tensor([speaker], device=device), speed, 0.0, seed, pitch_range,
                                                pitch_jitter=pitch_jitter, comma_pause=comma_pause, stop_pause=stop_pause)
     if refiner is not None:
         audio = refiner.refine(audio, details["acoustic"].float(), details["frame_lengths"], seed=seed)
     audio = audio[0, :int(lengths[0])].cpu().numpy()
+    audio = audio[leading_silence(audio, details["durations"][0].cpu().numpy(), phonemized.ids, model) * model.config.hop:]
     return audio * min(1.0, 0.99 / max(float(np.abs(audio).max()), 1e-9)), details
+
+
+def leading_silence(audio, durations, ids, model, margin=4, floor_db=-50.0):
+    """Frames of silence to skip before playback: up to ``margin`` frames before
+    the earlier of the first phone (as predicted) and the first two frames in a
+    row above ``floor_db`` dBFS, so a quiet initial fricative or a breath before
+    it is kept. The model predicts about 280 ms of leading silence (Gemini's
+    recordings have it); this saves about 220 ms of latency."""
+    hop = model.config.hop
+    first_phone = int(durations[:next(i for i, t in enumerate(ids) if bool(model.phone_tokens[t]))].sum())
+    frames = len(audio) // hop
+    level = 10 * np.log10(np.maximum(np.mean(audio[:frames * hop].reshape(frames, hop) ** 2, axis=1), 1e-12))
+    loud = np.flatnonzero((level[:-1] > floor_db) & (level[1:] > floor_db))
+    return max(0, min(first_phone, int(loud[0]) if len(loud) else first_phone) - margin)
 
 
 def main():
@@ -47,6 +72,7 @@ def main():
     parser.add_argument("--split")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--speaker", help="one of the checkpoint's speakers (default: its first)")
     parser.add_argument("--pitch-range", type=float, default=1.0)
     parser.add_argument("--pitch-jitter", type=float, default=0.0, help="random pitch wobble for the oscillator, in semitones")
     parser.add_argument("--refiner", type=Path, help="voca.refine checkpoint trained on this --checkpoint")
@@ -63,7 +89,7 @@ def main():
     with open(args.output / "manifest.jsonl", "w", encoding="utf-8") as manifest:
         for row in rows:
             start = time.perf_counter()
-            audio, _ = speak(model, row["grams"], args.device, pitch_range=args.pitch_range, refiner=refiner,
+            audio, _ = speak(model, row["grams"], args.device, args.speaker, pitch_range=args.pitch_range, refiner=refiner,
                              pitch_jitter=args.pitch_jitter)
             compute += time.perf_counter() - start
             seconds += len(audio) / model.config.sample_rate

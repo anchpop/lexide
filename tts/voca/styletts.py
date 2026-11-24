@@ -7,7 +7,8 @@ from scratch on our phonemes, no pretrained weights.
 
     phonemes -> transformer text encoder (ours, shared with TinyVoca)
         -> [bert_encoder] -> prosody predictor (LSTMs with AdaLayerNorm on the
-           prosodic style): durations, then per frame pitch / voicing / energy
+           prosodic style): per word prominence / contour / excursion, then
+           durations, then per frame pitch / voicing / energy
         -> AdaIN residual decoder on text features + F0 + energy (acoustic style)
         -> iSTFTNet generator with the harmonic NSF source -> 24 kHz waveform
 
@@ -21,28 +22,73 @@ Changes from the originals:
   at half its mel rate and upsamples x2 in the F0/energy branches and the last
   decoder block; our durations are whole frames at the full rate, so those
   upsamplers (and the decoder's stride-2 F0/energy convolutions) are gone.
+* A word-level head (``WordProsody``, after Codex's proposal and hierarchical
+  prosody TTS) predicts each word occurrence's prominence within its phrase,
+  contour shape, excursion and phrase-final movement; durations and the
+  F0/energy branch are conditioned on them, and every frame knows its place
+  inside its phone (StyleTTS 2 repeats a token state and leaves that to the LSTM).
 * The F0 branch predicts log(F0/reference) and a voicing logit. The decoder
   sees F0 / reference (0 when unvoiced) instead of raw Hz, the same curve at unit scale.
 * Inference uses one stored style per voice: the running mean of the training
   clips' styles. The style encoders are training-only (voca.train).
-* The generator's rates multiply to 256 instead of 300 (default 8 x 8 x iSTFT hop 4,
-  Kokoro: 10 x 6 x 5).
+* The generator's rates multiply to 256 instead of 300 (configs/styletts.json: 4 x 4 x
+  iSTFT hop 16, which a blind A/B heard as even with 8 x 8 x hop 4 and synthesizes 2.5x
+  faster; Kokoro: 10 x 6 x 5). It upsamples by nearest-neighbour interpolation and a
+  convolution, not transposed convolutions, whose frame-periodic response put
+  4-8 kHz bursts at fixed positions of the 256-sample frame in pauses. Its NSF
+  source trains end to end (Kokoro's runs under no_grad, so its mixer never
+  learns), choosing each sine's amplitude and phase and the noise level per band,
+  with the phase integrated at the audio rate.
 """
 
 import math
+import warnings
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import spectral_norm, weight_norm
 from .config import Config
-from .model import Voca
+from .data import SHAPES
+from .model import Voca, position_in_token
 
+WORD_SEMITONES = 6.0                     # the word head's pitch outputs are in units of this many semitones
+WORD_FEATURES = 1 + len(SHAPES) + 2      # word_features: prominence, shape probabilities, excursion, final movement
+
+# run_lstm passes each direction's weights separately; compacting these small tensors per call is cheap.
+warnings.filterwarnings("ignore", message="RNN module weights are not part of single contiguous chunk")
 
 def run_lstm(lstm, x, lengths):
-    """Bidirectional LSTM over [B, T, C] that stops at each row's length. Packing
-    needs the lengths on the CPU: pass them from there to avoid a GPU wait."""
-    packed = nn.utils.rnn.pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-    return nn.utils.rnn.pad_packed_sequence(lstm(packed)[0], batch_first=True, total_length=x.shape[1])[0]
+    """One-layer bidirectional ``lstm`` over [B, T, C] that stops at each row's
+    length, as over a packed sequence: the backward direction reads every row
+    from its own last step, and padded steps come out zero. Unlike packing it
+    needs no host-side lengths and no length-dependent shapes (CUDA graphs)."""
+    if lstm.num_layers != 1 or not lstm.bidirectional or not lstm.batch_first or lstm.proj_size:
+        raise ValueError("run_lstm expects a one-layer, batch-first, bidirectional LSTM")
+    step = torch.arange(x.shape[1], device=x.device)
+    valid = step < lengths.to(x.device)[:, None]
+    backwards = torch.where(valid, lengths.to(x.device)[:, None] - 1 - step, step)   # reverses each row's valid part
+
+    def reverse(v):
+        return v.gather(1, backwards[..., None].expand_as(v))
+
+    def direction(v, suffix):
+        weights = [getattr(lstm, f"{name}_l0{suffix}") for name in ("weight_ih", "weight_hh", "bias_ih", "bias_hh")]
+        h = v.new_zeros(1, v.shape[0], lstm.hidden_size)
+        return torch.lstm(v, (h, h), weights, True, 1, 0.0, lstm.training, False, True)[0]
+    return torch.cat((direction(x, ""), reverse(direction(reverse(x), "_reverse"))), dim=-1) * valid[..., None]
+
+
+def istft(spectrum, fft, hop, window):
+    """``torch.istft`` (centred, one-sided) as overlap-add of windowed frames.
+    torch.istft checks the window envelope on the host, a GPU wait that CUDA
+    graphs cannot capture; the Hann window at these hops never fails that check."""
+    count = spectrum.shape[-1]
+    frames = torch.fft.irfft(spectrum, fft, dim=1) * window[:, None]
+    size = fft + hop * (count - 1)
+
+    def overlap_add(x):   # trimmed before dividing: the envelope is 0 at the very edges
+        return F.fold(x, (1, size), (1, fft), stride=(1, hop)).flatten(1)[:, fft // 2:size - fft // 2]
+    return overlap_add(frames) / overlap_add(window.square()[None, :, None].expand(1, fft, count))
 
 
 def frames_of(values, index):
@@ -90,15 +136,22 @@ class AdainResBlk1d(nn.Module):
         return (y + (x if self.conv1x1 is None else self.conv1x1(x))) * math.sqrt(0.5)
 
 
+def small_weight_norm(conv, std=0.01):
+    """``weight_norm(conv)`` with weights drawn from N(0, ``std``), HiFi-GAN's generator initialization.
+    They are drawn first: once parametrized, ``conv.weight`` is recomputed from the
+    magnitude and direction, and initializing it changes nothing."""
+    nn.init.normal_(conv.weight, 0.0, std)
+    return weight_norm(conv)
+
+
 class AdaINResBlock1(nn.Module):
     """Kokoro's generator block: dilated convolutions with AdaIN and Snake activations."""
 
     def __init__(self, channels, kernel, dilations, style_dim):
         super().__init__()
-        self.convs1 = nn.ModuleList(weight_norm(nn.Conv1d(channels, channels, kernel, dilation=d, padding=d * (kernel - 1) // 2)) for d in dilations)
-        self.convs2 = nn.ModuleList(weight_norm(nn.Conv1d(channels, channels, kernel, padding=(kernel - 1) // 2)) for _ in dilations)
-        for conv in (*self.convs1, *self.convs2):
-            nn.init.normal_(conv.weight, 0.0, 0.01)
+        self.convs1 = nn.ModuleList(small_weight_norm(nn.Conv1d(channels, channels, kernel, dilation=d, padding=d * (kernel - 1) // 2))
+                                    for d in dilations)
+        self.convs2 = nn.ModuleList(small_weight_norm(nn.Conv1d(channels, channels, kernel, padding=(kernel - 1) // 2)) for _ in dilations)
         self.adain1 = nn.ModuleList(AdaIN1d(style_dim, channels) for _ in dilations)
         self.adain2 = nn.ModuleList(AdaIN1d(style_dim, channels) for _ in dilations)
         self.alpha1 = nn.ParameterList(nn.Parameter(torch.ones(1, channels, 1)) for _ in dilations)
@@ -114,45 +167,104 @@ class AdaINResBlock1(nn.Module):
 
 
 class DurationEncoder(nn.Module):
-    """LSTMs over tokens, each followed by AdaLayerNorm; the style is appended to every layer's input."""
+    """LSTMs over tokens, each followed by AdaLayerNorm; the style is appended to every layer's input.
+    With ``distinct`` set, that many LSTMs are looped to the full depth; each pass keeps its own norm."""
 
-    def __init__(self, style_dim, channels, layers):
+    def __init__(self, style_dim, channels, layers, distinct=0):
         super().__init__()
-        self.lstms = nn.ModuleList(nn.LSTM(channels + style_dim, channels // 2, batch_first=True, bidirectional=True) for _ in range(layers))
+        distinct = distinct or layers
+        if layers % distinct:
+            raise ValueError(f"{layers} layers cannot loop {distinct} distinct LSTMs evenly")
+        self.lstms = nn.ModuleList(nn.LSTM(channels + style_dim, channels // 2, batch_first=True, bidirectional=True) for _ in range(distinct))
         self.norms = nn.ModuleList(AdaLayerNorm(style_dim, channels) for _ in range(layers))
 
     def forward(self, x, style, lengths, mask):
         s = style[:, None].expand(-1, x.shape[1], -1)
         x = torch.cat((x, s), dim=-1) * mask[..., None]
-        for lstm, norm in zip(self.lstms, self.norms):
-            x = torch.cat((norm(run_lstm(lstm, x, lengths), style), s), dim=-1) * mask[..., None]
+        for i, norm in enumerate(self.norms):
+            x = torch.cat((norm(run_lstm(self.lstms[i % len(self.lstms)], x, lengths), style), s), dim=-1) * mask[..., None]
         return x
+
+
+class WordProsody(nn.Module):
+    """Per word occurrence: a prominence score (ranked within its phrase),
+    contour-shape logits (``voca.data.SHAPES``), pitch excursion and phrase-final
+    movement (both in ``WORD_SEMITONES``), from the token states pooled over the
+    word and a convolution across neighbouring words. Its outputs, as
+    ``word_features``, condition the durations and the F0/energy branches."""
+
+    OUTPUTS = 1 + len(SHAPES) + 2
+
+    def __init__(self, inputs, channels=48):
+        super().__init__()
+        self.input = nn.Linear(inputs, channels)
+        self.context = nn.Conv1d(channels, channels, 5, padding=2)
+        self.output = nn.Linear(channels, self.OUTPUTS)
+
+    def forward(self, x, words):
+        """x [B, N, inputs] per token -> [B, W, OUTPUTS]."""
+        keep = words.mask[..., None].to(x.dtype)
+        h = F.gelu(self.input(words.pool(x))) * keep
+        h = h + F.gelu(self.context(h.transpose(1, 2)).transpose(1, 2)) * keep
+        return self.output(h) * keep
+
+
+def word_features(outputs, words):
+    """``WordProsody`` outputs -> the [B, W, WORD_FEATURES] the predictor is conditioned on:
+    prominence standardized within the phrase, shape probabilities, excursion, and
+    the final movement on phrase-final words (0 elsewhere)."""
+    outputs = outputs.float()
+    return torch.cat((words.standardize(outputs[..., 0])[..., None], outputs[..., 1:-2].softmax(-1) * words.mask[..., None],
+                      outputs[..., -2:-1], outputs[..., -1:] * words.final[..., None]), dim=-1)
+
+
+def target_features(targets, words):
+    """``voca.data.word_prosody`` targets [B, W, 4] -> the same features and where they were measured, ([B, W, F], [B, W, F])."""
+    valid = torch.isfinite(targets) & words.mask[..., None]
+    t = targets.nan_to_num()
+    shape = F.one_hot(t[..., 1].long().clamp(0, len(SHAPES) - 1), len(SHAPES)).float()
+    values = torch.cat((t[..., :1], shape, t[..., 2:] / WORD_SEMITONES), dim=-1)
+    return values, torch.cat((valid[..., :1], valid[..., 1:2].expand_as(shape), valid[..., 2:]), dim=-1)
 
 
 class ProsodyPredictor(nn.Module):
     """StyleTTS 2's prosody predictor. Durations: ``max_duration`` sigmoid bins
     (frames = their sum) plus our pause-presence logit. Per frame: log(F0 /
-    reference), voicing logit (F0 branch) and normalized log energy (N branch)."""
+    reference), voicing logit (F0 branch) and normalized log energy (N branch).
+
+    Ours: a word-level head (``WordProsody``) reads the text and the duration
+    encoder's states; its features (or, while training, the recording's) are
+    spread back to the word's tokens and from there to its frames, and every
+    frame also gets its position inside its phone (``position_in_token``)."""
 
     def __init__(self, c):
         super().__init__()
         d, s = c.style_prosody_channels, c.style_dim
-        self.text_encoder = DurationEncoder(s, d, c.style_prosody_layers)
-        self.lstm = nn.LSTM(d + s, d // 2, batch_first=True, bidirectional=True)
+        self.text_encoder = DurationEncoder(s, d, c.style_prosody_layers, c.style_prosody_distinct)
+        self.words = WordProsody(d + d + s)
+        self.lstm = nn.LSTM(d + s + WORD_FEATURES, d // 2, batch_first=True, bidirectional=True)
         self.duration_proj = nn.Linear(d, c.style_max_duration + 1)
-        self.shared = nn.LSTM(d + s, d // 2, batch_first=True, bidirectional=True)
+        self.shared = nn.LSTM(d + s + WORD_FEATURES + 3, d // 2, batch_first=True, bidirectional=True)
         self.F0 = nn.ModuleList([AdainResBlk1d(d, d, s, c.dropout), AdainResBlk1d(d, d // 2, s, c.dropout), AdainResBlk1d(d // 2, d // 2, s, c.dropout)])
         self.N = nn.ModuleList([AdainResBlk1d(d, d, s, c.dropout), AdainResBlk1d(d, d // 2, s, c.dropout), AdainResBlk1d(d // 2, d // 2, s, c.dropout)])
         self.F0_proj = nn.Conv1d(d // 2, 2, 1)
         self.N_proj = nn.Conv1d(d // 2, 1, 1)
 
-    def forward(self, text, style, lengths, mask):
-        """text [B, N, d] -> token states [B, N, d + s] (to be repeated per frame), duration logits [B, N, bins + 1]."""
+    def forward(self, text, style, lengths, mask, words, teacher=None):
+        """text [B, N, d] -> token states [B, N, d + s + WORD_FEATURES] (to be repeated per frame), duration
+        logits [B, N, bins + 1], word outputs [B, W, WordProsody.OUTPUTS]. ``teacher``: (``voca.data.word_prosody``
+        targets [B, W, 4], [B] whether to use them): where measured, the recording's word features replace the predicted ones."""
         d = self.text_encoder(text, style, lengths, mask)
-        return d, self.duration_proj(run_lstm(self.lstm, d, lengths))
+        outputs = self.words(torch.cat((text, d), dim=-1), words)
+        features = word_features(outputs.detach(), words)    # the word head learns only from its own targets
+        if teacher is not None:
+            values, measured = target_features(teacher[0], words)
+            features = torch.where(measured & teacher[1][:, None, None], values, features)
+        states = torch.cat((d, words.spread(features).to(d.dtype)), dim=-1)
+        return states, self.duration_proj(run_lstm(self.lstm, states, lengths)), outputs
 
     def F0Ntrain(self, frames, style, lengths):
-        """Repeated token states [B, F, d + s] -> [B, F, 3] pitch, voicing logit, energy."""
+        """Repeated token states with positions [B, F, d + s + WORD_FEATURES + 3] -> [B, F, 3] pitch, voicing logit, energy."""
         x = run_lstm(self.shared, frames, lengths).transpose(1, 2)
         f0, n = x, x
         for block in self.F0:
@@ -162,78 +274,161 @@ class ProsodyPredictor(nn.Module):
         return torch.cat((self.F0_proj(f0), self.N_proj(n)), dim=1).transpose(1, 2)
 
 
-class SourceModuleHnNSF(nn.Module):
-    """Harmonic source of hn-NSF (Wang & Yamagishi) as in Kokoro: sines at F0 and
-    its first harmonics (phase integrated at the frame rate, then interpolated),
-    noise where unvoiced, merged by one linear layer and tanh."""
+class SourceModule(nn.Module):
+    """The generator's excitation, after hn-NSF (Wang & Yamagishi) as in Kokoro: sines at F0
+    and its overtones, plus Gaussian noise, through tanh.
 
-    def __init__(self, sample_rate, upsample_scale, harmonics=8, sine_amp=0.1, noise_std=0.003, voiced_threshold=10):
+    Ours: the phase is integrated at the audio rate, and the mix is the model's. hn-NSF and Kokoro
+    fix it: equal sines gated by voicing, the overtones at random start phases (a phase the generator
+    cannot know is no use to it: eng-style-voices-v3's mixer turned them down to 0-14% of the
+    fundamental), and white noise at two levels. Here ``gains`` predicts, per frame from the
+    generator's input and the voicing, each sine's amplitude and phase (as its sine and cosine
+    parts) and the log level of the noise in each of the bands between ``BAND_EDGES``, all
+    relative to ``level`` and interpolated linearly to the audio rate. It starts as equal sines
+    in phase that follow the voicing, and flat noise, at about Kokoro's initial levels."""
+
+    BAND_EDGES = (1500, 3000, 6000)     # Hz
+    TAPS = 65
+
+    def __init__(self, channels, sample_rate, hop, harmonics=9, level=0.02, voiced_noise=0.002):
         super().__init__()
-        self.sample_rate, self.upsample_scale, self.sine_amp, self.noise_std, self.voiced_threshold = (
-            sample_rate, upsample_scale, sine_amp, noise_std, voiced_threshold)
-        self.register_buffer("orders", torch.arange(1, harmonics + 2, dtype=torch.float32), persistent=False)
-        self.l_linear = nn.Linear(harmonics + 1, 1)
-
-    def forward(self, f0):
-        """f0 [B, S] in Hz at the audio rate, 0 where unvoiced -> [B, S, 1]."""
+        self.sample_rate, self.hop, self.level = sample_rate, hop, level
+        self.register_buffer("orders", torch.arange(1, harmonics + 1, dtype=torch.float32), persistent=False)
+        self.register_buffer("bands", self.filterbank(), persistent=False)
+        self.gains = nn.Conv1d(channels + 1, 2 * harmonics + len(self.bands), 3, padding=1)    # [features | voicing] -> gains
+        nn.init.zeros_(self.gains.weight)
+        nn.init.zeros_(self.gains.bias)
         with torch.no_grad():
-            rad = (f0[..., None] * self.orders / self.sample_rate) % 1
-            initial = torch.rand(f0.shape[0], len(self.orders), device=f0.device)
-            initial[:, 0] = 0                       # random start phase for the overtones only
-            rad[:, 0] = rad[:, 0] + initial
-            rad = F.interpolate(rad.transpose(1, 2), scale_factor=1 / self.upsample_scale, mode="linear")
-            phase = torch.cumsum(rad, dim=-1) * 2 * math.pi
-            phase = F.interpolate(phase * self.upsample_scale, scale_factor=self.upsample_scale, mode="linear").transpose(1, 2)
-            voiced = (f0 > self.voiced_threshold).float()[..., None]
-            noise = (voiced * self.noise_std + (1 - voiced) * self.sine_amp / 3) * torch.randn_like(phase)
-            sines = torch.sin(phase) * self.sine_amp * voiced + noise
-        return torch.tanh(self.l_linear(sines))
+            self.gains.weight[:harmonics, -1, 1] = 1
+            self.gains.weight[2 * harmonics:, -1, 1] = math.log(voiced_noise / level)
+
+    def filterbank(self):
+        """Band-pass filters [bands, 1, TAPS] (differences of windowed-sinc low-passes) that add up to an impulse."""
+        n = torch.arange(self.TAPS, dtype=torch.float64) - self.TAPS // 2
+        window = torch.hamming_window(self.TAPS, periodic=False, dtype=torch.float64)
+        low = [torch.sinc(2 * edge / self.sample_rate * n) * window for edge in self.BAND_EDGES]
+        low = torch.stack([torch.zeros_like(n), *(h / h.sum() for h in low), (n == 0).double()])
+        return low.diff(dim=0).float()[:, None]
+
+    def forward(self, f0, voicing, x):
+        """f0 [B, F] in Hz (continuous), voicing [B, F] in [0, 1] (a label or the predicted probability),
+        the generator's input x [B, C, F] -> source [B, F * hop]."""
+        cycles = f0[..., None] * self.orders / self.sample_rate      # [B, F, H] per sample, constant within a frame
+        advance = cycles * self.hop % 1
+        start = (advance.cumsum(1) - advance) % 1                     # whole cycles dropped: exact in float32 at any length
+        within = cycles[:, :, None] * torch.arange(self.hop, device=f0.device)[:, None]
+        phase = 2 * math.pi * (start[:, :, None] + within).flatten(1, 2).transpose(1, 2)
+        noise = F.conv1d(torch.randn_like(phase[:, :1]), self.bands, padding=self.TAPS // 2)
+        gains = F.interpolate(self.gains(torch.cat((x, voicing[:, None]), dim=1)), scale_factor=self.hop, mode="linear")
+        sine, cosine, noise_gain = gains.split((len(self.orders), len(self.orders), len(self.bands)), dim=1)
+        return torch.tanh(self.level * ((sine * phase.sin() + cosine * phase.cos()).sum(1) + (noise_gain.exp() * noise).sum(1)))
+
+
+class Upsample(nn.Module):
+    """Nearest-neighbour upsampling by ``rate``, then a convolution spanning about
+    two input frames. A constant input comes out constant whatever the weights;
+    Kokoro's transposed convolution sums a different pair of kernel taps at each
+    output position, a pattern repeating at the input rate that it must learn to
+    cancel (Pons et al. 2021, "Upsampling artifacts in neural audio synthesis")."""
+
+    def __init__(self, channels_in, channels_out, rate):
+        super().__init__()
+        self.rate = rate
+        self.conv = small_weight_norm(nn.Conv1d(channels_in, channels_out, 2 * rate + 1, padding=rate))
+
+    def forward(self, x):
+        return self.conv(F.interpolate(x, scale_factor=self.rate, mode="nearest"))
+
+
+class AntiAlias(nn.Module):
+    """A fixed low-pass on each coefficient stream [B, C, T] before a projection that keeps every
+    ``stride``-th frame: a windowed sinc at 0.9 of the decimated Nyquist, 8 * stride + 1 taps,
+    in float32. Without it the source's harmonics fold back: at hop 16 the coarse injection
+    runs at 375 frames/s, and a 147 Hz vowel got a 228 Hz (375 - 147) line 3 dB below its fundamental."""
+
+    def __init__(self, stride):
+        super().__init__()
+        n = torch.arange(8 * stride + 1, dtype=torch.float64) - 4 * stride
+        cutoff = 0.9 / (2 * stride)                     # cycles per input frame
+        taps = 2 * cutoff * torch.sinc(2 * cutoff * n) * torch.hamming_window(len(n), periodic=False, dtype=torch.float64)
+        self.register_buffer("taps", (taps / taps.sum()).float()[None, None], persistent=False)
+
+    def forward(self, x):
+        with torch.autocast(x.device.type, enabled=False):
+            x = F.pad(x.float(), (self.taps.shape[-1] // 2,) * 2, mode="reflect")
+            return F.conv1d(x, self.taps.expand(x.shape[1], 1, -1), groups=x.shape[1])
 
 
 class Generator(nn.Module):
-    """Kokoro's iSTFTNet generator: transposed-convolution upsampling with
-    AdaIN resblocks, the harmonic source's STFT injected at every scale, and a
-    small inverse STFT writing magnitude and phase."""
+    """Kokoro's iSTFTNet generator: upsampling with AdaIN resblocks, the harmonic
+    source's STFT injected at every scale, and a small inverse STFT writing
+    magnitude and phase. Ours: nearest-neighbour upsampling and a convolution
+    (``Upsample``) instead of transposed convolutions, a source trained with
+    the rest (``SourceModule``), and the source's coefficients low-passed
+    before every strided injection (``AntiAlias``)."""
 
     def __init__(self, c):
         super().__init__()
         rates, channels, s = c.generator_rates, c.generator_channels, c.style_dim
-        self.fft, self.hop, self.kernels = c.generator_fft, c.generator_hop, len(c.generator_resblock_kernels)
-        self.m_source = SourceModuleHnNSF(c.sample_rate, c.hop)
-        self.ups, self.resblocks, self.noise_convs, self.noise_res = (nn.ModuleList() for _ in range(4))
+        self.fft, self.hop, self.frame, self.kernels = c.generator_fft, c.generator_hop, c.hop, len(c.generator_resblock_kernels)
+        self.m_source = SourceModule(channels, c.sample_rate, c.hop)
+        self.ups, self.resblocks, self.noise_convs, self.noise_res, self.anti_alias = (nn.ModuleList() for _ in range(5))
         for i, u in enumerate(rates):
             ch = channels // 2 ** (i + 1)
-            self.ups.append(weight_norm(nn.ConvTranspose1d(channels // 2 ** i, ch, 2 * u, u, padding=u // 2)))
+            self.ups.append(Upsample(channels // 2 ** i, ch, u))
             self.resblocks.extend(AdaINResBlock1(ch, k, (1, 3, 5), s) for k in c.generator_resblock_kernels)
             if i + 1 < len(rates):
                 stride = math.prod(rates[i + 1:])
                 self.noise_convs.append(nn.Conv1d(self.fft + 2, ch, 2 * stride, stride, padding=(stride + 1) // 2))
                 self.noise_res.append(AdaINResBlock1(ch, 7, (1, 3, 5), s))
+                self.anti_alias.append(AntiAlias(stride))
             else:
                 self.noise_convs.append(nn.Conv1d(self.fft + 2, ch, 1))
                 self.noise_res.append(AdaINResBlock1(ch, 11, (1, 3, 5), s))
-        self.conv_post = weight_norm(nn.Conv1d(ch, self.fft + 2, 7, 1, padding=3))
-        for conv in (*self.ups, self.conv_post):
-            nn.init.normal_(conv.weight, 0.0, 0.01)
+                self.anti_alias.append(nn.Identity())
+        self.conv_post = small_weight_norm(nn.Conv1d(ch, self.fft + 2, 7, 1, padding=3))
         self.reflection_pad = nn.ReflectionPad1d((1, 0))
         self.register_buffer("window", torch.hann_window(self.fft), persistent=False)
 
-    def forward(self, x, s, f0):
-        """x [B, C, F], style [B, S], f0 [B, F] Hz (0 unvoiced) -> wave [B, F * hop]."""
-        with torch.no_grad():
-            source = self.m_source(f0.repeat_interleave(self.m_source.upsample_scale, dim=-1))[..., 0]
+    def excitation(self, f0, voicing, x):
+        """The NSF source [B, F * hop] for f0 [B, F] Hz, voicing [B, F] in [0, 1] and the generator input
+        x [B, C, F] (it draws noise); ``render`` turns it into the waveform."""
+        with torch.autocast(x.device.type, enabled=False):
+            return self.m_source(f0.float(), voicing.float(), x.float())
+
+    def render(self, x, s, source, delay=None):
+        """The waveform from the generator input x [B, C, F] and the ``excitation``. ``delay``
+        (a [1] tensor of samples, under one acoustic frame): render as if the source and the
+        input came that much later, and undo the delay. An ideal generator gives the same
+        waveform at every delay; whatever follows its own output grid instead (images of the
+        voice around its synthesis frame rate) does not."""
+        if delay is not None:
+            source = delayed(source, delay)
+            a = delay.float() / self.frame                 # the input moves a fraction of a frame, interpolated
+            x = (1 - a) * x + a * F.pad(x, (1, 0), mode="replicate")[..., :-1]
+        with torch.autocast(x.device.type, enabled=False):    # the source and its spectrum in float32 also under bf16
             spectrum = torch.stft(source, self.fft, self.hop, window=self.window, return_complex=True)
-            har = torch.cat((spectrum.abs(), spectrum.angle()), dim=1)
-        for i, (up, noise_conv, noise_res) in enumerate(zip(self.ups, self.noise_convs, self.noise_res)):
+        # Real and imaginary parts, not magnitude and angle: they scale with the source, so the learned
+        # noise gain controls what reaches the generator (an angle stays full-strength noise at any level).
+        har = torch.cat((spectrum.real, spectrum.imag), dim=1)
+        for i, (up, anti_alias, noise_conv, noise_res) in enumerate(zip(self.ups, self.anti_alias, self.noise_convs, self.noise_res)):
             x = up(F.leaky_relu(x, 0.1))
             if i == len(self.ups) - 1:
                 x = self.reflection_pad(x)
-            x = x + noise_res(noise_conv(har), s)
+            x = x + noise_res(noise_conv(anti_alias(har)), s)
             x = sum(block(x, s) for block in self.resblocks[i * self.kernels:(i + 1) * self.kernels]) / self.kernels
         x = self.conv_post(F.leaky_relu(x))
         bins = self.fft // 2 + 1
+        x = x.float()   # the inverse STFT in float32 also under bf16 autocast
         spectrum = torch.polar(torch.exp(x[:, :bins]), torch.sin(x[:, bins:]))
-        return torch.istft(spectrum, self.fft, self.hop, window=self.window)
+        wave = istft(spectrum, self.fft, self.hop, self.window)
+        return wave if delay is None else delayed(wave, -delay)
+
+
+def delayed(wave, delay):
+    """wave [B, S] moved ``delay`` samples later (earlier if negative; a [1] tensor), the edge sample repeated."""
+    index = (torch.arange(wave.shape[-1], device=wave.device) - delay).clamp(0, wave.shape[-1] - 1)
+    return wave[:, index]
 
 
 class Decoder(nn.Module):
@@ -261,8 +456,6 @@ class Decoder(nn.Module):
             x = block(torch.cat((x, residual, f0, n), dim=1), style)
         return x
 
-    def forward(self, text, condition, source_f0, style):
-        return self.generator(self.features(text, condition, style), style, source_f0)
 
 
 class ResBlk(nn.Module):
@@ -316,16 +509,23 @@ class StyleVoca(Voca):
         if c.phoneme_encoder_layers:
             from .phonebert import PhoneEncoder, encoder_config
             self.bert = PhoneEncoder(encoder_config(c.phoneme_encoder_width, c.phoneme_encoder_heads, c.phoneme_encoder_feedforward,
-                                                    c.dropout), c.phoneme_encoder_layers)
+                                                    c.dropout), c.phoneme_encoder_layers, c.phoneme_encoder_distinct)
         self.bert_encoder = nn.Linear(c.phoneme_encoder_width if self.bert else c.channels, c.style_prosody_channels)
         self.predictor = ProsodyPredictor(c)
         self.decoder = Decoder(c)
         # Per voice: the mean [acoustic | prosodic] style of the training clips, what inference uses.
         self.register_buffer("style", torch.zeros(len(c.speakers), 2 * c.style_dim))
 
-    def predict_tokens(self, hidden, tokens, stress, mask, lengths, prosodic_style):
-        text = hidden if self.bert is None else self.bert(tokens, stress, mask)
-        return self.predictor(self.bert_encoder(text), prosodic_style, lengths, mask)
+    def predict_tokens(self, hidden, tokens, lexical, mask, lengths, prosodic_style, teacher=None):
+        """Token states, duration logits, word outputs and the batch's ``Words`` (``ProsodyPredictor.forward``)."""
+        text = hidden if self.bert is None else self.bert(tokens, lexical, mask)
+        words = self.words(tokens, mask)
+        return (*self.predictor(self.bert_encoder(text), prosodic_style, lengths, mask, words, teacher), words)
+
+    @staticmethod
+    def frame_states(states, durations, index, frame):
+        """Token states repeated for the frames ``frame`` [B, F] they own (``index``), with each frame's place in its phone."""
+        return torch.cat((frames_of(states, index), position_in_token(durations, index, frame).to(states.dtype)), dim=-1)
 
     @torch.no_grad()
     def observe_style(self, style, speakers, momentum=0.01):
@@ -340,29 +540,33 @@ class StyleVoca(Voca):
         return self.gate_pauses(frames, logits[..., -1], tokens, mask)
 
     @torch.inference_mode()
-    def synthesize(self, tokens, stress, lengths, speakers, speed=1.0, pitch_shift=0.0, seed=0, pitch_range=1.0, pitch_jitter=0.0,
+    def synthesize(self, tokens, lexical, lengths, speakers, speed=1.0, pitch_shift=0.0, seed=0, pitch_range=1.0, pitch_jitter=0.0,
                    voiced_vowels=True, comma_pause=0.0, stop_pause=0.0):
         """Free-running synthesis with the stored mean style. One utterance at a
         time: the instance norms would see a batch's padding."""
         self.check_controls(speed, pitch_shift, pitch_range)
         if len(lengths) != 1:
             raise ValueError("StyleVoca synthesizes one utterance at a time")
-        hidden, mask = self.encode(tokens, stress, lengths, speakers)
+        hidden, mask = self.encode(tokens, lexical, lengths, speakers)
         acoustic_style, prosodic_style = self.style[speakers].chunk(2, dim=-1)
-        states, logits = self.predict_tokens(hidden, tokens, stress, mask, lengths, prosodic_style)
+        states, logits, _, _ = self.predict_tokens(hidden, tokens, lexical, mask, lengths, prosodic_style)
         durations = self.pause_floors(self.predict_durations(logits, tokens, mask, speed), tokens, lengths, mask, comma_pause, stop_pause)
         index, frame_mask, frame_lengths = self.align(durations, mask)
-        prosody = self.predictor.F0Ntrain(frames_of(states, index), prosodic_style, frame_lengths)
+        frames = self.frame_states(states, durations, index, torch.arange(index.shape[1], device=index.device)[None])
+        prosody = self.predictor.F0Ntrain(frames, prosodic_style, frame_lengths)
         if voiced_vowels:
             prosody = self.voice_vowels(prosody, tokens, index, frame_mask)
         prosody = self.widen_pitch(prosody, frame_mask, pitch_range)
-        condition = self.hard_prosody(prosody)
+        condition = self.prosody_condition(prosody)
         pitch = condition[..., 0] + pitch_shift
         if pitch_jitter > 0:
             pitch = pitch + self.pitch_wobble(pitch.shape, pitch_jitter, seed, pitch.device)
         condition = torch.cat((pitch[..., None], condition[..., 1:]), dim=-1)
+        features = self.decoder.features(frames_of(hidden, index), condition, acoustic_style)
         with torch.random.fork_rng(devices=[tokens.device] if tokens.device.type == "cuda" else []):
-            torch.manual_seed(seed)     # the NSF source draws its start phases and noise
-            wave = self.decoder(frames_of(hidden, index), condition, self.frequency(pitch) * condition[..., 1], acoustic_style)
+            torch.manual_seed(seed)     # the source draws its noise
+            source = self.decoder.generator.excitation(self.frequency(pitch), condition[..., 1], features)
+        wave = self.decoder.generator.render(features, acoustic_style, source)
         return wave, frame_lengths * self.config.hop, {"durations": durations, "prosody": prosody, "frame_mask": frame_mask,
-                                                       "frame_lengths": frame_lengths}
+                                                       "frame_lengths": frame_lengths,
+                                                       "generator": (features, acoustic_style, source)}   # voca.evaluate re-renders it

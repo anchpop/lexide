@@ -10,6 +10,8 @@ endpoint's identity. Resumable.
 import argparse, base64, concurrent.futures, json, pathlib
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import soundfile as sf
 
 URL = "https://anchpop--wav2vec2-phoneme-wav2vec2phoneme-predict-batch.modal.run"
@@ -27,13 +29,17 @@ todo = [r for r in rows if not (out / f"{r['id']}.json").exists()]
 print(f"{len(rows) - len(todo)} cached, {len(todo)} to fetch")
 
 
+session = requests.Session()   # the endpoint sometimes answers a 502 while it scales
+session.mount("https://", HTTPAdapter(max_retries=Retry(6, backoff_factor=5, status_forcelist=(500, 502, 503, 504), allowed_methods=None)))
+
+
 def fetch(batch):
     requests_ = []
     for row in batch:
         audio, rate = sf.read(args.set / row["wav"], dtype="float32")
         requests_.append({"audio_f32_b64": base64.b64encode(audio.astype("<f4").tobytes()).decode(), "sample_rate": rate,
                           "language": args.language, "return_frame_matrix": True})
-    response = requests.post(URL, json={"requests": requests_}, timeout=900)
+    response = session.post(URL, json={"requests": requests_}, timeout=900)
     response.raise_for_status()
     body = response.json()
     identity = {k: body[k] for k in ("deploy_marker", "model_id", "model_revision", "decoder_version")}

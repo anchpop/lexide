@@ -8,7 +8,6 @@
   "speakers": [
     "achernar"
   ],
-  "vocab_size": 86,
   "channels": 192,
   "heads": 4,
   "feedforward": 640,
@@ -47,16 +46,16 @@
   "decoder_channels": 448,
   "generator_channels": 144,
   "generator_rates": [
-    8,
-    8
+    4,
+    4
   ],
   "generator_resblock_kernels": [
     3,
     7,
     11
   ],
-  "generator_fft": 16,
-  "generator_hop": 4,
+  "generator_fft": 64,
+  "generator_hop": 16,
   "style_encoder_channels": 64,
   "style_encoder_max": 512,
   "crop_frames": 256,

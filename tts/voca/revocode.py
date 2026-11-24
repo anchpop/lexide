@@ -23,11 +23,11 @@ import torch
 from torch import nn
 
 from .config import Config
-from .data import AnnotatedDataset, BucketSampler, collate
+from .data import AnnotatedDataset, BucketSampler, collate, to_device
 from .losses import Discriminators, SpectralLoss
 from .model import TinyVoca
 from .text import frontend_fingerprint
-from .train import WEIGHTS, adversarial_backward, export_model, start_tracking
+from .train import TrainingSystem, adversarial_backward, export_model, start_tracking
 
 
 @torch.no_grad()
@@ -36,11 +36,11 @@ def decoder_states(model, batch, own_prosody):
     so they line up with the recording. Rows where ``own_prosody`` is set condition
     the decoder on the model's predicted pitch, voicing and energy, as at inference."""
     m = model
-    hidden, token_mask = m.encode(batch["tokens"], batch["stress"], batch["token_lengths"], batch["speakers"])
+    hidden, token_mask = m.encode(batch["tokens"], batch["lexical"], batch["token_lengths"], batch["speakers"])
     frames, frame_mask, lengths = m.expand(hidden, batch["durations"], token_mask, batch["speakers"])
     prosody_hidden, prediction = m.predict_prosody(frames, frame_mask)
     target = batch["prosody"]
-    condition = torch.where(own_prosody[:, None, None], m.hard_prosody(prediction.float()), target)
+    condition = torch.where(own_prosody[:, None, None], m.prosody_condition(prediction.float()), target)
     acoustic = m.decode(prosody_hidden, condition.to(prosody_hidden.dtype), frame_mask)
     return acoustic.float(), m.frequency(target[..., 0]), lengths
 
@@ -118,23 +118,24 @@ def main():
     critic_optimizer = torch.optim.AdamW(critics.parameters(), lr=args.learning_rate, betas=(0.8, 0.99))
     rate = lambda s: min(1.0, (s + 1) / 1000) * 0.5 * (1 + math.cos(math.pi * min(s, args.steps) / args.steps))
     schedules = [torch.optim.lr_scheduler.LambdaLR(o, rate) for o in (optimizer, critic_optimizer)]
-    sampler = BucketSampler(train.lengths, args.batch_frames, args.max_batch, 0)
+    sampler = BucketSampler(train.lengths, train.token_counts, train.speakers, args.batch_frames, args.max_batch, 0, alpha=1.0)
     recipe = {k: getattr(args, k) for k in ("gan_start", "gan_ratio", "gan_ramp", "feature_matching", "gan_scale_max")}
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "config.json").write_text(json.dumps(c.to_dict(), indent=2) + "\n")
     tracker = start_tracking(args.output.name, {"model": c.to_dict(), **{k: str(v) for k, v in vars(args).items()}})
     start, window, steps = time.monotonic(), defaultdict(float), 0
     for step in range(1, args.steps + 1):
-        batch = collate([train[i] for i in sampler.next()], args.device)
+        batch = to_device(collate([train[i] for i in sampler.next()[0]]), args.device)
         crop = crop_batch(model, batch, args.crop_frames, args.crops, args.own_prosody)
         wave = synthesize(model, crop)
         stft, mel = spectral(wave, crop["wave"], crop["lengths"] * c.hop)
-        loss = WEIGHTS["stft"] * stft + WEIGHTS["mel"] * mel
+        loss = TrainingSystem.WEIGHTS["stft"] * stft + TrainingSystem.WEIGHTS["mel"] * mel
         metrics = {"stft": stft, "mel": mel}
         optimizer.zero_grad(set_to_none=True)
         if step >= args.gan_start:
             index = torch.arange(wave.shape[-1], device=wave.device).expand_as(wave)
-            loss, gan = adversarial_backward(loss, loss, wave, wave, crop["wave"], index, critics, critic_optimizer, step, recipe)
+            ramp = min(1.0, (step - args.gan_start + 1) / args.gan_ramp)
+            loss, gan = adversarial_backward(loss, loss, wave, wave, crop["wave"], index, critics, critic_optimizer, ramp, recipe)
             metrics.update(gan)
         else:
             loss.backward()
@@ -154,7 +155,7 @@ def main():
                 generator, totals = torch.Generator().manual_seed(1), defaultdict(float)
                 with torch.no_grad():
                     for i in range(len(validation)):
-                        crop = crop_batch(model, collate([validation[i]], args.device), 2 * args.crop_frames, 1, 0.0, generator, centre=True)
+                        crop = crop_batch(model, to_device(collate([validation[i]]), args.device), 2 * args.crop_frames, 1, 0.0, generator, centre=True)
                         for key, value in zip(("validation_stft", "validation_mel"), spectral(synthesize(model, crop), crop["wave"], crop["lengths"] * c.hop)):
                             totals[key] += float(value) / len(validation)
                 vocoder.train()

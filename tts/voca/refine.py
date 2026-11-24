@@ -33,7 +33,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .data import AnnotatedDataset, BucketSampler, collate
+from .data import AnnotatedDataset, BucketSampler, collate, to_device
 from .model import PostFilterBlock, length_mask, stft_frames
 from .revocode import decoder_states
 from .speak import load_model
@@ -171,12 +171,12 @@ def main():
     print(f"refiner {sum(p.numel() for p in refiner.parameters()) / 1e6:.2f}M parameters", flush=True)
     optimizer = torch.optim.AdamW(refiner.parameters(), lr=args.learning_rate, betas=(0.9, 0.99), weight_decay=0.01)
     schedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: min(1.0, (s + 1) / 1000) * 0.5 * (1 + math.cos(math.pi * min(s, args.steps) / args.steps)))
-    sampler = BucketSampler([train.lengths[i] for i in pool], args.batch_frames, args.max_batch, 0)
+    sampler = BucketSampler([train.lengths[i] for i in pool], [train.token_counts[i] for i in pool], args.batch_frames, args.max_batch, 0)
     args.output.mkdir(parents=True, exist_ok=True)
     tracker = start_tracking(args.output.name, {"refiner": asdict(refiner.config), **{k: str(v) for k, v in vars(args).items()}})
     start, window, count = time.monotonic(), defaultdict(float), 0
     for step in range(1, args.steps + 1):
-        batch = collate([train[pool[i]] for i in sampler.next()], args.device)
+        batch = to_device(collate([train[pool[i]] for i in sampler.next()[0]]), args.device)
         value = loss(refiner, base, batch)
         optimizer.zero_grad(set_to_none=True)
         value.backward()
@@ -194,7 +194,7 @@ def main():
                 refiner.eval()
                 with torch.no_grad():
                     torch.manual_seed(1)
-                    values = [float(loss(refiner, base, collate([validation[i]], args.device))) for i in range(len(validation))]
+                    values = [float(loss(refiner, base, to_device(collate([validation[i]]), args.device))) for i in range(len(validation))]
                 refiner.train()
                 record["validation_loss"] = sum(values) / len(values)
                 save_refiner(refiner, args.base, step, args.output / "refiner.pt")

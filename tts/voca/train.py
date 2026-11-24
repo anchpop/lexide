@@ -17,13 +17,14 @@ import time
 import torch
 from torch import nn
 from torch.nn import functional as F
-from .config import CHECKPOINT_FORMAT, Config
-from .data import AnnotatedDataset, BucketSampler, collate, prefetch
+from .config import CHECKPOINT_FORMAT, Config, check_format
+from .data import AnnotatedDataset, BucketSampler, collate, pin, prefetch, to_device
 from .losses import (Discriminators, MelConvergenceLoss, SpectralLoss, StyleCritics, discriminator_loss, generator_gan_loss,
                      masked_mean, slm_feature_loss)
-from .model import TinyVoca
-from .styletts import StyleEncoder, StyleVoca, frames_of
-from .text import frontend_fingerprint, frontend_identity
+from .evaluate import DeployedEvaluation
+from .model import TinyVoca, build_model
+from .styletts import WORD_SEMITONES, StyleEncoder, StyleVoca, frames_of
+from .text import frontend_fingerprint, frontend_identity, sentence_type
 
 SEMITONES = 12 / math.log(2)
 
@@ -56,6 +57,39 @@ def prosody_terms(prediction, target, trusted, frame_mask):
     return dict(pitch=pitch, pitch_spread=pitch_spread, voicing=voicing, energy=energy), metrics
 
 
+def word_terms(outputs, targets, words):
+    """Losses of the word head (``voca.styletts.WordProsody``) outputs [B, W, 8] against
+    ``voca.data.word_prosody`` targets [B, W, 4] on the batch's ``Words``, plus their metrics.
+
+    Prominence is learned from comparisons inside each phrase: every pair of
+    words is ordered as the recording orders them, weighted by how far apart they
+    are, so near ties barely count and a phrase may have several prominent words
+    or none. Shape is a classification; excursion and final movement are robust
+    (Huber, quadratic within a semitone) regressions."""
+    outputs = outputs.float()
+    valid = torch.isfinite(targets) & words.mask[..., None]
+    t = targets.nan_to_num()
+    score, target = outputs[..., 0], t[..., 0]
+    pairs = words.same & valid[:, :, None, 0] & valid[:, None, :, 0]
+    gap = target[:, :, None] - target[:, None, :]
+    weight = pairs * gap.abs().clamp(max=1.0)
+    rank = (weight * F.softplus(-torch.sign(gap) * (score[:, :, None] - score[:, None, :]))).sum() / weight.sum().clamp_min(1e-6)
+    shape_logits = outputs[..., 1:-2]
+    shape = masked_mean(F.cross_entropy(shape_logits.transpose(1, 2), t[..., 1].long(), reduction="none"), valid[..., 1])
+
+    def robust(column, target_column):
+        loss = F.smooth_l1_loss(outputs[..., column], t[..., target_column] / WORD_SEMITONES, beta=1 / WORD_SEMITONES, reduction="none")
+        return masked_mean(loss, valid[..., target_column])
+    with torch.no_grad():
+        def main(x):    # [B, W]: no other word of the phrase scores higher
+            return ~((x[:, None, :] > x[:, :, None]) & pairs).any(-1)
+        phrase_main = pairs.any(-1) & main(target)     # the recording's main words of phrases with 2+ words
+        metrics = dict(word_main_agreement=masked_mean(main(score).float(), phrase_main),
+                       word_shape_accuracy=masked_mean((shape_logits.argmax(-1) == t[..., 1].long()).float(), valid[..., 1]),
+                       word_excursion_error=masked_mean((outputs[..., -2] * WORD_SEMITONES - t[..., 2]).abs(), valid[..., 2]))
+    return dict(word_rank=rank, word_shape=shape, word_excursion=robust(-2, 2), word_final=robust(-1, 3)), metrics
+
+
 @torch.no_grad()
 def duration_metrics(predicted, presence, durations, pausable, lengths):
     """Free-running duration quality: predicted [B, N] frames, presence logits [B, N]."""
@@ -76,17 +110,17 @@ class TrainingSystem(nn.Module):
         self.mel_head = nn.Linear(config.channels, config.n_mels)   # auxiliary, not exported
         self.spectral = SpectralLoss(config.sample_rate)
 
-    def objective(self, batch, teacher_probability, weights=WEIGHTS, random_phase=True):
+    def objective(self, batch, teacher, weights=WEIGHTS, random_phase=True):
         """Loss on full utterances. Returns ``(loss, terms, auxiliary)``.
 
-        ``teacher_probability`` is the per-utterance chance that the acoustic
+        ``teacher[0]`` is the per-utterance chance that the acoustic
         decoder is conditioned on recorded pitch/voicing/energy; otherwise it
         gets the model's own (detached) predictions, exactly as at inference.
         The oscillator always follows the recorded pitch here, because the
         waveform target does.
         """
         m, c = self.model, self.model.config
-        hidden, token_mask = m.encode(batch["tokens"], batch["stress"], batch["token_lengths"], batch["speakers"])
+        hidden, token_mask = m.encode(batch["tokens"], batch["lexical"], batch["token_lengths"], batch["speakers"])
         output = m.duration(hidden, token_mask).float()
         # Length is learned only where a token has frames; whether a pause-capable
         # token has any is a separate yes/no target.
@@ -94,14 +128,14 @@ class TrainingSystem(nn.Module):
         duration = masked_mean((output[..., 0] - torch.log1p(batch["durations"].float())).square(), token_mask & present)
         pausable = token_mask & ~m.phone_tokens[batch["tokens"]]
         pause = masked_mean(F.binary_cross_entropy_with_logits(output[..., 1], present.float(), reduction="none"), pausable)
-        frames, frame_mask, lengths = m.expand(hidden, batch["durations"], token_mask, batch["speakers"])
+        frames, frame_mask, lengths = m.expand(hidden, batch["durations"], token_mask, batch["speakers"], batch["mel"].shape[1])
         if not torch.equal(lengths, batch["frame_lengths"]):
             raise ValueError("durations do not sum to the acoustic frame count")
         prosody_hidden, prediction = m.predict_prosody(frames, frame_mask)
         prediction, target = prediction.float(), batch["prosody"]
         prosody, prosody_metrics = prosody_terms(prediction, target, batch["pitch_trusted"], frame_mask)
-        teacher = torch.rand(len(lengths), device=lengths.device) < teacher_probability
-        condition = torch.where(teacher[:, None, None], target, m.hard_prosody(prediction.detach()))
+        teacher = torch.rand(len(lengths), device=lengths.device) < teacher[0]
+        condition = torch.where(teacher[:, None, None], target, m.prosody_condition(prediction.detach()))
         acoustic = m.decode(prosody_hidden, condition.to(prosody_hidden.dtype), frame_mask)
         mel_target = (batch["mel"] - c.mel_mean) / c.mel_scale
         mel_head = masked_mean((self.mel_head(acoustic).float() - mel_target).abs().mean(-1), frame_mask)
@@ -116,58 +150,121 @@ class TrainingSystem(nn.Module):
                      **duration_metrics(predicted, output[..., 1], batch["durations"], pausable, lengths))
         return loss, terms, {"wave": wave, "reconstruction": weights["stft"] * stft + weights["mel"] * mel}
 
+    FEATURE_MATCHING = 30.0    # the default of --feature-matching
+
     def critics(self):
         return Discriminators()
 
-    def adversarial(self, loss, auxiliary, batch, critics, critic_optimizer, step, recipe):
+    def adversarial(self, loss, auxiliary, batch, critics, critic_optimizer, step, recipe, ramp):
         """One critic update, then backward of ``loss`` plus the balanced GAN term."""
         wave = auxiliary["wave"]
         fake, real, index = crops(wave, batch["wave"], batch["frame_lengths"] * self.model.config.hop, recipe["crop_samples"], recipe["crops"])
-        return adversarial_backward(loss, auxiliary["reconstruction"], wave, fake, real, index, critics, critic_optimizer, step, recipe)
+        return adversarial_backward(loss, auxiliary["reconstruction"], wave, fake, real, index, critics, critic_optimizer, ramp, recipe)
 
 
 class StyleTrainingSystem(nn.Module):
     """StyleTTS 2's second-stage objective, minus its aligner, pitch network,
     diffusion and PL-BERT: style encoders read each clip's mel; the prosody
-    predictor is supervised by our durations, pitch, voicing and energy; the
+    predictor is supervised by our durations, pitch, voicing and energy, and its
+    word head by word-level targets (``word_terms``) on whole sentences; the
     decoder and the F0/energy branches run on equal-length random windows
     (``config.crop_frames``) as in StyleTTS 2. Weights are StyleTTS 2's
     (lambda_mel 5, lambda_ce 20, lambda_dur 1, lambda_gen 1, lambda_slm 1) and ours
-    for the prosody targets. The style encoders, critics and WavLM never ship."""
+    for the prosody targets. The style encoders, critics and WavLM never ship.
+
+    Fixed styles (``schedule``'s fourth value, ramped from 0 to 1): the
+    per-utterance chance that both the prosody predictor and the decoder get the
+    stored voice styles (what inference uses: one running mean per voice,
+    detached) instead of the styles read from this recording. Training starts as
+    StyleTTS 2 does and ends on exactly the inputs the app gives.
+
+    The adversarial terms are at StyleTTS 2's fixed weights (``gan``, with
+    ``feature_matching`` on the waveform critics' feature matching, and
+    ``slm_gan``), faded in over ``gan_ramp`` steps from the GAN start."""
 
     WEIGHTS = {"duration": 1.0, "duration_bins": 20.0, "pause": 1.0, "pitch": 2.0, "pitch_spread": 2.0, "voicing": 1.0, "energy": 1.0,
-               "mel_convergence": 5.0, "slm": 1.0, "gan": 1.0, "slm_gan": 1.0}
+               "word_rank": 1.0, "word_shape": 1.0, "word_excursion": 1.0, "word_final": 1.0,
+               "mel_convergence": 5.0, "slm": 1.0, "gan": 1.0, "slm_gan": 1.0,
+               "shift": 0.0}    # shift_consistency; opt in with --weights '{"shift": 1}'
+    CROP_ENDS, CROP_STARTS = 0.25, 0.15    # shares of training windows anchored to the utterance's end and start
+    SHIFT_ITEMS = 2                  # utterances of each batch the shift-consistency loss renders a second time
+    SHIFT_BAND = (1000.0, 4500.0)    # Hz: where the generator's clock images were measured
+    FEATURE_MATCHING = 2.0     # StyleTTS 2's
+    SLM_EVERY = 10   # the WavLM critic head trains every this many steps
+
     def __init__(self, config):
         super().__init__()
         self.model = StyleVoca(config)
         self.style_encoder, self.predictor_encoder = StyleEncoder(config), StyleEncoder(config)   # acoustic, prosodic
+        channels_last(self.style_encoder)
+        channels_last(self.predictor_encoder)
         self.mel_convergence = MelConvergenceLoss(config.sample_rate)
         self.spectral = SpectralLoss(config.sample_rate)   # metrics comparable with TinyVoca runs
+        self.register_buffer("shift_window", torch.hann_window(512), persistent=False)
+
+    def shift_consistency(self, generator, wave, features, style, source, voiced):
+        """The generator's sensitivity to its own output grid, as a loss (Codex, round 5). The first
+        ``SHIFT_ITEMS`` utterances are rendered again from the same excitation and input, delayed by
+        a random fraction of the generator's hop, and the delay undone (``Generator.render``). A
+        voice renders the same either way; images of it around the synthesis frame rate (3 kHz at
+        hop 16, filling the gaps between harmonics in 1.8-4.4 kHz) move with the grid. Their
+        difference's energy in ``SHIFT_BAND`` over voiced frames, relative to the band's energy."""
+        k = min(self.SHIFT_ITEMS, len(wave))
+        delay = torch.randint(1, generator.hop, (1,), device=wave.device)
+        shifted = generator.render(features[:k], style[:k], source[:k], delay)
+        rate = self.model.config.sample_rate
+        low, high = (math.ceil(f * 512 / rate) for f in self.SHIFT_BAND)
+        with torch.autocast(wave.device.type, enabled=False):
+            a, b = (torch.stft(w.float(), 512, 128, window=self.shift_window, return_complex=True)[:, low:high] for w in (wave[:k], shifted))
+        # STFT frames (every 128 samples) over voiced acoustic frames (256), the crop's edge frames left out.
+        frame = (torch.arange(a.shape[-1], device=wave.device) // 2).clamp(max=voiced.shape[1] - 1)
+        weight = voiced[:k, frame] * F.pad(torch.ones(a.shape[-1] - 4, device=wave.device), (2, 2))
+        return ((a - b).abs().square() * weight[:, None]).sum() / ((a.abs().square() * weight[:, None]).sum() + 1e-6)
 
     def critics(self):
-        return StyleCritics(self.model.config.sample_rate)
+        return channels_last(StyleCritics(self.model.config.sample_rate))
 
 
-    def objective(self, batch, teacher_probability, weights=WEIGHTS, random_phase=True):
+    def objective(self, batch, scheduled, weights=WEIGHTS, random_phase=True):
+        """``scheduled`` (``schedule``): the per-utterance chances that the decoder gets recorded
+        prosody (``[0]``), that the predictor gets recorded word prosody (``[1]``) and that both
+        get the stored voice styles (``[3]``)."""
         m, c = self.model, self.model.config
         tokens, token_lengths, speakers, durations = batch["tokens"], batch["token_lengths"], batch["speakers"], batch["durations"]
-        hidden, token_mask = m.encode(tokens, batch["stress"], token_lengths, speakers)
+        hidden, token_mask = m.encode(tokens, batch["lexical"], token_lengths, speakers)
         # The dataset checked that durations sum to the frame counts. Shapes come
-        # from the host copies of the lengths, so nothing here waits for the GPU.
-        host = batch["host"]
+        # from the batch's padded shape and the host-side ``shortest``, so nothing
+        # here waits for the GPU and fixed-shape batches give fixed shapes throughout.
         index, frame_mask, lengths = m.align(durations, token_mask, frames=batch["mel"].shape[1])
-        # One window per utterance, the same length across the batch; centred when validating.
-        size = min(c.crop_frames, int(host["frame_lengths"].min()))
-        offset = torch.rand(len(lengths), device=lengths.device) if self.training else torch.full_like(lengths, 0.5, dtype=torch.float)
+        # One window per utterance, the same length across the batch; centred when validating. While training,
+        # CROP_ENDS of them end with the utterance and CROP_STARTS start with it: uniform windows covered the
+        # utterance's end in 2.8% of crops, and the decoder, generator and critics hardly saw final falls and releases.
+        size = min(c.crop_frames, batch["host"]["shortest"])
+        if self.training:
+            anchor = torch.rand(len(lengths), device=lengths.device)
+            offset = torch.where(anchor < self.CROP_ENDS, 1.0, torch.where(anchor < self.CROP_ENDS + self.CROP_STARTS, 0.0,
+                                                                          torch.rand(len(lengths), device=lengths.device)))
+        else:
+            offset = torch.full_like(lengths, 0.5, dtype=torch.float)
         window = (offset * (lengths - size + 1)).long().clamp(max=lengths - size)[:, None] + torch.arange(size, device=lengths.device)
         mel = batch["mel"].gather(1, window[..., None].expand(-1, -1, c.n_mels))
         if self.training:
             mel = ((mel - c.mel_mean) / c.mel_scale).transpose(1, 2)[:, None]
             acoustic_style, prosodic_style = self.style_encoder(mel), self.predictor_encoder(mel)
+            shipped = m.style[speakers].chunk(2, dim=-1)    # copies, from before this batch updates the means
             m.observe_style(torch.cat((acoustic_style, prosodic_style), dim=-1).detach(), speakers)
+            fixed = torch.rand(len(lengths), device=lengths.device) < scheduled[3]
+            acoustic_style, prosodic_style = (torch.where(fixed[:, None], stored.to(own.dtype), own)
+                                              for stored, own in zip(shipped, (acoustic_style, prosodic_style)))
         else:
             acoustic_style, prosodic_style = m.style[speakers].chunk(2, dim=-1)
-        states, logits = m.predict_tokens(hidden, tokens, batch["stress"], token_mask, host["token_lengths"], prosodic_style)
+        # The word head and its losses see whole sentences; its features condition what follows on the
+        # recording's word prosody only briefly (its own schedule), so that durations and F0/N learn
+        # from the word features they will get at inference for most of training.
+        word_teacher = torch.rand(len(lengths), device=lengths.device) < scheduled[1]
+        states, logits, word_outputs, words = m.predict_tokens(hidden, tokens, batch["lexical"], token_mask, token_lengths, prosodic_style,
+                                                               (batch["word_prosody"], word_teacher))
+        word, word_metrics = word_terms(word_outputs, batch["word_prosody"], words)
         logits = logits.float()
         # Durations as StyleTTS 2 learns them (bins "longer than k" + L1 on their sum),
         # on tokens that have frames; whether a pause-capable token has any is the presence logit.
@@ -178,44 +275,54 @@ class StyleTrainingSystem(nn.Module):
         pausable = token_mask & ~m.phone_tokens[tokens]
         pause = masked_mean(F.binary_cross_entropy_with_logits(logits[..., -1], (durations > 0).float(), reduction="none"), pausable)
         crop = index.gather(1, window)
-        prediction = m.predictor.F0Ntrain(frames_of(states, crop), prosodic_style, torch.full((len(lengths),), size)).float()
+        prediction = m.predictor.F0Ntrain(m.frame_states(states, durations, crop, window), prosodic_style, torch.full_like(lengths, size)).float()
         target, trusted = batch["prosody"].gather(1, window[..., None].expand(-1, -1, 3)), batch["pitch_trusted"].gather(1, window)
         prosody, prosody_metrics = prosody_terms(prediction, target, trusted, torch.ones_like(trusted))
-        teacher = torch.rand(len(lengths), device=lengths.device) < teacher_probability
-        condition = torch.where(teacher[:, None, None], target, m.hard_prosody(prediction.detach()))
+        teacher = torch.rand(len(lengths), device=lengths.device) < scheduled[0]
+        condition = torch.where(teacher[:, None, None], target, m.prosody_condition(prediction.detach()))
         # The source always follows the recorded pitch and voicing, because the waveform target does.
-        wave = m.decoder(frames_of(hidden, crop), condition, m.frequency(target[..., 0]) * target[..., 1], acoustic_style)
+        generator, features = m.decoder.generator, m.decoder.features(frames_of(hidden, crop), condition, acoustic_style)
+        source = generator.excitation(m.frequency(target[..., 0]), target[..., 1], features)
+        wave = generator.render(features, acoustic_style, source)
         samples = (window[:, :1] * c.hop + torch.arange(size * c.hop, device=lengths.device))
         real = batch["wave"].gather(1, samples)
-        terms = dict(duration=duration, duration_bins=duration_bins, pause=pause, **prosody, mel_convergence=self.mel_convergence(wave, real))
+        terms = dict(duration=duration, duration_bins=duration_bins, pause=pause, **prosody, **word,
+                     mel_convergence=self.mel_convergence(wave, real))
         if self.training:
             terms["slm"], slm = slm_feature_loss(wave, real, c.sample_rate)
+            if weights["shift"]:
+                terms["shift"] = self.shift_consistency(generator, wave, features, acoustic_style, source, target[..., 1])
         loss = sum(weights[name] * value for name, value in terms.items())
         with torch.no_grad():
             stft, mel = self.spectral(wave, real, torch.full_like(lengths, size * c.hop))
             predicted = m.predict_durations(logits, tokens, token_mask)
-        terms.update(base_loss=loss.detach(), teacher_fraction=teacher.float().mean(), stft=stft, mel=mel, **prosody_metrics,
+        terms.update(base_loss=loss.detach(), teacher_fraction=teacher.float().mean(), word_teacher_fraction=word_teacher.float().mean(),
+                     stft=stft, mel=mel, **prosody_metrics, **word_metrics,
                      **duration_metrics(predicted, logits[..., -1], durations, pausable, lengths))
-        return loss, terms, {"wave": wave, "real": real, "slm": slm if self.training else None}
+        if self.training:
+            terms["fixed_style_fraction"] = fixed.float().mean()
+        return loss, terms, {"wave": wave, "real": real, "slm": slm if self.training else None,
+                             "reconstruction": weights["mel_convergence"] * terms["mel_convergence"]}
 
-    def adversarial(self, loss, auxiliary, batch, critics, critic_optimizer, step, recipe):
-        """StyleTTS 2's GAN step with fixed weights: critics first (the WavLM head
-        every 10th step), then backward of ``loss`` plus the generator terms."""
+    def adversarial(self, loss, auxiliary, batch, critics, critic_optimizer, step, recipe, ramp):
+        """StyleTTS 2's GAN step: critics first (the WavLM head every 10th step), then
+        backward of ``loss`` plus the generator terms at their fixed weights, ramped."""
         fake, real = auxiliary["wave"], auxiliary["real"]
-        weights = recipe["weights"]
         critic_optimizer.zero_grad(set_to_none=True)
-        d_loss = critics.discriminator_loss(real, fake.detach(), slm=auxiliary["slm"] if step % 10 == 0 else None)
+        d_loss = critics.discriminator_loss(real, fake.detach(), slm=auxiliary["slm"] if step % self.SLM_EVERY == 0 else None)
         d_loss.backward()
         critic_grad = nn.utils.clip_grad_norm_(critics.parameters(), 10)
         critic_optimizer.step()
         critics.requires_grad_(False)
         try:
-            gan, slm_gan = critics.generator_loss(real, fake, auxiliary["slm"]["fake"])
-            loss = loss + weights["gan"] * gan + weights["slm_gan"] * slm_gan
+            adversarial, matching, slm_gan = critics.generator_loss(real, fake, auxiliary["slm"]["fake"])
+            scale = torch.as_tensor(ramp * recipe["weights"]["gan"], device=fake.device)
+            loss = loss + scale * (adversarial + recipe["feature_matching"] * matching) + ramp * recipe["weights"]["slm_gan"] * slm_gan
             loss.backward()
         finally:
             critics.requires_grad_(True)
-        return loss, dict(discriminator=d_loss, adversarial=gan, slm_adversarial=slm_gan, critic_grad_norm=critic_grad)
+        return loss, dict(discriminator=d_loss, adversarial=adversarial, feature_matching=matching, slm_adversarial=slm_gan,
+                          critic_grad_norm=critic_grad, gan_scale=scale)
 
 
 TRAINING_SYSTEMS = {"tinyvoca": TrainingSystem, "styletts": StyleTrainingSystem}
@@ -241,10 +348,10 @@ def teacher_probability(step, hold, ramp, final):
     return 1.0 if step < hold else max(final, 1.0 - (1.0 - final) * (step - hold) / max(ramp, 1))
 
 
-def adversarial_backward(loss, reconstruction, wave, fake, real, index, critics, critic_optimizer, step, recipe):
-    """One critic update on the windows ``fake``/``real`` (taken from ``wave`` at
-    ``index``), then backward of ``loss`` plus the balanced generator GAN term.
-    Returns the total loss and the GAN metrics."""
+def adversarial_backward(loss, reconstruction, wave, fake, real, index, critics, critic_optimizer, ramp, recipe):
+    """TinyVoca's critics (``Discriminators``): one update on the windows
+    ``fake``/``real`` (taken from ``wave`` at ``index``), then backward of
+    ``loss`` plus the balanced generator GAN term. Returns the total loss and the GAN metrics."""
     critic_optimizer.zero_grad(set_to_none=True)
     d_loss = discriminator_loss(critics(real), critics(fake.detach()))
     d_loss.backward()
@@ -255,43 +362,203 @@ def adversarial_backward(loss, reconstruction, wave, fake, real, index, critics,
         with torch.no_grad():
             real_features = critics(real)
         adversarial, matching = generator_gan_loss(real_features, critics(fake))
-        gan = adversarial + recipe["feature_matching"] * matching
-        # Fixed weights cannot balance these terms: measured at the waveform, the
-        # adversarial gradient was under 1% of the spectral one, i.e. switched off.
-        # Scale the GAN term so that, inside the windows the critics saw, its
-        # gradient is ``gan_ratio`` times the reconstruction gradient.
-        reconstruction_gradient = torch.autograd.grad(reconstruction, wave, retain_graph=True)[0].gather(1, index)
-        gan_gradient = torch.autograd.grad(gan, wave, retain_graph=True)[0].gather(1, index)
-        ramp = min(1.0, (step - recipe["gan_start"] + 1) / max(recipe["gan_ramp"], 1))
-        scale = (recipe["gan_ratio"] * ramp * reconstruction_gradient.norm() / gan_gradient.norm().clamp_min(1e-12))
-        scale = scale.clamp(max=recipe["gan_scale_max"]).detach()
-        loss = loss + scale * gan
-        loss.backward()
+        loss, balance = balanced_backward(loss, reconstruction, adversarial + recipe["feature_matching"] * matching, wave, index, ramp, recipe)
     finally:
         critics.requires_grad_(True)
-    return loss, dict(discriminator=d_loss, adversarial=adversarial, feature_matching=matching, gan_scale=scale, critic_grad_norm=critic_grad)
+    return loss, dict(discriminator=d_loss, adversarial=adversarial, feature_matching=matching, critic_grad_norm=critic_grad, **balance)
+
+
+def balanced_backward(loss, reconstruction, gan, wave, index, ramp, recipe):
+    """Backward of ``loss`` plus the generator's GAN term ``gan``, scaled so that
+    its gradient at the waveform ``wave`` (inside the critics' windows ``index``,
+    or all of it) is ``ramp * gan_ratio`` times the ``reconstruction`` term's,
+    at most ``gan_scale_max``. Fixed weights cannot hold that balance: measured
+    at the waveform, a fixed adversarial gradient was under 1% of the spectral
+    one for TinyVoca, i.e. switched off. Everything stays on the GPU, so the
+    step can be captured; ``ramp`` is a tensor in graphs.
+
+    The GAN gradient at the waveform is computed once and sent down the
+    generator with the rest of the loss's in one backward pass. Returns the total
+    loss and the metrics: the scale, and the unscaled gradient ratio."""
+    def at(term):
+        gradient = torch.autograd.grad(term, wave, retain_graph=True)[0]
+        return gradient, (gradient if index is None else gradient.gather(1, index)).norm()
+    _, reconstruction_norm = at(reconstruction)
+    gan_gradient, gan_norm = at(gan)
+    ratio = gan_norm / reconstruction_norm.clamp_min(1e-12)
+    scale = (recipe["gan_ratio"] * ramp / ratio.clamp_min(1e-12)).clamp(max=recipe["gan_scale_max"]).detach()
+    torch.autograd.backward([loss, wave], [None, scale * gan_gradient])
+    return loss.detach() + scale * gan.detach(), dict(gan_scale=scale, gan_gradient_ratio=ratio.detach())
+
+
+def schedule(optimizer, critic_optimizer, step, recipe):
+    """Set this step's learning rates; returns its teacher-forcing probabilities
+    (recorded prosody for the decoder, recorded word prosody for the predictor),
+    how far the adversarial terms have faded in (0 before the GAN starts) and the
+    chance of the stored voice styles (styletts: 0 for ``fixed_style_hold`` steps, then up to 1)."""
+    start = (recipe.get("branched_from") or {}).get("step", 0)
+
+    def set_rate(group, value):
+        if torch.is_tensor(group["lr"]):
+            group["lr"].fill_(value)   # captured optimizer steps read the rate from this tensor
+        else:
+            group["lr"] = value
+    for group in optimizer.param_groups:
+        set_rate(group, group.get("scale", 1.0) * learning_rate(step, recipe["learning_rate"], recipe["warmup"], recipe["lr_half_life"], start))
+    for group in critic_optimizer.param_groups:
+        set_rate(group, learning_rate(step, recipe["learning_rate"], 1, recipe["lr_half_life"], start))
+    return (teacher_probability(step, recipe["teacher_hold"], recipe["teacher_ramp"], recipe["teacher_final"]),
+            teacher_probability(step, recipe["word_teacher_hold"], recipe["word_teacher_ramp"], 0.0),
+            min(1.0, max(0.0, (step - recipe["gan_start"] + 1) / recipe["gan_ramp"])),
+            1.0 - teacher_probability(step, recipe["fixed_style_hold"], recipe["fixed_style_ramp"], 0.0))
 
 
 def optimize_step(system, critics, optimizer, critic_optimizer, batch, step, recipe):
+    """One eager training step on a (pinned) CPU batch."""
+    scheduled = schedule(optimizer, critic_optimizer, step, recipe)
+    return train_step(system, critics, optimizer, critic_optimizer, to_device(batch, next(system.parameters()).device), step, recipe, scheduled)
+
+
+def train_step(system, critics, optimizer, critic_optimizer, batch, step, recipe, scheduled):
+    """Losses, backward and both optimizer updates, with the learning rates
+    already set (``schedule``, whose other values are ``scheduled``): everything
+    here can be captured in a CUDA graph."""
     weights = recipe["weights"]
-    start = (recipe.get("branched_from") or {}).get("step", 0)
-    for group in optimizer.param_groups:
-        group["lr"] = group.get("scale", 1.0) * learning_rate(step, recipe["learning_rate"], recipe["warmup"], recipe["lr_half_life"], start)
-    for group in critic_optimizer.param_groups:
-        group["lr"] = learning_rate(step, recipe["learning_rate"], 1, recipe["lr_half_life"], start)
     optimizer.zero_grad(set_to_none=True)
-    probability = teacher_probability(step, recipe["teacher_hold"], recipe["teacher_ramp"], recipe["teacher_final"])
-    loss, metrics, auxiliary = system.objective(batch, probability, weights)
-    if step >= recipe["gan_start"]:
-        loss, gan_metrics = system.adversarial(loss, auxiliary, batch, critics, critic_optimizer, step, recipe)
-        metrics.update(gan_metrics)
-    else:
-        loss.backward()
+    # bf16: matrix products and convolutions in bfloat16 (the weights, gradients
+    # and optimizer stay float32); spectra, norms and losses are computed in float32.
+    with torch.autocast("cuda", torch.bfloat16, enabled=recipe.get("bf16", False)):
+        loss, metrics, auxiliary = system.objective(batch, scheduled, weights)
+        if step >= recipe["gan_start"]:
+            loss, gan_metrics = system.adversarial(loss, auxiliary, batch, critics, critic_optimizer, step, recipe, scheduled[2])
+            metrics.update(gan_metrics)
+        else:
+            loss.backward()
     # Gradient norms are returned, not checked: checking would make every step wait
     # for the GPU. The training loop stops at the next log step on a non-finite one.
     grad = nn.utils.clip_grad_norm_(system.parameters(), recipe["grad_clip"])
     optimizer.step()
     return {**{k: torch.as_tensor(v).detach() for k, v in metrics.items()}, "loss": loss.detach(), "grad_norm": grad}
+
+
+class ChannelsLast(nn.Module):
+    def forward(self, weight):
+        return weight.contiguous(memory_format=torch.channels_last)
+
+
+def channels_last(module):
+    """Run the 2-D convolutions of ``module`` in NHWC, the layout cuDNN's fast
+    kernels on recent GPUs use: in NCHW every call converts its input, weight
+    and output (about 14% of a GAN step's GPU time). Same arithmetic; the
+    parameters and state-dict keys are unchanged (the conversion follows the
+    weight's normalization as one more parametrization)."""
+    from torch.nn.utils import parametrize
+    for conv in module.modules():
+        if isinstance(conv, nn.Conv2d):
+            parametrize.register_parametrization(conv, "weight", ChannelsLast(), unsafe=True)
+            conv.register_forward_pre_hook(lambda _, inputs: (inputs[0].contiguous(memory_format=torch.channels_last), *inputs[1:]))
+    return module
+
+
+class GraphedSteps:
+    """``optimize_step`` replayed from CUDA graphs, one per batch shape and phase
+    (before the GAN, GAN, GAN with the WavLM head's update). Replaying skips the
+    ~14k kernel launches per step that otherwise keep the GPU waiting on Python.
+
+    The first step of each shape and phase runs eagerly, which creates what a
+    capture must not (optimizer state, WavLM, cuFFT plans), and its graph is
+    captured right after. Eager steps allocate from the graphs' memory pool, so
+    they reuse the graphs' scratch memory instead of needing their own.
+
+    A graph launches the cuFFT plans it was captured with, which live in
+    PyTorch's plan cache, an LRU of ``max_size`` plans (4096). Replays never look
+    a plan up, so the graphs' plans are the least recently used, and everything
+    else that runs FFTs on this GPU (the deployed evaluation synthesizes hundreds
+    of sentences of new lengths at every save) pushes them out: their workspaces
+    are freed while the graphs still use them, and the next replay crashes
+    ("misaligned address", "illegal memory access"). Runs also segfaulted on the
+    first replay after an evaluation with the cache never full. So no graph
+    outlives an evaluation: the training loop calls ``release`` after every
+    one, which drops the graphs and the plans (recaptured on the next steps,
+    about a minute). Between evaluations only captures add plans; should anything
+    else fill the cache, the graphs are released before they could replay an
+    evicted plan (the cache only shrinks when cleared, so a cache that is not
+    full has never evicted one).
+    """
+
+    def __init__(self, system, critics, optimizer, critic_optimizer, recipe):
+        if not isinstance(system, StyleTrainingSystem):
+            raise ValueError("CUDA graphs need the styletts training step (no host waits, fixed shapes)")
+        self.system, self.critics, self.optimizer, self.critic_optimizer, self.recipe = system, critics, optimizer, critic_optimizer, recipe
+        self.device = next(system.parameters()).device
+        self.stream = torch.cuda.Stream(self.device)
+        self.scheduled = torch.zeros(4, device=self.device)   # ``schedule``'s values, rewritten before every replay
+        self.pool, self.graphs = torch.cuda.MemPool(), {}
+        self.plans = torch.backends.cuda.cufft_plan_cache[self.device.index]
+        self.recaptures = 0
+
+    def release(self):
+        """Drop every captured graph and the cuFFT plans: the next steps capture them again, into
+        the same pool. The gradients the captured backward left in ``.grad`` live in graph memory
+        and are dropped first: recapturing while they were still referenced crashed."""
+        torch.cuda.synchronize(self.device)
+        for parameter in (*self.system.parameters(), *self.critics.parameters()):
+            parameter.grad = None
+        self.graphs.clear()
+        self.plans.clear()
+        self.recaptures += 1
+
+    def __call__(self, batch, step):
+        if self.plans.size >= self.plans.max_size:    # a captured graph's plan may be gone: see the class docstring
+            self.release()
+        self.scheduled.copy_(torch.tensor(schedule(self.optimizer, self.critic_optimizer, step, self.recipe)))
+        gan = step >= self.recipe["gan_start"]
+        tensors = {key: value for key, value in batch.items() if key != "host"}
+        key = (gan, gan and step % self.system.SLM_EVERY == 0, batch["host"]["shortest"],
+               *((name, tuple(value.shape)) for name, value in sorted(tensors.items())))
+        if key in self.graphs:
+            graph, static, outputs = self.graphs[key]
+            for name, value in tensors.items():
+                static[name].copy_(value, non_blocking=True)
+            graph.replay()
+            return outputs   # overwritten by the next replay of this graph
+        static = to_device(batch, self.device)
+        current = torch.cuda.current_stream(self.device)
+        self.stream.wait_stream(current)
+        # Backward on this thread: autograd's worker threads would allocate outside the pool.
+        with torch.cuda.stream(self.stream), torch.cuda.use_mem_pool(self.pool), torch.autograd.set_multithreading_enabled(False):
+            metrics = self.step(static, step)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=self.pool.id, stream=self.stream, capture_error_mode="thread_local"):
+            outputs = self.step(static, step)   # recorded, not run
+        current.wait_stream(self.stream)
+        self.graphs[key] = graph, static, outputs
+        return metrics
+
+    def step(self, batch, step):
+        return train_step(self.system, self.critics, self.optimizer, self.critic_optimizer, batch, step, self.recipe, self.scheduled)
+
+
+def adamw(groups, device, **settings):
+    """AdamW whose steps can be captured in CUDA graphs on a GPU: fused, with the
+    step count and each group's learning rate in device tensors."""
+    if not str(device).startswith("cuda"):
+        return torch.optim.AdamW(groups, **settings)
+    groups = [{**group, "lr": torch.tensor(float(settings["lr"]), device=device)} for group in groups]
+    return torch.optim.AdamW(groups, **settings, fused=True, capturable=True)
+
+
+def load_optimizer(optimizer, state):
+    """A checkpoint's moments; the hyperparameters (learning-rate tensors, scales,
+    fused/capturable) stay this run's, whatever the checkpoint was trained with."""
+    settings = [{key: value for key, value in group.items() if key != "params"} for group in optimizer.param_groups]
+    optimizer.load_state_dict(state)
+    for group, setting in zip(optimizer.param_groups, settings):
+        group.update(setting)
+        for parameter in group["params"]:
+            moments = optimizer.state.get(parameter, {})
+            if "step" in moments and (group.get("fused") or group.get("capturable")):
+                moments["step"] = moments["step"].to(parameter.device, torch.float32)
 
 
 def start_tracking(name, config):
@@ -350,11 +617,25 @@ def load_compatible(module, state):
     return report
 
 
-def balanced_indices(dataset, limit):
-    """Stable round-robin over voices, independent of manifest order."""
+def balanced_indices(dataset, limit, per_voice=False):
+    """Stable round-robin over voices, independent of manifest order: ``limit``
+    in all, or with ``per_voice`` up to ``limit`` of each, taken round-robin over
+    the kinds of sentence (script role, e.g. quoted, and ``sentence_type``) so
+    every kind is in it when the voice has more sentences than ``limit``."""
     groups = defaultdict(list)
-    for i, row in enumerate(dataset.rows):
-        groups[row["speaker"]].append(i)
+    for i, speaker in enumerate(dataset.speakers):
+        groups[speaker].append(i)
+    if per_voice:
+        selected = []
+        for voice in sorted(groups):
+            kinds = defaultdict(list)
+            for i in groups[voice]:
+                row = dataset.rows[i]
+                kinds[(row.get("role"), sentence_type(row["text"]))].append(i)
+            queues = [kinds[k] for k in sorted(kinds, key=str)]
+            mine = [q[n] for n in range(max(map(len, queues))) for q in queues if n < len(q)]
+            selected += mine[:limit]
+        return selected
     limit = min(max(limit, len(groups)), len(dataset.rows))
     selected = []
     for offset in range(limit):
@@ -378,31 +659,35 @@ def check_leakage(train, validation):
             if len(collisions) == 5:
                 break
     if collisions:
-        raise ValueError("train/validation leakage; split by sentence/text_id across BOTH voices. Examples: " + json.dumps(collisions, ensure_ascii=False))
+        raise ValueError("train/validation leakage; split by sentence/text_id across all voices. Examples: " + json.dumps(collisions, ensure_ascii=False))
 
 
 @torch.no_grad()
 def validate(system, dataset, indices, device, weights, batch_size=8):
-    """Held-out metrics on a fixed balanced subset.
+    """Held-out metrics on a fixed balanced subset, with the raw (not the shipped
+    EMA) weights and the stored voice style.
 
     ``teacher_forced`` conditions the decoder on recorded prosody, ``predicted``
     on the model's own; both use recorded durations and pitch for the oscillator
-    so the spectra are comparable with the recording. Durations, pauses, pitch
-    and voicing errors are those of the free-running predictors. This is a
+    so the spectra are comparable with the recording, which also means neither
+    is what a learner hears (``voca.evaluate`` scores that). Durations and
+    pauses are the free-running predictors'; pitch and voicing are predicted at
+    the recorded durations, on the decoder's centred window. This is a
     training monitor; pronunciation is judged separately with ASR and by listening.
     """
     system.eval()
     order = sorted(indices, key=lambda i: dataset.lengths[i])
     totals, weight = defaultdict(float), 0
     for start in range(0, len(order), batch_size):
-        batch = collate([dataset[i] for i in order[start:start + batch_size]], device)
+        batch = to_device(collate([dataset[i] for i in order[start:start + batch_size]]), device)
         size = len(batch["frame_lengths"])
         for name, probability in (("teacher_forced", 1.0), ("predicted", 0.0)):
-            _, metrics, _ = system.objective(batch, probability, weights, random_phase=False)
+            _, metrics, _ = system.objective(batch, (probability, probability, 0.0, 1.0), weights, random_phase=False)
             totals[f"validation_{name}_mel"] += float(metrics["mel"]) * size
             totals[f"validation_{name}_stft"] += float(metrics["stft"]) * size
         for key in ("duration", "pause_accuracy", "pause_length_ratio", "pitch_error_semitones", "pitch_spread_ratio", "voicing_accuracy",
-                    "duration_length_ratio", "duration_length_error"):
+                    "duration_length_ratio", "duration_length_error", "word_rank", "word_main_agreement", "word_shape_accuracy",
+                    "word_excursion_error", "word_final"):
             totals["validation_" + key] += float(metrics[key]) * size
         weight += size
     system.train()
@@ -428,18 +713,29 @@ def main():
     parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--weights", type=json.loads, default={}, help="JSON overrides for the loss weights, e.g. '{\"mel\": 5}'")
     parser.add_argument("--gan-start", type=int, default=8000)
-    parser.add_argument("--gan-ratio", type=float, default=0.7, help="Adversarial gradient as a fraction of the reconstruction gradient at the waveform")
-    parser.add_argument("--gan-ramp", type=int, default=3000, help="Steps over which the adversarial term fades in while the critics warm up")
-    parser.add_argument("--feature-matching", type=float, default=30.0, help="Feature-matching weight inside the adversarial term")
-    parser.add_argument("--gan-scale-max", type=float, default=2000.0)
+    parser.add_argument("--gan-ratio", type=float, default=0.7, help="tinyvoca: adversarial gradient as a fraction of the "
+                        "reconstruction gradient at the waveform (styletts: fixed weights, --weights gan / slm_gan)")
+    parser.add_argument("--gan-ramp", type=int, default=3000, help="Steps over which the adversarial terms fade in while the critics warm up")
+    parser.add_argument("--feature-matching", type=float, help="Feature-matching weight inside the adversarial term "
+                        "(default: the architecture's, TrainingSystem.FEATURE_MATCHING / StyleTrainingSystem.FEATURE_MATCHING)")
+    parser.add_argument("--gan-scale-max", type=float, default=2000.0, help="tinyvoca: the balanced GAN term's largest scale")
     parser.add_argument("--crop-samples", type=int, default=8192)
     parser.add_argument("--crops", type=int, default=2, help="Discriminator windows per utterance")
     parser.add_argument("--teacher-hold", type=int, default=3000, help="Steps with recorded prosody conditioning only")
     parser.add_argument("--teacher-ramp", type=int, default=7000)
     parser.add_argument("--teacher-final", type=float, default=0.0, help="Share of utterances still conditioned on recorded prosody "
                         "after the ramp (0 = the decoder sees only what it gets at inference)")
+    parser.add_argument("--word-teacher-hold", type=int, default=500, help="Steps with recorded word prosody feeding durations and F0/N")
+    parser.add_argument("--word-teacher-ramp", type=int, default=2000, help="Steps over which that falls to the word head's own predictions")
+    parser.add_argument("--fixed-style-hold", type=int, default=2000, help="styletts: steps where the prosody predictor and the decoder "
+                        "get each recording's own styles; then the share given the stored voice styles (as at inference) rises to 1")
+    parser.add_argument("--fixed-style-ramp", type=int, help="Steps of that rise (default: to 70%% of --steps)")
     parser.add_argument("--subset", type=int, help="Train on the first N utterances (balanced by voice): memorisation check")
+    parser.add_argument("--sampling-alpha", type=float, default=0.5, help="Each voice is drawn with probability proportional "
+                        "to its hours to this power: 1 uniform by audio, 0 every voice equally (voca.data.TemperedSampler)")
     parser.add_argument("--validation-size", type=int, default=32)
+    parser.add_argument("--deployed-size", type=int, default=64, help="Held-out sentences of each voice the shipped weights synthesize "
+                        "at every save for the word-level prosody scores (voca.evaluate; 0: none)")
     parser.add_argument("--save-every", type=int, default=1000)
     parser.add_argument("--keep-every", type=int, default=10000, help="Keep a numbered checkpoint at this interval and at the GAN boundary")
     parser.add_argument("--log-every", type=int, default=10)
@@ -456,15 +752,17 @@ def main():
     parser.add_argument("--recorded-voicing", action="store_true", help="Use the pitch tracker's voicing as it is, "
                         "without marking vowel frames voiced")
     parser.add_argument("--no-preload", action="store_true", help="Load feature files lazily instead of before the first step")
+    parser.add_argument("--cuda-graphs", action="store_true", help="Replay the training step from CUDA graphs (styletts on a GPU)")
+    parser.add_argument("--bf16", action="store_true", help="Mixed precision: bfloat16 matrix products and convolutions")
     args = parser.parse_args()
     if min(args.steps, args.batch_frames, args.max_batch, args.save_every, args.keep_every, args.log_every, args.crops, args.gan_ramp) < 1:
         parser.error("steps, batch limits and intervals must be positive")
     if args.max_seconds <= 0 or args.learning_rate <= 0 or args.lr_half_life <= 0 or not 0 <= args.teacher_final <= 1:
         parser.error("time cap, learning rate and half life must be positive; teacher_final in [0, 1]")
-    if min(args.gan_ratio, args.feature_matching, args.gan_scale_max) < 0:
-        parser.error("GAN settings must be non-negative")
     if args.resume and args.init_from:
         parser.error("--init-from starts a new run; --resume continues one")
+    if args.fixed_style_ramp is None:
+        args.fixed_style_ramp = max(1, int(0.7 * args.steps) - args.fixed_style_hold)
 
     # The budget file is re-read while training so a deliberate extension (or cut) takes effect.
     budget = {"deadline": math.inf, "checked": time.time()}
@@ -482,19 +780,26 @@ def main():
     if time.time() >= deadline():
         raise SystemExit("the cloud budget deadline has passed (or is too close); not starting")
     c = Config.from_dict(json.loads(args.config.read_text())) if args.config else Config()
+    # The voices are the training data's (sorted: Achernar first, the default speaker).
+    c = dataclasses.replace(c, speakers=tuple(sorted({json.loads(line)["speaker"] for line in args.train.open(encoding="utf-8")})))
     if args.phoneme_encoder:
         pretrained = torch.load(args.phoneme_encoder, map_location="cpu", weights_only=True)
         e = pretrained["config"]
-        c = dataclasses.replace(c, phoneme_encoder_layers=pretrained["layers"], phoneme_encoder_width=e["channels"],
+        c = dataclasses.replace(c, phoneme_encoder_layers=pretrained["layers"], phoneme_encoder_distinct=pretrained.get("distinct", 0),
+                                phoneme_encoder_width=e["channels"],
                                 phoneme_encoder_heads=e["heads"], phoneme_encoder_feedforward=e["feedforward"])
     weights = TRAINING_SYSTEMS[c.architecture].WEIGHTS
     if set(args.weights) - set(weights):
         parser.error(f"--weights may only override {sorted(weights)}")
+    if args.feature_matching is None:
+        args.feature_matching = TRAINING_SYSTEMS[c.architecture].FEATURE_MATCHING
+    if min(args.gan_ratio, args.feature_matching, args.gan_scale_max, args.sampling_alpha) < 0:
+        parser.error("GAN settings and the sampling alpha must be non-negative")
     torch.manual_seed(args.seed)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     train = AnnotatedDataset(args.train, c, voiced_vowels=not args.recorded_voicing)
-    validation = AnnotatedDataset(args.validation, c, voiced_vowels=not args.recorded_voicing)
+    validation = AnnotatedDataset(args.validation, c, voiced_vowels=not args.recorded_voicing, reference=train.reference)
     check_leakage(train, validation)
     if train.annotation != validation.annotation:
         raise ValueError("train and validation manifests come from different annotation runs")
@@ -502,15 +807,18 @@ def main():
         raise FileExistsError("output directory is not empty; use --resume or a new directory")
     pool = balanced_indices(train, args.subset) if args.subset else list(range(len(train)))
     validation_indices = balanced_indices(validation, args.validation_size)
+    deployed_indices = balanced_indices(validation, args.deployed_size, per_voice=True) if args.deployed_size else []
     if not args.no_preload:
         train.preload(pool)
-        validation.preload(validation_indices)
+        validation.preload(sorted(set(validation_indices) | set(deployed_indices)))
     system = TRAINING_SYSTEMS[c.architecture](c).to(args.device)
     critics = system.critics().to(args.device)
     count = sum(p.numel() for p in system.model.parameters())
     if count > system.model.PARAMETER_BUDGET:
         raise ValueError(f"inference parameter budget exceeded: {count:,}")
     if args.phoneme_encoder:
+        if pretrained.get("frontend") != frontend_fingerprint():
+            raise ValueError(f"{args.phoneme_encoder} was pretrained on another front end's tokens; retrain it (voca.phonebert)")
         system.model.bert.load_state_dict(pretrained["encoder"])
     # StyleTTS 2 fine-tunes its pretrained PL-BERT at a tenth of the learning rate.
     encoder = getattr(system.model, "bert", None)
@@ -518,15 +826,17 @@ def main():
     groups = [{"params": [p for p in system.parameters() if id(p) not in bert], "scale": 1.0}]
     if bert:
         groups.append({"params": list(encoder.parameters()), "scale": args.phoneme_encoder_lr_scale})
-    fused = str(args.device).startswith("cuda")   # one kernel per step instead of several per tensor; same update
-    optimizer = torch.optim.AdamW(groups, lr=args.learning_rate, betas=(0.8, 0.99), weight_decay=0.01, fused=fused)
-    critic_optimizer = torch.optim.AdamW(critics.parameters(), lr=args.learning_rate, betas=(0.8, 0.99), weight_decay=0.0, fused=fused)
-    sampler = BucketSampler([train.lengths[i] for i in pool], args.batch_frames, args.max_batch, args.seed)
+    optimizer = adamw(groups, args.device, lr=args.learning_rate, betas=(0.8, 0.99), weight_decay=0.01)
+    critic_optimizer = adamw([{"params": list(critics.parameters())}], args.device, lr=args.learning_rate, betas=(0.8, 0.99), weight_decay=0.0)
+    sampler = BucketSampler([train.lengths[i] for i in pool], [train.token_counts[i] for i in pool], [train.speakers[i] for i in pool],
+                            args.batch_frames, args.max_batch, args.seed, args.sampling_alpha)
     fingerprints = [train.fingerprint, validation.fingerprint]
     recipe = {key: getattr(args, key) for key in ("batch_frames", "max_batch", "learning_rate", "warmup", "lr_half_life", "grad_clip",
                                                    "gan_start", "gan_ratio", "gan_ramp", "feature_matching", "gan_scale_max",
                                                    "crop_samples", "crops", "teacher_hold", "teacher_ramp", "teacher_final",
-                                                   "subset", "validation_size", "seed", "ema_decay", "phoneme_encoder_lr_scale")}
+                                                   "word_teacher_hold", "word_teacher_ramp", "sampling_alpha",
+                                                   "subset", "validation_size", "seed", "ema_decay", "phoneme_encoder_lr_scale", "bf16",
+                                                   "fixed_style_hold", "fixed_style_ramp", "deployed_size")}
     recipe["voiced_vowel_targets"] = not args.recorded_voicing
     recipe["weights"] = {**weights, **{key: float(value) for key, value in args.weights.items()}}
     recipe["branched_from"] = None
@@ -534,12 +844,11 @@ def main():
     step = 0
 
     def compatible(state, what, same_data=True):
-        if state.get("format_version") != CHECKPOINT_FORMAT:
-            raise ValueError(f"checkpoint predates phoneme tokens and supervised durations (format < 4); it cannot be {what}")
+        check_format(state, f"the checkpoint to be {what}")
         if same_data and (state["frontend"] != frontend_fingerprint() or state["annotation"] != train.annotation):
             raise ValueError("checkpoint was trained with a different front end or annotation run "
                              "(branch with --init-from and --new-data to fine-tune on new annotations)")
-        if state["config"] != c.to_dict():
+        if Config.from_dict(state["config"]).to_dict() != c.to_dict():   # fields added since take their defaults
             raise ValueError("checkpoint was trained with a different model configuration")
     if args.resume:
         state = torch.load(args.resume, map_location=args.device, weights_only=True)
@@ -549,8 +858,8 @@ def main():
             raise ValueError("resume recipe or dataset mismatch (use --init-from to branch a new run with a changed recipe)")
         system.load_state_dict(state["system"])
         critics.load_state_dict(state["critics"])
-        optimizer.load_state_dict(state["optimizer"])
-        critic_optimizer.load_state_dict(state["critic_optimizer"])
+        load_optimizer(optimizer, state["optimizer"])
+        load_optimizer(critic_optimizer, state["critic_optimizer"])
         sampler.load_state(state["sampler"])
         ema = state["ema"]
         torch.set_rng_state(state["torch_rng"].cpu())
@@ -570,25 +879,27 @@ def main():
         loaded["critics"] = step > state["recipe"]["gan_start"]
         if loaded["critics"]:
             critics.load_state_dict(state["critics"])
-            critic_optimizer.load_state_dict(state["critic_optimizer"])
+            load_optimizer(critic_optimizer, state["critic_optimizer"])
         loaded["optimizer"] = not loaded["grown"] and not loaded["new"] and not loaded["dropped"]
         if loaded["optimizer"]:
-            scales = [group["scale"] for group in optimizer.param_groups]
-            optimizer.load_state_dict(state["optimizer"])   # restores the checkpoint's scales too: keep this run's
-            for group, scale in zip(optimizer.param_groups, scales):
-                group["scale"] = scale
+            load_optimizer(optimizer, state["optimizer"])
         recipe["branched_from"] = {"step": step, "recipe": state["recipe"], "datasets": state["datasets"], "loaded": loaded}
         if args.new_data:
             recipe["branched_from"].update(frontend=state["frontend"], annotation=state["annotation"])
     if step >= args.steps:
         raise ValueError("checkpoint already reached requested total steps")
+    # The weights that ship, synthesizing as the app does, scored per word (voca.evaluate).
+    evaluation = DeployedEvaluation(validation, deployed_indices, c) if deployed_indices else None
+    shipped = build_model(c).to(args.device).eval().requires_grad_(False)
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "config.json").write_text(json.dumps(c.to_dict(), indent=2) + "\n")
     (args.output / "recipe.json").write_text(json.dumps({**recipe, "annotation": train.annotation, "frontend": frontend_fingerprint(),
-                                                         "train_utterances": len(pool), "datasets": fingerprints}, indent=2) + "\n")
+                                                         "train_utterances": len(pool), "datasets": fingerprints,
+                                                         "deployed_reference": evaluation and evaluation.reference}, indent=2) + "\n")
     print(json.dumps({"inference_parameters": count, "training_only_parameters": sum(p.numel() for p in system.parameters()) - count
                       + sum(p.numel() for p in critics.parameters()), "train_utterances": len(pool), "start_step": step,
-                      "branched": bool(args.init_from), "resumed": bool(args.resume)}), flush=True)
+                      "branched": bool(args.init_from), "resumed": bool(args.resume),
+                      "voice_shares": {voice: round(share, 4) for voice, share in sampler.items.shares.items()}}), flush=True)
     if not args.resume:
         ema = {k: v.detach().clone() for k, v in system.model.state_dict().items()}
     start = time.monotonic()
@@ -607,12 +918,17 @@ def main():
     window, window_steps, window_start = None, 0, time.monotonic()
     totals = {"frames": 0, "utterances": 0}
     def draw():
-        indices = sampler.next()
-        return sampler.state(), collate([train[pool[i]] for i in indices], args.device)
+        indices, shape = sampler.next()
+        return sampler.state(), pin(collate([train[pool[i]] for i in indices], shape))
     batches = prefetch(draw)
+    if args.cuda_graphs:
+        graphed = GraphedSteps(system, critics, optimizer, critic_optimizer, recipe)
+        run_step = lambda batch, step: graphed(batch, step)
+    else:
+        run_step = lambda batch, step: optimize_step(system, critics, optimizer, critic_optimizer, batch, step, recipe)
     while step < args.steps:
         sampler_state, batch = next(batches)
-        metrics = optimize_step(system, critics, optimizer, critic_optimizer, batch, step, recipe)
+        metrics = run_step(batch, step)
         update_ema(ema, system.model, args.ema_decay)
         step += 1
         names = sorted(metrics)
@@ -635,16 +951,23 @@ def main():
                 raise FloatingPointError(f"non-finite gradient norm before step {step}; last saved checkpoint is intact")
             record.update(step=step, elapsed_seconds=elapsed, steps_per_second=window_steps / max(seconds, 1e-9),
                           audio_seconds_per_second=totals["frames"] * c.hop / c.sample_rate / max(seconds, 1e-9),
-                          learning_rate=optimizer.param_groups[0]["lr"])
+                          learning_rate=float(optimizer.param_groups[0]["lr"]))
+            if args.cuda_graphs:
+                record["graph_recaptures"] = graphed.recaptures
             if save:
                 record.update(validate(system, validation, validation_indices, args.device, recipe["weights"]))
+                if evaluation:
+                    shipped.load_state_dict(ema)
+                    record.update({f"deployed_{key}": value for key, value in evaluation(shipped, args.device).items()})
                 state = snapshot()
                 atomic_save(state, args.output / "last.pt")
-                # inference.pt ships the EMA weights; validation metrics are of the raw ones.
+                # inference.pt ships the EMA weights: the deployed_ metrics; the other validation metrics are of the raw ones.
                 export_model(system.model, args.output / "inference.pt", step, train.annotation, ema)
                 export_model(system.model, args.output / "inference-raw.pt", step, train.annotation)
                 if retain:
                     atomic_save(state, args.output / f"step-{step:08d}.pt")
+                if args.cuda_graphs:
+                    graphed.release()     # no graph outlives an evaluation (GraphedSteps)
             with (args.output / "metrics.jsonl").open("a") as stream:
                 stream.write(json.dumps(record) + "\n")
             print(json.dumps(record), flush=True)

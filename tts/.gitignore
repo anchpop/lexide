@@ -1,6 +1,6 @@
 # Audio, features, runs and checkpoints live on disk and on HF (anchpop/lexide-tts-*), not in git.
 data/*/
-data/eng_sentences.jsonl
+data/*_sentences.jsonl
 features/
 runs/
 bases/

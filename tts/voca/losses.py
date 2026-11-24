@@ -294,12 +294,13 @@ class StyleCritics(nn.Module):
         return loss
 
     def generator_loss(self, real, fake, fake_states):
-        """Returns (MPD + MRD adversarial with TPRLS and 2x feature matching, SLM
-        adversarial on ``fake_states``, the output's WavLM states)."""
+        """Returns (MPD + MRD adversarial with TPRLS, their feature matching, SLM
+        adversarial on ``fake_states``, the output's WavLM states). StyleTTS 2
+        adds them as adversarial + 2 x matching + SLM adversarial."""
         with torch.no_grad():
             real_out = self.outputs(real)
         fake_out = self.outputs(fake)
         r, f = [o for o, _ in real_out], [o for o, _ in fake_out]
-        matching = 2 * sum((a - b).abs().mean() for (_, ra), (_, fa) in zip(real_out, fake_out) for a, b in zip(ra, fa))
-        gan = sum((1 - b).square().mean() for b in f) + matching + relativistic_loss(f, r)
-        return gan, (1 - self.wd(fake_states)).square().mean()
+        matching = sum((a - b).abs().mean() for (_, ra), (_, fa) in zip(real_out, fake_out) for a, b in zip(ra, fa))
+        adversarial = sum((1 - b).square().mean() for b in f) + relativistic_loss(f, r)
+        return adversarial, matching, (1 - self.wd(fake_states)).square().mean()

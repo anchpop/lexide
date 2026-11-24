@@ -26,7 +26,7 @@ from voca.speak import load_model
 def sentences(manifest, count):
     rows = sorted((json.loads(l) for l in open(manifest, encoding="utf-8")), key=lambda r: r["frames"])
     rows = [rows[round(i * (len(rows) - 1) / (count - 1))] for i in range(count)]
-    return [{key: torch.tensor([r[key]]) for key in ("tokens", "stress", "durations")} | {"seconds": r["frames"] * 256 / 24000} for r in rows]
+    return [{key: torch.tensor([r[key]]) for key in ("tokens", "lexical", "durations")} | {"seconds": r["frames"] * 256 / 24000} for r in rows]
 
 
 class Stages:
@@ -60,7 +60,7 @@ def voca_runner(model):
             d = current["durations"][..., None]
             return torch.cat((30.0 * (2 * (torch.arange(bins) < d).float() - 1), 10.0 * (2 * (d > 0).float() - 1)), dim=-1)
         force(model.predictor.duration_proj, logits)
-        stages = Stages(model.decoder, model.decoder.generator)
+        stages = Stages(model.decoder.encode, model.decoder.generator.m_source)   # the first modules each stage calls
     else:
         force(model.duration, lambda: torch.stack((torch.log1p(current["durations"].double()).float(),
                                                    10.0 * (2 * (current["durations"] > 0).float() - 1)), dim=-1))
@@ -68,7 +68,7 @@ def voca_runner(model):
 
     def run(sentence):
         current.update(sentence)
-        output, times = stages.run(lambda: model.synthesize(sentence["tokens"], sentence["stress"], torch.tensor([sentence["tokens"].shape[1]]),
+        output, times = stages.run(lambda: model.synthesize(sentence["tokens"], sentence["lexical"], torch.tensor([sentence["tokens"].shape[1]]),
                                                             torch.tensor([0])))
         assert torch.equal(output[2]["durations"], sentence["durations"])
         return times

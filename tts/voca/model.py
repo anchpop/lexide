@@ -3,7 +3,7 @@
 All weights start random. Tensor conventions: hidden [B,T,C], frame features
 [B,T], waveform [B,S]. Acoustic frame i is centred on sample ``i * hop``.
 
-    phoneme + stress + voice -> transformer encoder -> duration predictor
+    phoneme + stress/tone/accent + voice -> transformer encoder -> duration predictor
         -> repeat tokens by duration (supervised durations while training)
         -> frame transformer A -> pitch / voicing / energy
         -> frame transformer B -> filter parameters
@@ -16,16 +16,91 @@ only has to predict slowly varying spectral envelopes (complex cepstra), which
 is what keeps the voice from sounding buzzy or unstable at this size.
 """
 
+from dataclasses import dataclass
 import math
 import torch
 from torch import nn
 from torch.nn import functional as F
 from .config import Config
-from .text import PHONE_IDS, SYMBOL_TO_ID, VOWELS
+from .text import ALWAYS_VOICED, LEXICAL, PHONE_IDS, PHRASE_BREAKS, SYMBOL_TO_ID, SYMBOLS
 
 
 class UtteranceTooLong(ValueError):
     """The utterance needs more frames than ``max_frames``: split the input."""
+
+
+def add_lexical_embeddings(module, channels):
+    """One embedding per parallel token feature (``voca.text.LEXICAL``) on ``module``.
+    Every feature but stress embeds "none" as zero, so a token without it (a
+    language without tone, a pause without a part of speech, a masked word)
+    gets nothing added."""
+    for name, size in LEXICAL.items():
+        setattr(module, name, nn.Embedding(size, channels, padding_idx=None if name == "stress" else 0))
+
+
+def embed_tokens(module, tokens, lexical):
+    """tokens [B, N], lexical [B, N, len(LEXICAL)] -> [B, N, C]."""
+    return module.tokens(tokens) + sum(getattr(module, name)(lexical[..., i]) for i, name in enumerate(LEXICAL))
+
+
+PHONE_TABLE = torch.zeros(len(SYMBOLS), dtype=torch.bool)
+PHONE_TABLE[sorted(PHONE_IDS)] = True
+BREAK_TABLE = torch.zeros(len(SYMBOLS), dtype=torch.bool)
+BREAK_TABLE[[SYMBOL_TO_ID[p] for p in PHRASE_BREAKS]] = True
+
+
+@dataclass
+class Words:
+    """The word occurrences of a padded batch, with room for one per token (W = N)."""
+    index: torch.Tensor     # [B, N] each token's word, -1 for tokens that are not phones
+    members: torch.Tensor   # [B, W, N] 1 where token n belongs to word w (pooling and broadcasting are matrix products)
+    mask: torch.Tensor      # [B, W] real words
+    phrase: torch.Tensor    # [B, W] the phrase-break tokens before the word: equal within an intonation phrase
+    final: torch.Tensor     # [B, W] the last word of its phrase
+    same: torch.Tensor      # [B, W, W] two real words of the same phrase
+
+    def pool(self, x):
+        """[B, N, C] per token -> [B, W, C] the mean over each word's phones."""
+        return (self.members.to(x.dtype) @ x) / self.members.sum(-1, keepdim=True).clamp_min(1).to(x.dtype)
+
+    def spread(self, x):
+        """[B, W, C] per word -> [B, N, C] on each word's phones, 0 on other tokens."""
+        return self.members.transpose(1, 2).to(x.dtype) @ x
+
+    def standardize(self, x):
+        """[B, W] -> z-scores within each phrase (0 for a word alone in its phrase)."""
+        same = self.same.to(x.dtype)
+        count = same.sum(-1).clamp_min(1)
+        mean = (same @ x[..., None])[..., 0] / count
+        variance = (same @ (x - mean).square()[..., None])[..., 0] / count
+        return (x - mean) * torch.rsqrt(variance + 1e-4) * self.mask
+
+
+def word_layout(tokens, mask, phones=PHONE_TABLE, breaks=BREAK_TABLE):
+    """Word occurrences from the tokens alone, as ``voca.text.tokenize`` numbers
+    them: a word is a maximal run of phones, because break tokens always
+    separate words. Phrases end at ``PHRASE_BREAKS`` punctuation. ``phones`` and
+    ``breaks`` are per-symbol tables on the tokens' device."""
+    phone = phones[tokens] & mask
+    start = phone & ~F.pad(phone[:, :-1], (1, 0))
+    index = torch.where(phone, start.long().cumsum(1) - 1, -1)
+    size = tokens.shape[1]
+    members = index[:, None, :] == torch.arange(size, device=tokens.device)[None, :, None]
+    words = members.any(-1)
+    before = (breaks[tokens] & mask).long().cumsum(1)
+    phrase = torch.where(members, before[:, None, :], -1).amax(-1)
+    following = F.pad(phrase[:, 1:], (0, 1), value=-1)
+    same = (phrase[:, :, None] == phrase[:, None, :]) & words[:, :, None] & words[:, None, :]
+    return Words(index, members, words, phrase, words & (following != phrase), same)
+
+
+def position_in_token(durations, index, frame):
+    """[B, F, 3] for frames ``frame`` [B, F] owned by tokens ``index`` [B, F]: where
+    the frame's centre sits inside its token (and 1 minus that) and the token's log length."""
+    owned = durations.gather(1, index).clamp_min(1)
+    start = durations.cumsum(1).gather(1, index) - durations.gather(1, index)
+    relative = (frame - start + 0.5) / owned
+    return torch.stack((relative, 1 - relative, torch.log1p(owned.float()) / 4), dim=-1)
 
 
 def length_mask(lengths, size=None):
@@ -84,16 +159,27 @@ class Block(nn.Module):
 
 
 class Stack(nn.Module):
-    def __init__(self, c, layers):
+    """``layers`` blocks deep. With ``distinct`` set, only that many blocks exist and
+    they are looped (0, 1, .., distinct-1, 0, 1, ..) to the full depth, each pass
+    told its depth by a learned embedding: same compute, fewer parameters."""
+
+    def __init__(self, c, layers, distinct=0):
         super().__init__()
-        self.blocks = nn.ModuleList(Block(c) for _ in range(layers))
+        distinct = distinct or layers
+        if layers % distinct:
+            raise ValueError(f"{layers} layers cannot loop {distinct} distinct blocks evenly")
+        self.layers = layers
+        self.blocks = nn.ModuleList(Block(c) for _ in range(distinct))
+        self.depth = nn.Parameter(torch.zeros(layers, c.channels)) if distinct < layers else None
         self.norm = nn.LayerNorm(c.channels)
         self.width = c.channels // c.heads
 
     def forward(self, x, mask):
         table = rotary_table(x.shape[1], self.width, x.device)
-        for block in self.blocks:
-            x = block(x, mask, table)
+        for i in range(self.layers):
+            if self.depth is not None:
+                x = x + self.depth[i]
+            x = self.blocks[i % len(self.blocks)](x, mask, table)
         return self.norm(x) * mask[..., None]
 
 
@@ -617,38 +703,41 @@ VOCODERS = {"nsf": NeuralSourceFilter, "istft": SpectralGenerator, "source_filte
 
 
 class Voca(nn.Module):
-    """What both architectures share: phoneme, stress and voice embeddings, the
-    transformer text encoder, the token tables, and the synthesis-time rules
-    (pause gating and floors, voiced vowels, pitch range and wobble)."""
+    """What both architectures share: phoneme, lexical-feature and voice
+    embeddings, the transformer text encoder, the token tables, and the
+    synthesis-time rules (pause gating and floors, voiced vowels, pitch range and wobble)."""
 
     def __init__(self, config):
         super().__init__()
         self.config = c = config
         self.tokens = nn.Embedding(c.vocab_size, c.channels, padding_idx=0)
-        self.stress = nn.Embedding(3, c.channels)
+        add_lexical_embeddings(self, c.channels)
         self.voices = nn.Embedding(len(c.speakers), c.channels)
         self.encoder = Stack(c, c.encoder_layers)
-        phones = torch.zeros(c.vocab_size, dtype=torch.bool)
-        phones[sorted(PHONE_IDS)] = True
-        self.register_buffer("phone_tokens", phones, persistent=False)
-        vowels = torch.zeros(c.vocab_size, dtype=torch.bool)
-        vowels[[SYMBOL_TO_ID[v] for v in VOWELS]] = True
-        self.register_buffer("vowel_tokens", vowels, persistent=False)
+        self.register_buffer("phone_tokens", PHONE_TABLE.clone(), persistent=False)
+        self.register_buffer("phrase_breaks", BREAK_TABLE.clone(), persistent=False)
+        voiced = torch.zeros(c.vocab_size, dtype=torch.bool)
+        voiced[[SYMBOL_TO_ID[v] for v in ALWAYS_VOICED]] = True
+        self.register_buffer("voiced_tokens", voiced, persistent=False)
         # Punctuation that gets an inference-time minimum pause: 1 phrase-internal, 2 sentence end.
         kind = torch.zeros(c.vocab_size, dtype=torch.long)
         kind[[SYMBOL_TO_ID[p] for p in (",", ";", ":", "—")]] = 1
         kind[[SYMBOL_TO_ID[p] for p in (".", "?", "!", "…")]] = 2
         self.register_buffer("pause_kind", kind, persistent=False)
 
-    def encode(self, tokens, stress, lengths, speakers):
-        if tokens.ndim != 2 or stress.shape != tokens.shape or lengths.shape != (tokens.shape[0],) or speakers.shape != lengths.shape:
-            raise ValueError("expected tokens[B,N], stress[B,N], lengths[B], speakers[B]")
+    def encode(self, tokens, lexical, lengths, speakers):
+        if (tokens.ndim != 2 or lexical.shape != (*tokens.shape, len(LEXICAL)) or lengths.shape != (tokens.shape[0],)
+                or speakers.shape != lengths.shape):
+            raise ValueError(f"expected tokens[B,N], lexical[B,N,{len(LEXICAL)}], lengths[B], speakers[B]")
         # Value checks wait for the GPU; training data was validated when it was loaded.
         if tokens.shape[1] > self.config.max_tokens or not self.training and bool(((lengths < 1) | (lengths > tokens.shape[1])).any()):
             raise ValueError("invalid token length")
         mask = length_mask(lengths, tokens.shape[1])
-        x = (self.tokens(tokens) + self.stress(stress) + self.voices(speakers)[:, None]) * mask[..., None]
+        x = (embed_tokens(self, tokens, lexical) + self.voices(speakers)[:, None]) * mask[..., None]
         return self.encoder(x, mask), mask
+
+    def words(self, tokens, mask):
+        return word_layout(tokens, mask, self.phone_tokens, self.phrase_breaks)
 
     def align(self, durations, token_mask, frames=None):
         """Integer durations (zero is allowed for pause tokens) -> the token each
@@ -688,9 +777,10 @@ class Voca(nn.Module):
     def voice_vowels(self, prosody, tokens, owner, frame_mask):
         """The pitch tracker missed creaky vowels in the recordings, and the
         voicing predictor learned to drop whole vowels (heard as a whispered
-        word). A vowel is voiced by definition, so its frames are kept voiced."""
-        vowel = self.vowel_tokens[tokens].gather(1, owner) & frame_mask
-        return torch.cat((prosody[..., :1], torch.where(vowel, prosody[..., 1].clamp_min(2.0), prosody[..., 1])[..., None],
+        word). Frames of the inventory's always-voiced phones (in English, every
+        vowel; a language's choice, see scripts/build_inventory.py) are kept voiced."""
+        vowel = self.voiced_tokens[tokens].gather(1, owner) & frame_mask
+        return torch.cat((prosody[..., :1], torch.where(vowel, prosody[..., 1].clamp_min(4.0), prosody[..., 1])[..., None],
                           prosody[..., 2:]), dim=-1)
 
     @staticmethod
@@ -699,9 +789,12 @@ class Voca(nn.Module):
             raise ValueError("speed must be between 0.25 and 4, pitch_shift finite and pitch_range between 0 and 3")
 
     @staticmethod
-    def hard_prosody(prediction):
-        """What the decoder is conditioned on when it is not teacher-forced."""
-        return torch.stack((prediction[..., 0].clamp(-2.0, 1.5), (prediction[..., 1] > 0).to(prediction.dtype),
+    def prosody_condition(prediction):
+        """What the decoder (and the source's voicing) is conditioned on when it is not teacher-forced.
+        Voicing is the probability, not a decision: where the predictor is unsure (voiced
+        consonants, vowel-fricative boundaries) the source crossfades harmonics and noise
+        instead of cutting the harmonics and raising the noise 30 dB within a frame."""
+        return torch.stack((prediction[..., 0].clamp(-2.0, 1.5), torch.sigmoid(prediction[..., 1]),
                             prediction[..., 2].clamp(-4.5, 3.0)), dim=-1)
 
     def frequency(self, log_f0):
@@ -751,13 +844,10 @@ class TinyVoca(Voca):
         self.acoustic_stack = Stack(c, c.acoustic_layers)
         self.vocoder = VOCODERS[c.waveform](c)
 
-    def expand(self, hidden, durations, token_mask, speakers):
+    def expand(self, hidden, durations, token_mask, speakers, frames=None):
         """Repeat token states by integer durations and add each frame's position inside its token."""
-        index, mask, lengths = self.align(durations, token_mask)
-        owned = durations.gather(1, index).clamp_min(1)
-        offset = torch.arange(index.shape[1], device=hidden.device)[None] - (durations.cumsum(1).gather(1, index) - durations.gather(1, index))
-        relative = (offset.to(hidden.dtype) + 0.5) / owned
-        features = torch.stack((relative, 1 - relative, torch.log1p(owned.to(hidden.dtype)) / 4), dim=-1)
+        index, mask, lengths = self.align(durations, token_mask, frames)
+        features = position_in_token(durations, index, torch.arange(index.shape[1], device=hidden.device)[None]).to(hidden.dtype)
         expanded = hidden.gather(1, index[..., None].expand(-1, -1, hidden.shape[-1]))
         expanded = expanded + self.frame_position(features) + self.frame_voices(speakers)[:, None]
         return expanded * mask[..., None], mask, lengths
@@ -775,18 +865,18 @@ class TinyVoca(Voca):
         return self.gate_pauses(frames, output[..., 1], tokens, mask)
 
     @torch.inference_mode()
-    def synthesize(self, tokens, stress, lengths, speakers, speed=1.0, pitch_shift=0.0, seed=0, pitch_range=1.0, pitch_jitter=0.0,
+    def synthesize(self, tokens, lexical, lengths, speakers, speed=1.0, pitch_shift=0.0, seed=0, pitch_range=1.0, pitch_jitter=0.0,
                    voiced_vowels=True, comma_pause=0.0, stop_pause=0.0):
         """Free-running synthesis: predicted durations, pitch, voicing and energy."""
         self.check_controls(speed, pitch_shift, pitch_range)
-        hidden, mask = self.encode(tokens, stress, lengths, speakers)
+        hidden, mask = self.encode(tokens, lexical, lengths, speakers)
         durations = self.pause_floors(self.predict_durations(hidden, mask, tokens, speed), tokens, lengths, mask, comma_pause, stop_pause)
         frames, frame_mask, frame_lengths = self.expand(hidden, durations, mask, speakers)
         prosody_hidden, prosody = self.predict_prosody(frames, frame_mask)
         if voiced_vowels:
             prosody = self.voice_vowels(prosody, tokens, self.align(durations, mask)[0], frame_mask)
         prosody = self.widen_pitch(prosody, frame_mask, pitch_range)
-        acoustic = self.decode(prosody_hidden, self.hard_prosody(prosody), frame_mask)
+        acoustic = self.decode(prosody_hidden, self.prosody_condition(prosody), frame_mask)
         # One noise stream per row, drawn at the row's own length, so batching or
         # padding never changes a row's audio.
         noise = nn.utils.rnn.pad_sequence([torch.randn(int(n) * self.config.hop, generator=torch.Generator().manual_seed(seed + row))

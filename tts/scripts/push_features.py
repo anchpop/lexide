@@ -1,6 +1,7 @@
 """Upload a built feature set as one tar to the private HF dataset
 anchpop/lexide-tts-features (HF_TOKEN), for sets too big to send with sky's
-workdir. sky_train.yaml downloads it when the set is not in features/.
+workdir. sky_train.yaml downloads it when the set is not in features/. A name
+already on HF is refused, never overwritten.
 
     python scripts/push_features.py features/eng_gemini_10h
 """
@@ -12,6 +13,8 @@ REPO = "anchpop/lexide-tts-features"
 features = Path(sys.argv[1])
 api = HfApi()
 api.create_repo(REPO, repo_type="dataset", private=True, exist_ok=True)
+if api.file_exists(REPO, f"{features.name}.tar", repo_type="dataset"):
+    sys.exit(f"{features.name}.tar is already on HF; a feature set is never overwritten: build it under a new name")
 with tempfile.TemporaryDirectory(dir=features.parent) as scratch:
     tar = Path(scratch) / f"{features.name}.tar"
     with tarfile.open(tar, "w") as archive:
