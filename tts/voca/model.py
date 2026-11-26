@@ -183,6 +183,22 @@ class Stack(nn.Module):
         return self.norm(x) * mask[..., None]
 
 
+class Front(nn.Module):
+    """``layers`` blocks before a text encoder, added to its input through a projection that starts at zero, so a model
+    with a front starts as the one without. The phonemes-only model learns there what yap's hints told the original
+    (voca.distill)."""
+
+    def __init__(self, c, layers):
+        super().__init__()
+        self.stack = Stack(c, layers)
+        self.out = nn.Linear(c.channels, c.channels)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, x, mask):
+        return x + self.out(self.stack(x, mask)) * mask[..., None]
+
+
 class Predictor(nn.Module):
     def __init__(self, c, outputs):
         super().__init__()
@@ -713,6 +729,7 @@ class Voca(nn.Module):
         self.tokens = nn.Embedding(c.vocab_size, c.channels, padding_idx=0)
         add_lexical_embeddings(self, c.channels)
         self.voices = nn.Embedding(len(c.speakers), c.channels)
+        self.front = Front(c, c.front_layers) if c.front_layers else None
         self.encoder = Stack(c, c.encoder_layers)
         self.register_buffer("phone_tokens", PHONE_TABLE.clone(), persistent=False)
         self.register_buffer("phrase_breaks", BREAK_TABLE.clone(), persistent=False)
@@ -734,6 +751,8 @@ class Voca(nn.Module):
             raise ValueError("invalid token length")
         mask = length_mask(lengths, tokens.shape[1])
         x = (embed_tokens(self, tokens, lexical) + self.voices(speakers)[:, None]) * mask[..., None]
+        if self.front is not None:
+            x = self.front(x, mask)
         return self.encoder(x, mask), mask
 
     def words(self, tokens, mask):
@@ -766,14 +785,24 @@ class Voca(nn.Module):
         return torch.where(present, frames.clamp_min(1), torch.zeros_like(frames)) * mask
 
     def pause_floors(self, durations, tokens, lengths, mask, comma_pause, stop_pause):
-        """Minimum pauses (seconds) after punctuation inside the utterance. The
-        teacher barely pauses at commas, and learners need the phrasing. The
-        punctuation right before EOS is left alone: trailing silence is just latency."""
+        """Minimum pauses (seconds) at punctuation inside the utterance. The
+        teacher barely pauses at commas, and learners need the phrasing. A run of marks (``?!``, ``--``) shares
+        one minimum, on its first mark; the marks before EOS get none: trailing silence is just latency. A dash
+        gets one only where the model pauses there: the same mark joins words (``pimple-faced``)."""
         kind = self.pause_kind[tokens]
-        floors = comma_pause * (kind == 1) + stop_pause * (kind == 2)     # no host tensor: training captures this in a CUDA graph
-        floors = torch.ceil(floors * self.config.sample_rate / self.config.hop).long()
-        inside = torch.arange(tokens.shape[1], device=tokens.device)[None] < (lengths - 2)[:, None]
-        return torch.where(inside & mask, torch.maximum(durations, floors), durations)
+        kind = torch.where((tokens == SYMBOL_TO_ID["—"]) & (durations == 0), 0, kind) * mask
+        marked = kind > 0
+        first = marked & ~F.pad(marked[:, :-1], (1, 0))
+        run = first.long().cumsum(1) - 1
+        size = tokens.shape[1]
+        slot = torch.where(marked, run, size)     # tokens that are no mark: a slot of their own
+        total = torch.zeros(len(tokens), size + 1, device=tokens.device, dtype=durations.dtype).scatter_add(1, slot, durations)
+        strongest = torch.zeros(len(tokens), size + 1, device=tokens.device, dtype=torch.long).scatter_reduce(1, slot, kind, "amax")
+        minimum = torch.ceil((comma_pause * (strongest == 1) + stop_pause * (strongest == 2)) * self.config.sample_rate / self.config.hop).long()
+        last = run.gather(1, (lengths - 2)[:, None])     # the run just before EOS, if the mark there is one
+        final = marked.gather(1, (lengths - 2)[:, None]) & (run == last)
+        deficit = (minimum - total).clamp_min(0).gather(1, slot)
+        return durations + torch.where(first & ~final, deficit, 0).to(durations.dtype)
 
     def voice_vowels(self, prosody, tokens, owner, frame_mask):
         """The pitch tracker missed creaky vowels in the recordings, and the
@@ -783,6 +812,18 @@ class Voca(nn.Module):
         vowel = self.voiced_tokens[tokens].gather(1, owner) & frame_mask
         return torch.cat((prosody[..., :1], torch.where(vowel, prosody[..., 1].clamp_min(4.0), prosody[..., 1])[..., None],
                           prosody[..., 2:]), dim=-1)
+
+    @staticmethod
+    def remove_pitch_spikes(prosody, semitones=9.0):
+        """A frame whose predicted pitch stands more than ``semitones`` above both neighbours takes their mean. English v10
+        put one such frame (often at the 600 Hz ceiling) early in 52 of 60 held-out sentences, heard as a robotic word; the
+        recordings never jump like that (Nov 26 2026)."""
+        p = prosody[..., 0]
+        left, mid, right = p[:, :-2], p[:, 1:-1], p[:, 2:]
+        limit = semitones * math.log(2) / 12
+        spike = (mid - left > limit) & (mid - right > limit)
+        return torch.cat((torch.cat((p[:, :1], torch.where(spike, (left + right) / 2, mid), p[:, -1:]), dim=1)[..., None],
+                          prosody[..., 1:]), dim=-1)
 
     @staticmethod
     def check_controls(speed, pitch_shift, pitch_range):
@@ -867,8 +908,8 @@ class TinyVoca(Voca):
 
     @torch.inference_mode()
     def synthesize(self, tokens, lexical, lengths, speakers, speed=1.0, pitch_shift=0.0, seed=0, pitch_range=1.0, pitch_jitter=0.0,
-                   voiced_vowels=True, comma_pause=0.0, stop_pause=0.0):
-        """Free-running synthesis: predicted durations, pitch, voicing and energy."""
+                   voiced_vowels=True, comma_pause=0.0, stop_pause=0.0, take=0):
+        """Free-running synthesis: predicted durations, pitch, voicing and energy (``take``: there is only one delivery)."""
         self.check_controls(speed, pitch_shift, pitch_range)
         hidden, mask = self.encode(tokens, lexical, lengths, speakers)
         durations = self.pause_floors(self.predict_durations(hidden, mask, tokens, speed), tokens, lengths, mask, comma_pause, stop_pause)

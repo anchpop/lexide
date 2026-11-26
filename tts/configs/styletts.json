@@ -58,7 +58,7 @@
   "generator_hop": 16,
   "style_encoder_channels": 64,
   "style_encoder_max": 512,
-  "crop_frames": 256,
+  "crop_frames": 512,
   "phoneme_encoder_layers": 0,
   "max_tokens": 512,
   "max_frames": 3000,

@@ -1,0 +1,9 @@
+[package]
+name = "g2p-jsonl"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+g2p = { git = "https://github.com/anchpop/g2p", rev = "ee4e3494cb78c8e84825995bf56d2b4109935f46", default-features = false }
+serde_json = "1"

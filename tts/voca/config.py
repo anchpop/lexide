@@ -9,7 +9,10 @@ import math
 # 9: soft voicing: the source and the decoder take the voicing probability, not a 0/1 decision.
 # 10: the source's sines (amplitude and phase) and noise bands are predicted per frame, not fixed.
 # 5: aperiodic harmonic cutoff + post-filter. 2-3: byte tokens + learned aligner.
-CHECKPOINT_FORMAT = 10
+# 11: how a sentence is delivered is drawn from the text's distribution (voca.styletts.Delivery), not one stored style per voice.
+# 12: the source's sines (amplitude and phase) and noise bands are predicted per frame, not fixed.
+# 13: the decoder is told each frame's place in its phone (StyleVoca.frame_place).
+CHECKPOINT_FORMAT = 13
 
 
 def check_format(state, what):
@@ -33,6 +36,8 @@ class Config:
     f0_min: float = 50.0
     f0_max: float = 600.0
     speakers: tuple[str, ...] = ("achernar",)
+    hints: bool = True      # reads what only yap knows of the text (``voca.text.HINTS``), not just phonemes and punctuation
+    front_layers: int = 0   # layers in front of both text encoders (``model.Front``): the phonemes-only model's, distilled from a hinted one (voca.distill)
     # Size of voca.text.SYMBOLS, which comes from the inventory file.
     vocab_size: int = field(default_factory=lambda: len(__import__("voca.text", fromlist=["SYMBOLS"]).SYMBOLS))
     # Text encoder and frame-level transformer.

@@ -42,7 +42,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .config import Config
-from .model import Stack, add_lexical_embeddings, embed_tokens, length_mask
+from .model import Front, Stack, add_lexical_embeddings, embed_tokens, length_mask
 from .text import LEXICAL, SYMBOL_TO_ID, UNK, PHONE_IDS, frontend_fingerprint, tokenize
 
 MASK = SYMBOL_TO_ID[UNK]
@@ -57,14 +57,16 @@ def encoder_config(channels=256, heads=4, feedforward=1024, dropout=0.1):
 class PhoneEncoder(nn.Module):
     """Phone + lexical-feature embeddings and a transformer stack: what ships."""
 
-    def __init__(self, c, layers, distinct=0):
+    def __init__(self, c, layers, distinct=0, front=0):
         super().__init__()
         self.tokens = nn.Embedding(c.vocab_size, c.channels, padding_idx=0)
         add_lexical_embeddings(self, c.channels)
+        self.front = Front(c, front) if front else None
         self.stack = Stack(c, layers, distinct)
 
     def forward(self, tokens, lexical, mask):
-        return self.stack(embed_tokens(self, tokens, lexical) * mask[..., None], mask)
+        x = embed_tokens(self, tokens, lexical) * mask[..., None]
+        return self.stack(x if self.front is None else self.front(x, mask), mask)
 
 
 class PhoneBert(nn.Module):
@@ -88,7 +90,10 @@ def prepare(args):
         row = json.loads(line)
         if row["text"] in excluded:
             continue
-        p = tokenize(row["grams"])
+        try:
+            p = tokenize(row["grams"])
+        except KeyError:     # a phone outside the inventory (a foreign word): voca.build rejects such clips too
+            continue
         if 3 <= len(p) <= args.max_tokens:
             sentences.append(p)
     counts = collections.Counter(w for p in sentences for w in set(p.words) if w is not None)

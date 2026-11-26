@@ -6,7 +6,7 @@ after any failure and finished work is skipped.
     python scripts/language_data.py deu fra --stages select generate frames
 
 Per language (its pack dump at data/<language>_sentences.jsonl, from yap's
-dump_sentence_phonemes; its inventory voca/inventories/<language>.json, from
+generate-data output tts_sentences.jsonl; its inventory voca/inventories/<language>.json, from
 scripts/build_inventory.py), every stage run with VOCA_LANGUAGE=<language>:
 
     select    data/scripts/<language>_<voice>.jsonl (scripts/select_sentences.py): Achernar 10 h,

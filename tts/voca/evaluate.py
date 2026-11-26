@@ -2,7 +2,7 @@
 
 Every validation interval, the weights that ship (the EMA) synthesize whole
 held-out sentences the way the app does (``voca.speak``: predicted durations,
-pitch, voicing and energy, the stored voice style, speak's pause floors). That
+pitch, voicing and energy, a drawn delivery, the stored voice style, speak's pause floors). That
 waveform and the recording are measured with the same tracker
 (``voca.prepare.waveform_prosody``: Praat pitch, despiked as the training
 labels are; RMS energy in training units), each at its own timing. Per word
@@ -262,18 +262,18 @@ class DeployedEvaluation:
 
     @torch.inference_mode()
     def __call__(self, model, device):
-        parts = [self.render(model, item, device) for item in self.items]
+        parts = [self.render(model, item, device, n) for n, item in enumerate(self.items)]
         metrics = self.summarize(parts)
         for name, members in self.groups.items():
             summary = self.summarize([parts[i] for i in members])
             metrics.update({f"{name}/{key}": summary[key] for key in self.VOICE_MEASURES})
         return metrics
 
-    def render(self, model, item, device):
+    def render(self, model, item, device, take):
         """One sentence synthesized and measured against its recording: its parts of every measure."""
         c, tokens = self.config, item["tokens"][None].to(device)
         wave, lengths, details = model.synthesize(tokens, item["lexical"][None].to(device), torch.tensor([tokens.shape[1]], device=device),
-                                                  torch.tensor([item["speaker"]], device=device), comma_pause=COMMA_PAUSE, stop_pause=STOP_PAUSE)
+                                                  torch.tensor([item["speaker"]], device=device), take=take, comma_pause=COMMA_PAUSE, stop_pause=STOP_PAUSE)
         durations = details["durations"][0].cpu().numpy()
         wave = wave[0, :int(lengths[0])].float().cpu().numpy()
         prosody = waveform_prosody(wave, c)

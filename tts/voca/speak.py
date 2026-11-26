@@ -13,7 +13,7 @@ import torch
 
 from .config import Config, check_format
 from .model import build_model
-from .text import frontend_fingerprint, frontend_identity, tokenize
+from .text import HINTS, frontend_fingerprint, frontend_identity, tokenize
 
 
 # Minimum pauses (seconds) after commas and sentence stops inside an utterance:
@@ -34,15 +34,17 @@ def load_model(path, device="cpu"):
 
 
 def speak(model, grams, device="cpu", speaker=None, speed=1.0, pitch_range=1.0, seed=0, comma_pause=COMMA_PAUSE, stop_pause=STOP_PAUSE,
-          refiner=None, pitch_jitter=0.0):
+          refiner=None, pitch_jitter=0.0, take=0):
     """``speaker``: a name from the model's configuration (default: its first)."""
     phonemized = tokenize(grams)
     tokens = torch.tensor([phonemized.ids], device=device)
     lexical = torch.tensor([phonemized.lexical()], device=device)
+    if not model.config.hints:
+        lexical[..., HINTS] = 0
     speaker = model.config.speakers.index(speaker or model.config.speakers[0])
     audio, lengths, details = model.synthesize(tokens, lexical, torch.tensor([len(phonemized)], device=device),
                                                torch.tensor([speaker], device=device), speed, 0.0, seed, pitch_range,
-                                               pitch_jitter=pitch_jitter, comma_pause=comma_pause, stop_pause=stop_pause)
+                                               pitch_jitter=pitch_jitter, comma_pause=comma_pause, stop_pause=stop_pause, take=take)
     if refiner is not None:
         audio = refiner.refine(audio, details["acoustic"].float(), details["frame_lengths"], seed=seed)
     audio = audio[0, :int(lengths[0])].cpu().numpy()
@@ -75,6 +77,7 @@ def main():
     parser.add_argument("--speaker", help="one of the checkpoint's speakers (default: its first)")
     parser.add_argument("--pitch-range", type=float, default=1.0)
     parser.add_argument("--pitch-jitter", type=float, default=0.0, help="random pitch wobble for the oscillator, in semitones")
+    parser.add_argument("--take", type=int, default=0, help="another take, another delivery of every sentence")
     parser.add_argument("--refiner", type=Path, help="voca.refine checkpoint trained on this --checkpoint")
     args = parser.parse_args()
     model = load_model(args.checkpoint, args.device)
@@ -87,14 +90,15 @@ def main():
     rows = [r for r in rows if args.split is None or r.get("split") == args.split][:args.limit]
     seconds = compute = 0.0
     with open(args.output / "manifest.jsonl", "w", encoding="utf-8") as manifest:
-        for row in rows:
+        for n, row in enumerate(rows):
             start = time.perf_counter()
-            audio, _ = speak(model, row["grams"], args.device, args.speaker, pitch_range=args.pitch_range, refiner=refiner,
+            audio, _ = speak(model, row["grams"], args.device, args.speaker, pitch_range=args.pitch_range, refiner=refiner, take=len(rows) * args.take + n,
                              pitch_jitter=args.pitch_jitter)
             compute += time.perf_counter() - start
             seconds += len(audio) / model.config.sample_rate
-            sf.write(args.output / f"{row['id']}.wav", audio, model.config.sample_rate)
-            manifest.write(json.dumps({**row, "wav": f"{row['id']}.wav"}, ensure_ascii=False) + "\n")
+            filename = f"{row.get('id', n)}.wav"
+            sf.write(args.output / filename, audio, model.config.sample_rate)
+            manifest.write(json.dumps({**row, "wav": filename}, ensure_ascii=False) + "\n")
     print(f"{len(rows)} clips, {seconds:.1f} s of audio in {compute:.1f} s ({seconds / max(compute, 1e-9):.0f}x real time on {args.device})")
 
 

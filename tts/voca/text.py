@@ -32,6 +32,7 @@ to g2p.
 from dataclasses import dataclass
 import hashlib
 import json
+import unicodedata
 import os
 from pathlib import Path
 
@@ -72,6 +73,7 @@ WITHIN_GRAM, BETWEEN_GRAMS = 1, 2
 # ``BETWEEN_GRAMS``) on break tokens.
 LEXICAL = {"stress": 3, "tone": 10, "accent": 4, "pos": POS_OTHER + 1, "rarity": RARITY_BUCKETS + 1, "boundary": 3}
 PHRASE_START, NUCLEUS = 1, 2
+HINTS = [list(LEXICAL).index(name) for name in ("pos", "rarity", "boundary")]
 
 # Every model speaks one language, and so does every process that trains, builds data for
 # or runs one: its tokens are that language's inventory (yap's code, as in voca/inventories/).
@@ -201,6 +203,32 @@ def spoken_words(words, tags, attached=frozenset()):
             spoken.append([word.lower(), [], POS_ID.get(tag, POS_OTHER)])
             join = "" if LANGUAGE in _ELIDING and word.endswith(("'", "’")) else None
     return leading, spoken
+
+
+def lost_punctuation(grams):
+    """How many written marks ``tokenize`` drops because a gram's phones are one group (a Japanese gram has no word
+    breaks, so nothing says where between its phones the mark goes): the pause there would be filed under a phone."""
+    lost = 0
+    for gram in grams:
+        sequence = gram["phonemes"].split()
+        if not sequence:
+            continue
+        groups = " ".join(sequence).split(f" {WORD_BREAK} ")
+        _, spoken = spoken_words(gram["words"], gram["pos"])
+        if len(spoken) != len(groups) and _ATTACHED_TAGS:
+            _, spoken = spoken_words(gram["words"], gram["pos"], _ATTACHED_TAGS)
+        if len(spoken) > 1 and len(spoken) != len(groups):
+            lost += sum(len(marks) for _, marks, _ in spoken[:-1])
+    return lost
+
+
+def spells(grams, text):
+    """Whether pack grams spell ``text`` (what the recording says): its letters and digits in order, and its punctuation
+    marks in order. A clip whose labels came from another text (a different number expansion, a mis-sliced line) fails."""
+    letters = lambda s: "".join(c for c in unicodedata.normalize("NFC", s).lower() if c.isalnum())
+    marks = lambda s: [m for m in (_PUNCTUATION_ALIASES.get(c, c) for c in s) if m in PUNCTUATION and m != "'"]
+    words = "".join(w for g in grams for w in g["words"])
+    return letters(words) == letters(text) and marks(words) == marks(text)
 
 
 def tokenize(grams):

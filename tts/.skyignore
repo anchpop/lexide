@@ -1,6 +1,10 @@
 data/eng_achernar/
 data/*_gemini_*/
-data/*_sentences.jsonl
+data/*_sentences*.jsonl
+data/*_batches.jsonl
+data/distill/
+data/plain/
+data/edge/
 g2p-jsonl/
 runs/
 __pycache__/

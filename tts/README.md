@@ -47,7 +47,7 @@ What we changed:
 
 ```sh
 # 1. Every phonemized sentence of a pack, with its grams (from the yap repo; English is eng_for_fra, the others <language>_for_eng)
-direnv exec . cargo run --release --example dump_sentence_phonemes -- out/jpn_for_eng > ../lexide/tts/data/jpn_sentences.jsonl
+cp out/jpn_for_eng/tts_sentences.jsonl ../lexide/tts/data/jpn_sentences.jsonl
 
 # Python below: PYTHONPATH=. and the GPU venv with the nix LD_LIBRARY_PATH (see the agent reports).
 # 2. The language's inventory
@@ -55,13 +55,32 @@ scripts/build_inventory.py data/jpn_sentences.jsonl          # -> voca/inventori
 # 3. Scripts, Gemini audio (GEMINI_API_KEY), phonetizer frames, features, upload (HF_TOKEN): resumable
 scripts/language_data.py jpn
 # 4. phonebert, then the TTS model, on the language's frontend
-VOCA_LANGUAGE=jpn python -m voca.phonebert prepare data/jpn_sentences.jsonl features/jpn_phonebert_v4 --exclude data/scripts/jpn_*.jsonl
+VOCA_LANGUAGE=jpn python -m voca.phonebert prepare data/jpn_sentences.jsonl features/jpn_phonebert_v5 --exclude data/scripts/jpn_*.jsonl
 set -a; . ../.env; set +a   # HF_TOKEN, WANDB_API_KEY
 sky launch -c pb-jpn sky_phonebert.yaml --env LANGUAGE=jpn --secret HF_TOKEN --secret WANDB_API_KEY
-sky launch -c tts-x sky_train.yaml --env LANGUAGE=jpn --env RUN_NAME=jpn-x --env CONFIG=configs/styletts.json --env TEXTS=jpn_phonebert_v5 --secret HF_TOKEN --secret WANDB_API_KEY
+sky launch -c tts-x sky_train.yaml --env LANGUAGE=jpn --env RUN_NAME=jpn-x --env CONFIG=configs/styletts.json --env PHONEME_ENCODER=phonebert-jpn-v5/encoder.pt --secret HF_TOKEN --secret WANDB_API_KEY
 # runs push to the private HF repo anchpop/lexide-tts-runs every 5 min and log to W&B project lexide-tts
 scripts/score.py runs/eng-gemini/samples-validation --language eng
 ```
+
+Run the Python commands from `tts/` with `PYTHONPATH=.` and set `VOCA_LANGUAGE` to the pack language.
+For batch recording, run the `select` stage first, then `python scripts/generate_batch.py jpn`.
+The batch ledger in `data/` lets interrupted downloads resume. Run the `generate` stage to retry
+missing clips and write manifests, then run `frames build push`. For single words and short
+phrases, use `scripts/select_words.py` on the same dump and `scripts/words_data.sh jpn`.
+
+English edge scripts are built from the curated text in `data/edge/`. After selecting the regular
+scripts, use Cargo, CMake and a C compiler to build the fallback phonemizer with `cargo build --release --locked --manifest-path g2p-jsonl/Cargo.toml`.
+Run `python scripts/edge_grams.py data/eng_sentences.jsonl`, then `python scripts/generate_batch.py eng --part edge`.
+The scripts use yap's readings when the labelled sentence matches the spoken text. On the other
+lines, g2p supplies per-word phones for the text sent to Gemini. To update regular scripts with
+new pack readings for the same text, use `scripts/regram.py`.
+
+`voca.build` writes the reason for each rejected clip in `rejected.jsonl`. It checks the
+letters, digits and punctuation of the grams against the recording script, alignment confidence,
+excess speech and a minimum of 80 frames for the waveform critics. Pass `--reuse features/<old-set>`
+to realign recordings using their existing acoustic tensors. For an existing build,
+`scripts/drop_short.py` creates filtered manifests over the original tensors.
 
 `scripts/calibrate_onset.py` measures the phonetizer's emission timing against
 pitch-tracker voicing flips; rerun it for a new phonetizer checkpoint.
@@ -72,20 +91,12 @@ pitch-tracker voicing flips; rerun it for a new phonetizer checkpoint.
 StyleTTS 2's prosody predictor, AdaIN decoder and Kokoro's iSTFTNet generator
 with the harmonic NSF source, trained from scratch on our phonemes, durations,
 pitch, voicing and energy (see the module docstring for what differs from
-upstream). Training adds StyleTTS 2's style encoders, multi-period,
-multi-resolution and WavLM critics, plus DAC's complex multi-resolution one, and its loss weights (`voca/losses.py`), with mHuBERT-147 as the speech model;
-none of that ships in `inference.pt`, which stores the mean training style
-instead. Training ends on exactly the inputs inference gives: the share of
-utterances whose prosody predictor and decoder get the stored styles instead of
-the recording's own is 0 for `--fixed-style-hold` steps (2000), then rises to 1
-by 70% of training (`--fixed-style-ramp`). From the GAN start the
-critics also judge the model's own speech, with its own timing and melody (`own_timing`,
-after StyleTTS 2's `slmadv.py`; everything else in training hears the recording's
-durations): for half of every batch, half of it from
-the phonebert corpus (`--texts`; `sky_train.yaml` `TEXTS=eng_phonebert_v4`; other languages `<lang>_phonebert_v5`).
-Its gradient reaches the prosody predictor, the durations included, and the
-decoder (`--weights` `own_gan`, `own_slm`). Training needs `transformers`
-(mHuBERT-147) and `praat-parselmouth`. The adversarial terms keep StyleTTS 2's
+upstream). The decoder receives each frame's position in its phone. During training a posterior
+encoder infers delivery from recorded pitch, energy and timing. At synthesis the text and voice
+predict a distribution over deliveries; `voca.speak --take` seeds a repeatable draw. The decoder
+uses the stored acoustic style for the voice. Training uses multi-period, multi-resolution and
+speech-model critics, mHuBERT-147 and the losses in `voca/losses.py`.
+The adversarial terms keep StyleTTS 2's
 fixed weights (`--weights` `gan`, `slm_gan`; `--feature-matching` 2) and fade in over
 `--gan-ramp` steps (`gan_scale` logs ramp x weight); `--gan-ratio` and
 `--gan-scale-max` balance TinyVoca's only. The generator low-passes its source
@@ -118,7 +129,28 @@ and boundary type, so the pack dump and scripts carry each gram's `pos` and
 the predictor LSTMs grow inputs for the word features).
 
 ```sh
-sky launch -c tts-x sky_train.yaml --env RUN_NAME=eng-styletts --env CONFIG=configs/styletts.json --env TEXTS=eng_phonebert_v4 --secret HF_TOKEN --secret WANDB_API_KEY
+# English v10 used the 80-frame-filtered v5 manifests over v4 audio, and a pretrained encoder.
+sky launch -c tts-x sky_train.yaml --env LANGUAGE=eng --env RUN_NAME=eng-style-voices-v10 --env CONFIG=configs/styletts.json \
+  --env FEATURES=eng_gemini_multi_v5 --env PHONEME_ENCODER=phonebert-eng-v3-f4/encoder.pt --env STEPS=20000 \
+  --env GAN_START=8000 --env EXTRA_ARGS='--cuda-graphs --bf16 --weights {"shift":1}' --secret HF_TOKEN --secret WANDB_API_KEY
 # CPU real-time factors against the current model and Kokoro-82M (random weights, forced durations)
 PYTHONPATH=. python scripts/time_cpu.py --output runs/cpu-timing.json
+```
+
+## Public phoneme-only models
+
+Distillation trains the two text encoders on paired text from yap and stock espeak-ng.
+It keeps the teacher's decoder, voice and prosody weights. Use zero added encoder layers
+for every language (the default). Set `LANGUAGE_CODE` for the espeak script and
+`VOCA_LANGUAGE` for model tools. Each input row needs `text` and the teacher's `grams`.
+Keep the same sentence order in both files. Pairs with unknown phones or different token
+counts are skipped. The student sees stress, tone and accent with POS, rarity and boundary hints zeroed.
+
+```sh
+export VOCA_LANGUAGE=eng LANGUAGE_CODE=eng PYTHONPATH=.
+mkdir -p data/distill
+python plain/stock_espeak.py data/eng_sentences.jsonl data/distill/plain.jsonl
+python -m voca.distill --teacher runs/eng-style-voices-v10/inference.pt \
+  --pairs data/eng_sentences.jsonl data/distill/plain.jsonl --output runs/eng-distilled
+python -m voca.speak --checkpoint runs/eng-distilled/inference.pt --script data/distill/plain.jsonl --limit 1 --output samples
 ```

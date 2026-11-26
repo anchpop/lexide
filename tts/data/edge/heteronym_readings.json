@@ -1,0 +1,1943 @@
+{
+ "a": {
+  "weak": "ə",
+  "strong": "ˈeɪ"
+ },
+ "absent": {
+  "adjective": "ˈæ b s ə n t",
+  "verb": "æ b s ˈɛ n t"
+ },
+ "abstract": {
+  "noun": "ˈæ b s t ɹ æ k t",
+  "verb": "æ b s t ɹ ˈæ k t",
+  "adjective": "ˈæ b s t ɹ æ k t"
+ },
+ "abstracts": {
+  "noun": "ˈæ b s t ɹ æ k t s",
+  "verb": "æ b s t ɹ ˈæ k t s"
+ },
+ "abuse": {
+  "noun": "ə b j ˈuː s",
+  "verb": "ə b j ˈuː z"
+ },
+ "abuses": {
+  "noun": "ə b j ˈuː s ə z",
+  "verb": "ə b j ˈuː z ə z"
+ },
+ "addict": {
+  "noun": "ˈæ d ɪ k t",
+  "verb": "ə d ˈɪ k t"
+ },
+ "addicts": {
+  "noun": "ˈæ d ɪ k t s",
+  "verb": "ə d ˈɪ k t s"
+ },
+ "advocate": {
+  "noun": "ˈæ d v ə k ə t",
+  "verb": "ˈæ d v ə k ˌeɪ t"
+ },
+ "advocates": {
+  "noun": "ˈæ d v ə k ə t s",
+  "verb": "ˈæ d v ə k ˌeɪ t s"
+ },
+ "affect": {
+  "noun": "ˈæ f ɛ k t",
+  "verb": "ə f ˈɛ k t"
+ },
+ "affects": {
+  "noun": "ˈæ f ɛ k t s",
+  "verb": "ə f ˈɛ k t s"
+ },
+ "affiliate": {
+  "noun": "ə f ˈɪ l ɪ ə t",
+  "verb": "ə f ˈɪ l ɪ ˌeɪ t"
+ },
+ "affiliates": {
+  "noun": "ə f ˈɪ l ɪ ə t s",
+  "verb": "ə f ˈɪ l ɪ ˌeɪ t s"
+ },
+ "agape": {
+  "open": "ə ɡ ˈeɪ p",
+  "Greek love": "ɑː ɡ ˈɑː p eɪ"
+ },
+ "aged": {
+  "verb": "ˈeɪ dʒ d",
+  "adjective": "ˈeɪ dʒ ə d"
+ },
+ "aggregate": {
+  "noun": "ˈæ ɡ ɹ ə ɡ ə t",
+  "verb": "ˈæ ɡ ɹ ə ɡ ˌeɪ t"
+ },
+ "aggregates": {
+  "noun": "ˈæ ɡ ɹ ə ɡ ə t s",
+  "verb": "ˈæ ɡ ɹ ə ɡ ˌeɪ t s"
+ },
+ "alleged": {
+  "verb": "ə l ˈɛ dʒ d",
+  "adjective": "ə l ˈɛ dʒ ə d"
+ },
+ "alternate": {
+  "noun": "ˈɔː l t ɚ n ə t",
+  "verb": "ˈɔː l t ɚ n ˌeɪ t"
+ },
+ "alternates": {
+  "noun": "ˈɔː l t ɚ n ə t s",
+  "verb": "ˈɔː l t ɚ n ˌeɪ t s"
+ },
+ "am": {
+  "weak": "ə m",
+  "strong": "ˈæ m"
+ },
+ "and": {
+  "weak": "ə n d",
+  "strong": "ˈæ n d"
+ },
+ "animate": {
+  "adjective": "ˈæ n ɪ m ə t",
+  "verb": "ˈæ n ɪ m ˌeɪ t"
+ },
+ "annex": {
+  "noun": "ˈæ n ɛ k s",
+  "verb": "ə n ˈɛ k s"
+ },
+ "annexes": {
+  "noun": "ˈæ n ɛ k s ə z",
+  "verb": "ə n ˈɛ k s ə z"
+ },
+ "appropriate": {
+  "adjective": "ə p ɹ ˈoʊ p ɹ ɪ ə t",
+  "verb": "ə p ɹ ˈoʊ p ɹ ɪ ˌeɪ t"
+ },
+ "approximate": {
+  "adjective": "ə p ɹ ˈɑː k s ə m ə t",
+  "verb": "ə p ɹ ˈɑː k s ə m ˌeɪ t"
+ },
+ "are": {
+  "weak": "ɚ",
+  "strong": "ˈɑːɹ"
+ },
+ "arithmetic": {
+  "noun": "ə ɹ ˈɪ θ m ə t ˌɪ k",
+  "adjective": "ˌæ ɹ ɪ θ m ˈɛ ɾ ɪ k"
+ },
+ "articulate": {
+  "adjective": "ɑːɹ t ˈɪ k j ʊ l ə t",
+  "verb": "ɑːɹ t ˈɪ k j ʊ l ˌeɪ t"
+ },
+ "as": {
+  "weak": "ə z",
+  "strong": "ˈæ z"
+ },
+ "associate": {
+  "noun": "ə s ˈoʊ s ɪ ə t",
+  "verb": "ə s ˈoʊ s ɪ ˌeɪ t"
+ },
+ "associates": {
+  "noun": "ə s ˈoʊ s ɪ ə t s",
+  "verb": "ə s ˈoʊ s ɪ ˌeɪ t s"
+ },
+ "at": {
+  "weak": "ə t",
+  "strong": "ˈæ t"
+ },
+ "attribute": {
+  "noun": "ˈæ t ɹ ə b j uː t",
+  "verb": "ə t ɹ ˈɪ b j uː t"
+ },
+ "attributes": {
+  "noun": "ˈæ t ɹ ə b j uː t s",
+  "verb": "ə t ɹ ˈɪ b j uː t s"
+ },
+ "august": {
+  "month": "ˈɔː ɡ ə s t",
+  "majestic": "ɔː ɡ ˈʌ s t"
+ },
+ "axes": {
+  "plural of axe": "ˈæ k s ə z",
+  "plural of axis": "ˈæ k s iː z"
+ },
+ "bases": {
+  "plural of base": "b ˈeɪ s ə z",
+  "plural of basis": "b ˈeɪ s iː z"
+ },
+ "bass": {
+  "music": "b ˈeɪ s",
+  "fish": "b ˈæ s"
+ },
+ "basses": {
+  "music": "b ˈeɪ s ə z",
+  "fish": "b ˈæ s ə z"
+ },
+ "beloved": {
+  "verb": "b ə l ˈʌ v d",
+  "adjective": "b ə l ˈʌ v ə d"
+ },
+ "blessed": {
+  "verb": "b l ˈɛ s t",
+  "adjective": "b l ˈɛ s ə d"
+ },
+ "bologna": {
+  "meat": "b ə l ˈoʊ n i",
+  "city": "b ə l ˈoʊ n j ə"
+ },
+ "bourbon": {
+  "whiskey or street": "b ˈɜː b ə n",
+  "royal house": "b ˈʊɹ b ə n"
+ },
+ "bow": {
+  "bend or ship front": "b ˈaʊ",
+  "knot, weapon or curve": "b ˈoʊ"
+ },
+ "bowed": {
+  "bend or ship front": "b ˈaʊ d",
+  "knot, weapon or curve": "b ˈoʊ d"
+ },
+ "bowing": {
+  "bend or ship front": "b ˈaʊ ɪ ŋ",
+  "knot, weapon or curve": "b ˈoʊ ɪ ŋ"
+ },
+ "bows": {
+  "bend or ship front": "b ˈaʊ z",
+  "knot, weapon or curve": "b ˈoʊ z"
+ },
+ "buffet": {
+  "meal": "b ə f ˈeɪ",
+  "hit": "b ˈʌ f ɪ t"
+ },
+ "buffets": {
+  "meal": "b ə f ˈeɪ z",
+  "hit": "b ˈʌ f ɪ t s"
+ },
+ "but": {
+  "weak": "b ə t",
+  "strong": "b ˈʌ t"
+ },
+ "cairo": {
+  "Egypt": "k ˈaɪ ɹ oʊ",
+  "Illinois": "k ˈɛɹ oʊ"
+ },
+ "can": {
+  "weak": "k ə n",
+  "strong": "k ˈæ n",
+  "noun": "k ˈæ n"
+ },
+ "celtic": {
+  "culture": "k ˈɛ l t ɪ k",
+  "basketball": "s ˈɛ l t ɪ k"
+ },
+ "celtics": {
+  "basketball": "s ˈɛ l t ɪ k s"
+ },
+ "cleanly": {
+  "adjective": "k l ˈɛ n l i",
+  "adverb": "k l ˈiː n l i"
+ },
+ "close": {
+  "adjective": "k l ˈoʊ s",
+  "verb": "k l ˈoʊ z",
+  "end": "k l ˈoʊ z"
+ },
+ "closer": {
+  "nearer": "k l ˈoʊ s ɚ",
+  "one who closes": "k l ˈoʊ z ɚ"
+ },
+ "closes": {
+  "verb": "k l ˈoʊ z ə z"
+ },
+ "closest": {
+  "adjective": "k l ˈoʊ s ə s t"
+ },
+ "coax": {
+  "persuade": "k ˈoʊ k s",
+  "cable": "k ˈoʊ æ k s"
+ },
+ "combat": {
+  "noun": "k ˈɑː m b æ t",
+  "verb": "k ə m b ˈæ t"
+ },
+ "combine": {
+  "noun": "k ˈɑː m b aɪ n",
+  "verb": "k ə m b ˈaɪ n"
+ },
+ "combines": {
+  "noun": "k ˈɑː m b aɪ n z",
+  "verb": "k ə m b ˈaɪ n z"
+ },
+ "commune": {
+  "noun": "k ˈɑː m j uː n",
+  "verb": "k ə m j ˈuː n"
+ },
+ "compact": {
+  "noun": "k ˈɑː m p æ k t",
+  "adjective": "k ə m p ˈæ k t",
+  "verb": "k ə m p ˈæ k t"
+ },
+ "compliment": {
+  "noun": "k ˈɑː m p l ɪ m ə n t",
+  "verb": "k ˈɑː m p l ɪ m ˌɛ n t"
+ },
+ "compliments": {
+  "noun": "k ˈɑː m p l ɪ m ə n t s",
+  "verb": "k ˈɑː m p l ɪ m ˌɛ n t s"
+ },
+ "compound": {
+  "noun": "k ˈɑː m p aʊ n d",
+  "verb": "k ə m p ˈaʊ n d",
+  "adjective": "k ˈɑː m p aʊ n d"
+ },
+ "compounds": {
+  "noun": "k ˈɑː m p aʊ n d z",
+  "verb": "k ə m p ˈaʊ n d z"
+ },
+ "compress": {
+  "noun": "k ˈɑː m p ɹ ɛ s",
+  "verb": "k ə m p ɹ ˈɛ s"
+ },
+ "compresses": {
+  "noun": "k ˈɑː m p ɹ ɛ s ə z",
+  "verb": "k ə m p ɹ ˈɛ s ə z"
+ },
+ "conduct": {
+  "noun": "k ˈɑː n d ʌ k t",
+  "verb": "k ə n d ˈʌ k t"
+ },
+ "conducts": {
+  "noun": "k ˈɑː n d ʌ k t s",
+  "verb": "k ə n d ˈʌ k t s"
+ },
+ "confines": {
+  "noun": "k ˈɑː n f aɪ n z",
+  "verb": "k ə n f ˈaɪ n z"
+ },
+ "conflict": {
+  "noun": "k ˈɑː n f l ɪ k t",
+  "verb": "k ə n f l ˈɪ k t"
+ },
+ "conflicts": {
+  "noun": "k ˈɑː n f l ɪ k t s",
+  "verb": "k ə n f l ˈɪ k t s"
+ },
+ "conglomerate": {
+  "noun": "k ə n ɡ l ˈɑː m ɚ ɹ ə t",
+  "verb": "k ə n ɡ l ˈɑː m ɚ ɹ ˌeɪ t"
+ },
+ "conglomerates": {
+  "noun": "k ə n ɡ l ˈɑː m ɚ ɹ ə t s",
+  "verb": "k ə n ɡ l ˈɑː m ɚ ɹ ˌeɪ t s"
+ },
+ "conjugate": {
+  "noun": "k ˈɑː n dʒ ə ɡ ə t",
+  "verb": "k ˈɑː n dʒ ə ɡ ˌeɪ t"
+ },
+ "conscript": {
+  "noun": "k ˈɑː n s k ɹ ɪ p t",
+  "verb": "k ə n s k ɹ ˈɪ p t"
+ },
+ "conscripts": {
+  "noun": "k ˈɑː n s k ɹ ɪ p t s",
+  "verb": "k ə n s k ɹ ˈɪ p t s"
+ },
+ "console": {
+  "noun": "k ˈɑː n s oʊ l",
+  "verb": "k ə n s ˈoʊ l"
+ },
+ "consoles": {
+  "noun": "k ˈɑː n s oʊ l z",
+  "verb": "k ə n s ˈoʊ l z"
+ },
+ "consort": {
+  "noun": "k ˈɑː n s ɔːɹ t",
+  "verb": "k ə n s ˈɔːɹ t"
+ },
+ "consorts": {
+  "noun": "k ˈɑː n s ɔːɹ t s",
+  "verb": "k ə n s ˈɔːɹ t s"
+ },
+ "construct": {
+  "noun": "k ˈɑː n s t ɹ ʌ k t",
+  "verb": "k ə n s t ɹ ˈʌ k t"
+ },
+ "constructs": {
+  "noun": "k ˈɑː n s t ɹ ʌ k t s",
+  "verb": "k ə n s t ɹ ˈʌ k t s"
+ },
+ "consummate": {
+  "adjective": "k ˈɑː n s ə m ə t",
+  "verb": "k ˈɑː n s ə m ˌeɪ t"
+ },
+ "content": {
+  "noun": "k ˈɑː n t ɛ n t",
+  "adjective": "k ə n t ˈɛ n t",
+  "verb": "k ə n t ˈɛ n t"
+ },
+ "contents": {
+  "noun": "k ˈɑː n t ɛ n t s",
+  "verb": "k ə n t ˈɛ n t s"
+ },
+ "contest": {
+  "noun": "k ˈɑː n t ɛ s t",
+  "verb": "k ə n t ˈɛ s t"
+ },
+ "contests": {
+  "noun": "k ˈɑː n t ɛ s t s",
+  "verb": "k ə n t ˈɛ s t s"
+ },
+ "contract": {
+  "noun": "k ˈɑː n t ɹ æ k t",
+  "verb": "k ə n t ɹ ˈæ k t"
+ },
+ "contracts": {
+  "noun": "k ˈɑː n t ɹ æ k t s",
+  "verb": "k ə n t ɹ ˈæ k t s"
+ },
+ "contrast": {
+  "noun": "k ˈɑː n t ɹ æ s t",
+  "verb": "k ə n t ɹ ˈæ s t"
+ },
+ "contrasts": {
+  "noun": "k ˈɑː n t ɹ æ s t s",
+  "verb": "k ə n t ɹ ˈæ s t s"
+ },
+ "converse": {
+  "noun": "k ˈɑː n v ɜː s",
+  "verb": "k ə n v ˈɜː s"
+ },
+ "converses": {
+  "noun": "k ˈɑː n v ɜː s ə z",
+  "verb": "k ə n v ˈɜː s ə z"
+ },
+ "convert": {
+  "noun": "k ˈɑː n v ɜː t",
+  "verb": "k ə n v ˈɜː t"
+ },
+ "converts": {
+  "noun": "k ˈɑː n v ɜː t s",
+  "verb": "k ə n v ˈɜː t s"
+ },
+ "convict": {
+  "noun": "k ˈɑː n v ɪ k t",
+  "verb": "k ə n v ˈɪ k t"
+ },
+ "convicts": {
+  "noun": "k ˈɑː n v ɪ k t s",
+  "verb": "k ə n v ˈɪ k t s"
+ },
+ "coordinate": {
+  "noun": "k oʊ ˈɔːɹ d ə n ə t",
+  "verb": "k oʊ ˈɔːɹ d ə n ˌeɪ t"
+ },
+ "coordinates": {
+  "noun": "k oʊ ˈɔːɹ d ə n ə t s",
+  "verb": "k oʊ ˈɔːɹ d ə n ˌeɪ t s"
+ },
+ "correlate": {
+  "noun": "k ˈɔːɹ ɹ ə l ə t",
+  "verb": "k ˈɔːɹ ɹ ə l ˌeɪ t"
+ },
+ "correlates": {
+  "noun": "k ˈɔːɹ ɹ ə l ə t s",
+  "verb": "k ˈɔːɹ ɹ ə l ˌeɪ t s"
+ },
+ "could": {
+  "weak": "k ə d",
+  "strong": "k ˈʊ d"
+ },
+ "crooked": {
+  "verb": "k ɹ ˈʊ k t",
+  "adjective": "k ɹ ˈʊ k ɪ d"
+ },
+ "cursed": {
+  "verb": "k ˈɜː s t",
+  "adjective": "k ˈɜː s ə d"
+ },
+ "decrease": {
+  "noun": "d ˈiː k ɹ iː s",
+  "verb": "d ə k ɹ ˈiː s"
+ },
+ "decreases": {
+  "noun": "d ˈiː k ɹ iː s ə z",
+  "verb": "d ə k ɹ ˈiː s ə z"
+ },
+ "defect": {
+  "noun": "d ˈiː f ɛ k t",
+  "verb": "d ə f ˈɛ k t"
+ },
+ "defects": {
+  "noun": "d ˈiː f ɛ k t s",
+  "verb": "d ə f ˈɛ k t s"
+ },
+ "defense": {
+  "general": "d ə f ˈɛ n s",
+  "team sports": "d ˈiː f ɛ n s"
+ },
+ "degenerate": {
+  "noun": "d ə dʒ ˈɛ n ɚ ɹ ə t",
+  "verb": "d ə dʒ ˈɛ n ɚ ɹ ˌeɪ t"
+ },
+ "degenerates": {
+  "noun": "d ə dʒ ˈɛ n ɚ ɹ ə t s",
+  "verb": "d ə dʒ ˈɛ n ɚ ɹ ˌeɪ t s"
+ },
+ "delegate": {
+  "noun": "d ˈɛ l ə ɡ ə t",
+  "verb": "d ˈɛ l ə ɡ ˌeɪ t"
+ },
+ "delegates": {
+  "noun": "d ˈɛ l ə ɡ ə t s",
+  "verb": "d ˈɛ l ə ɡ ˌeɪ t s"
+ },
+ "deliberate": {
+  "adjective": "d ə l ˈɪ b ɚ ɹ ə t",
+  "verb": "d ə l ˈɪ b ɚ ɹ ˌeɪ t"
+ },
+ "denier": {
+  "one who denies": "d ə n ˈaɪ ɚ",
+  "yarn unit": "d ˈɛ n j ɚ"
+ },
+ "desert": {
+  "noun": "d ˈɛ z ɚ t",
+  "verb": "d ə z ˈɜː t"
+ },
+ "deserts": {
+  "noun": "d ˈɛ z ɚ t s",
+  "verb": "d ə z ˈɜː t s"
+ },
+ "designate": {
+  "adjective": "d ˈɛ z ɪ ɡ n ə t",
+  "verb": "d ˈɛ z ɪ ɡ n ˌeɪ t"
+ },
+ "deviate": {
+  "noun": "d ˈiː v ɪ ə t",
+  "verb": "d ˈiː v ɪ ˌeɪ t"
+ },
+ "deviates": {
+  "noun": "d ˈiː v ɪ ə t s",
+  "verb": "d ˈiː v ɪ ˌeɪ t s"
+ },
+ "diffuse": {
+  "adjective": "d ɪ f j ˈuː s",
+  "verb": "d ɪ f j ˈuː z"
+ },
+ "digest": {
+  "noun": "d ˈaɪ dʒ ɛ s t",
+  "verb": "d aɪ dʒ ˈɛ s t"
+ },
+ "digests": {
+  "noun": "d ˈaɪ dʒ ɛ s t s",
+  "verb": "d aɪ dʒ ˈɛ s t s"
+ },
+ "discard": {
+  "noun": "d ˈɪ s k ɑːɹ d",
+  "verb": "d ɪ s k ˈɑːɹ d"
+ },
+ "discards": {
+  "noun": "d ˈɪ s k ɑːɹ d z",
+  "verb": "d ɪ s k ˈɑːɹ d z"
+ },
+ "discharge": {
+  "noun": "d ˈɪ s tʃ ɑːɹ dʒ",
+  "verb": "d ɪ s tʃ ˈɑːɹ dʒ"
+ },
+ "discharges": {
+  "noun": "d ˈɪ s tʃ ɑːɹ dʒ ə z",
+  "verb": "d ɪ s tʃ ˈɑːɹ dʒ ə z"
+ },
+ "discount": {
+  "noun": "d ˈɪ s k aʊ n t",
+  "verb": "d ɪ s k ˈaʊ n t"
+ },
+ "discounts": {
+  "noun": "d ˈɪ s k aʊ n t s",
+  "verb": "d ɪ s k ˈaʊ n t s"
+ },
+ "do": {
+  "weak": "d uː",
+  "strong": "d ˈuː",
+  "musical note": "d ˈoʊ"
+ },
+ "document": {
+  "noun": "d ˈɑː k j uː m ə n t",
+  "verb": "d ˈɑː k j uː m ˌɛ n t"
+ },
+ "documents": {
+  "noun": "d ˈɑː k j uː m ə n t s",
+  "verb": "d ˈɑː k j uː m ˌɛ n t s"
+ },
+ "does": {
+  "verb": "d ˈʌ z",
+  "female deer": "d ˈoʊ z"
+ },
+ "dogged": {
+  "verb": "d ˈɔ ɡ d",
+  "adjective": "d ˈɔ ɡ ə d"
+ },
+ "dove": {
+  "bird": "d ˈʌ v",
+  "past of dive": "d ˈoʊ v"
+ },
+ "doves": {
+  "bird": "d ˈʌ v z"
+ },
+ "drawer": {
+  "furniture": "d ɹ ˈɔːɹ",
+  "one who draws": "d ɹ ˈɔː ɚ"
+ },
+ "drawers": {
+  "furniture": "d ɹ ˈɔːɹ z",
+  "one who draws": "d ɹ ˈɔː ɚ z"
+ },
+ "duplicate": {
+  "noun": "d ˈuː p l ə k ə t",
+  "verb": "d ˈuː p l ə k ˌeɪ t"
+ },
+ "duplicates": {
+  "noun": "d ˈuː p l ə k ə t s",
+  "verb": "d ˈuː p l ə k ˌeɪ t s"
+ },
+ "elaborate": {
+  "adjective": "ə l ˈæ b ɚ ɹ ə t",
+  "verb": "ə l ˈæ b ɚ ɹ ˌeɪ t"
+ },
+ "ellipses": {
+  "plural of ellipse": "ɪ l ˈɪ p s ə z",
+  "plural of ellipsis": "ɪ l ˈɪ p s iː z"
+ },
+ "entrance": {
+  "noun": "ˈɛ n t ɹ ə n s",
+  "verb": "ɛ n t ɹ ˈæ n s"
+ },
+ "entrances": {
+  "noun": "ˈɛ n t ɹ ə n s ə z",
+  "verb": "ɛ n t ɹ ˈæ n s ə z"
+ },
+ "escort": {
+  "noun": "ˈɛ s k ɔːɹ t",
+  "verb": "ɛ s k ˈɔːɹ t"
+ },
+ "escorts": {
+  "noun": "ˈɛ s k ɔːɹ t s",
+  "verb": "ɛ s k ˈɔːɹ t s"
+ },
+ "estimate": {
+  "noun": "ˈɛ s t ə m ə t",
+  "verb": "ˈɛ s t ə m ˌeɪ t"
+ },
+ "estimates": {
+  "noun": "ˈɛ s t ə m ə t s",
+  "verb": "ˈɛ s t ə m ˌeɪ t s"
+ },
+ "evening": {
+  "time of day": "ˈiː v n ɪ ŋ",
+  "making even": "ˈiː v ə n ɪ ŋ"
+ },
+ "evenings": {
+  "noun": "ˈiː v n ɪ ŋ z"
+ },
+ "excise": {
+  "noun": "ˈɛ k s aɪ z",
+  "verb": "ɛ k s ˈaɪ z"
+ },
+ "excuse": {
+  "noun": "ɛ k s k j ˈuː s",
+  "verb": "ɛ k s k j ˈuː z"
+ },
+ "excuses": {
+  "noun": "ɛ k s k j ˈuː s ə z",
+  "verb": "ɛ k s k j ˈuː z ə z"
+ },
+ "expatriate": {
+  "noun": "ɛ k s p ˈeɪ t ɹ ɪ ə t",
+  "verb": "ɛ k s p ˈeɪ t ɹ ɪ ˌeɪ t"
+ },
+ "expatriates": {
+  "noun": "ɛ k s p ˈeɪ t ɹ ɪ ə t s",
+  "verb": "ɛ k s p ˈeɪ t ɹ ɪ ˌeɪ t s"
+ },
+ "exploit": {
+  "noun": "ˈɛ k s p l ɔɪ t",
+  "verb": "ɛ k s p l ˈɔɪ t"
+ },
+ "exploits": {
+  "noun": "ˈɛ k s p l ɔɪ t s",
+  "verb": "ɛ k s p l ˈɔɪ t s"
+ },
+ "export": {
+  "noun": "ˈɛ k s p ɔːɹ t",
+  "verb": "ɛ k s p ˈɔːɹ t"
+ },
+ "exports": {
+  "noun": "ˈɛ k s p ɔːɹ t s",
+  "verb": "ɛ k s p ˈɔːɹ t s"
+ },
+ "expose": {
+  "verb": "ɛ k s p ˈoʊ z",
+  "report": "ˌɛ k s p oʊ z ˈeɪ"
+ },
+ "exposé": {
+  "report": "ˌɛ k s p oʊ z ˈeɪ"
+ },
+ "extract": {
+  "noun": "ˈɛ k s t ɹ æ k t",
+  "verb": "ɛ k s t ɹ ˈæ k t"
+ },
+ "extracts": {
+  "noun": "ˈɛ k s t ɹ æ k t s",
+  "verb": "ɛ k s t ɹ ˈæ k t s"
+ },
+ "ferment": {
+  "noun": "f ˈɜː m ɛ n t",
+  "verb": "f ɚ m ˈɛ n t"
+ },
+ "ferments": {
+  "noun": "f ˈɜː m ɛ n t s",
+  "verb": "f ɚ m ˈɛ n t s"
+ },
+ "for": {
+  "weak": "f ɚ",
+  "strong": "f ˈɔːɹ"
+ },
+ "fragment": {
+  "noun": "f ɹ ˈæ ɡ m ə n t",
+  "verb": "f ɹ æ ɡ m ˈɛ n t"
+ },
+ "fragments": {
+  "noun": "f ɹ ˈæ ɡ m ə n t s",
+  "verb": "f ɹ æ ɡ m ˈɛ n t s"
+ },
+ "frequent": {
+  "adjective": "f ɹ ˈiː k w ə n t",
+  "verb": "f ɹ ə k w ˈɛ n t"
+ },
+ "frequents": {
+  "verb": "f ɹ ə k w ˈɛ n t s"
+ },
+ "from": {
+  "weak": "f ɹ ə m",
+  "strong": "f ɹ ˈʌ m"
+ },
+ "gill": {
+  "fish": "ɡ ˈɪ l",
+  "measure": "dʒ ˈɪ l"
+ },
+ "gills": {
+  "fish": "ɡ ˈɪ l z",
+  "measure": "dʒ ˈɪ l z"
+ },
+ "graduate": {
+  "noun": "ɡ ɹ ˈæ dʒ uː ə t",
+  "verb": "ɡ ɹ ˈæ dʒ uː ˌeɪ t"
+ },
+ "graduates": {
+  "noun": "ɡ ɹ ˈæ dʒ uː ə t s",
+  "verb": "ɡ ɹ ˈæ dʒ uː ˌeɪ t s"
+ },
+ "gyro": {
+  "gyroscope": "dʒ ˈaɪ ɹ oʊ",
+  "food": "j ˈɪɹ oʊ"
+ },
+ "had": {
+  "weak": "h ə d",
+  "obligation (have to)": "h ˈæ d",
+  "auxiliary": "h ə d",
+  "strong": "h ˈæ d"
+ },
+ "has": {
+  "auxiliary": "h ə z",
+  "strong": "h ˈæ z",
+  "obligation (have to)": "h ˈæ s"
+ },
+ "have": {
+  "auxiliary": "h ə v",
+  "strong": "h ˈæ v",
+  "obligation (have to)": "h ˈæ f"
+ },
+ "he": {
+  "weak": "h iː",
+  "strong": "h ˈiː"
+ },
+ "her": {
+  "weak": "h ɚ",
+  "strong": "h ˈɜː"
+ },
+ "his": {
+  "weak": "h ɪ z",
+  "strong": "h ˈɪ z"
+ },
+ "house": {
+  "noun": "h ˈaʊ s",
+  "verb": "h ˈaʊ z"
+ },
+ "houses": {
+  "noun": "h ˈaʊ z ə z",
+  "verb": "h ˈaʊ z ə z"
+ },
+ "houston": {
+  "Texas": "h j ˈuː s t ə n",
+  "Manhattan street": "h ˈaʊ s t ə n"
+ },
+ "impact": {
+  "noun": "ˈɪ m p æ k t",
+  "verb": "ɪ m p ˈæ k t"
+ },
+ "impacts": {
+  "noun": "ˈɪ m p æ k t s",
+  "verb": "ɪ m p ˈæ k t s"
+ },
+ "implant": {
+  "noun": "ˈɪ m p l æ n t",
+  "verb": "ɪ m p l ˈæ n t"
+ },
+ "implants": {
+  "noun": "ˈɪ m p l æ n t s",
+  "verb": "ɪ m p l ˈæ n t s"
+ },
+ "implement": {
+  "noun": "ˈɪ m p l ə m ə n t",
+  "verb": "ˈɪ m p l ə m ˌɛ n t"
+ },
+ "implements": {
+  "noun": "ˈɪ m p l ə m ə n t s",
+  "verb": "ˈɪ m p l ə m ˌɛ n t s"
+ },
+ "import": {
+  "noun": "ˈɪ m p ɔːɹ t",
+  "verb": "ɪ m p ˈɔːɹ t"
+ },
+ "imports": {
+  "noun": "ˈɪ m p ɔːɹ t s",
+  "verb": "ɪ m p ˈɔːɹ t s"
+ },
+ "imprint": {
+  "noun": "ˈɪ m p ɹ ɪ n t",
+  "verb": "ɪ m p ɹ ˈɪ n t"
+ },
+ "imprints": {
+  "noun": "ˈɪ m p ɹ ɪ n t s",
+  "verb": "ɪ m p ɹ ˈɪ n t s"
+ },
+ "incense": {
+  "noun": "ˈɪ n s ɛ n s",
+  "verb": "ɪ n s ˈɛ n s"
+ },
+ "incenses": {
+  "noun": "ˈɪ n s ɛ n s ə z",
+  "verb": "ɪ n s ˈɛ n s ə z"
+ },
+ "incline": {
+  "noun": "ˈɪ ŋ k l aɪ n",
+  "verb": "ɪ ŋ k l ˈaɪ n"
+ },
+ "inclines": {
+  "noun": "ˈɪ ŋ k l aɪ n z",
+  "verb": "ɪ ŋ k l ˈaɪ n z"
+ },
+ "increase": {
+  "noun": "ˈɪ ŋ k ɹ iː s",
+  "verb": "ɪ ŋ k ɹ ˈiː s"
+ },
+ "increases": {
+  "noun": "ˈɪ ŋ k ɹ iː s ə z",
+  "verb": "ɪ ŋ k ɹ ˈiː s ə z"
+ },
+ "initiate": {
+  "noun": "ɪ n ˈɪ ʃ ɪ ə t",
+  "verb": "ɪ n ˈɪ ʃ ɪ ˌeɪ t"
+ },
+ "initiates": {
+  "noun": "ɪ n ˈɪ ʃ ɪ ə t s",
+  "verb": "ɪ n ˈɪ ʃ ɪ ˌeɪ t s"
+ },
+ "inlay": {
+  "noun": "ˈɪ n l eɪ",
+  "verb": "ɪ n l ˈeɪ"
+ },
+ "insert": {
+  "noun": "ˈɪ n s ɜː t",
+  "verb": "ɪ n s ˈɜː t"
+ },
+ "instrument": {
+  "noun": "ˈɪ n s t ɹ ə m ə n t",
+  "verb": "ˈɪ n s t ɹ ə m ˌɛ n t"
+ },
+ "insult": {
+  "noun": "ˈɪ n s ʌ l t",
+  "verb": "ɪ n s ˈʌ l t"
+ },
+ "insults": {
+  "noun": "ˈɪ n s ʌ l t s",
+  "verb": "ɪ n s ˈʌ l t s"
+ },
+ "intercept": {
+  "noun": "ˈɪ n t ɚ s ɛ p t",
+  "verb": "ˌɪ n t ɚ s ˈɛ p t"
+ },
+ "intercepts": {
+  "noun": "ˈɪ n t ɚ s ɛ p t s",
+  "verb": "ˌɪ n t ɚ s ˈɛ p t s"
+ },
+ "interchange": {
+  "noun": "ˈɪ n t ɚ tʃ eɪ n dʒ",
+  "verb": "ˌɪ n t ɚ tʃ ˈeɪ n dʒ"
+ },
+ "intern": {
+  "noun": "ˈɪ n t ɜː n",
+  "verb": "ɪ n t ˈɜː n"
+ },
+ "interns": {
+  "noun": "ˈɪ n t ɜː n z",
+  "verb": "ɪ n t ˈɜː n z"
+ },
+ "intimate": {
+  "adjective": "ˈɪ n t ə m ə t",
+  "verb": "ˈɪ n t ə m ˌeɪ t"
+ },
+ "intrigue": {
+  "noun": "ˈɪ n t ɹ iː ɡ",
+  "verb": "ɪ n t ɹ ˈiː ɡ"
+ },
+ "intrigues": {
+  "noun": "ˈɪ n t ɹ iː ɡ z",
+  "verb": "ɪ n t ɹ ˈiː ɡ z"
+ },
+ "invalid": {
+  "noun": "ˈɪ n v ə l ɪ d",
+  "adjective": "ɪ n v ˈæ l ɪ d"
+ },
+ "invalids": {
+  "noun": "ˈɪ n v ə l ɪ d z"
+ },
+ "invite": {
+  "noun": "ˈɪ n v aɪ t",
+  "verb": "ɪ n v ˈaɪ t"
+ },
+ "invites": {
+  "noun": "ˈɪ n v aɪ t s",
+  "verb": "ɪ n v ˈaɪ t s"
+ },
+ "is": {
+  "weak": "ɪ z",
+  "strong": "ˈɪ z"
+ },
+ "isolate": {
+  "noun": "ˈaɪ s ə l ə t",
+  "verb": "ˈaɪ s ə l ˌeɪ t"
+ },
+ "isolates": {
+  "noun": "ˈaɪ s ə l ə t s",
+  "verb": "ˈaɪ s ə l ˌeɪ t s"
+ },
+ "jesus": {
+  "English": "dʒ ˈiː z ə s",
+  "Spanish name": "h eɪ s ˈuː s"
+ },
+ "job": {
+  "work": "dʒ ˈɑː b",
+  "biblical": "dʒ ˈoʊ b"
+ },
+ "laminate": {
+  "noun": "l ˈæ m ə n ə t",
+  "verb": "l ˈæ m ə n ˌeɪ t"
+ },
+ "laminates": {
+  "noun": "l ˈæ m ə n ə t s",
+  "verb": "l ˈæ m ə n ˌeɪ t s"
+ },
+ "lead": {
+  "guide": "l ˈiː d",
+  "metal": "l ˈɛ d"
+ },
+ "leading": {
+  "guide": "l ˈiː d ɪ ŋ",
+  "metal": "l ˈɛ d ɪ ŋ"
+ },
+ "leads": {
+  "guide": "l ˈiː d z",
+  "metal": "l ˈɛ d z"
+ },
+ "learned": {
+  "verb": "l ˈɜː n d",
+  "adjective": "l ˈɜː n ə d"
+ },
+ "legged": {
+  "verb": "l ˈɛ ɡ d",
+  "adjective": "l ˈɛ ɡ ə d"
+ },
+ "legitimate": {
+  "adjective": "l ə dʒ ˈɪ ɾ ə m ə t",
+  "verb": "l ə dʒ ˈɪ ɾ ə m ˌeɪ t"
+ },
+ "lied": {
+  "past of lie": "l ˈaɪ d",
+  "German song": "l ˈiː d"
+ },
+ "lima": {
+  "Peru": "l ˈiː m ə",
+  "bean or Ohio": "l ˈaɪ m ə"
+ },
+ "live": {
+  "adjective": "l ˈaɪ v",
+  "verb": "l ˈɪ v"
+ },
+ "lives": {
+  "verb": "l ˈɪ v z",
+  "noun": "l ˈaɪ v z"
+ },
+ "lower": {
+  "further down": "l ˈoʊ ɚ",
+  "scowl": "l ˈaʊ ɚ"
+ },
+ "minute": {
+  "sixty seconds": "m ˈɪ n ɪ t",
+  "tiny": "m aɪ n ˈuː t"
+ },
+ "minutes": {
+  "sixty seconds": "m ˈɪ n ɪ t s"
+ },
+ "mishit": {
+  "noun": "m ˈɪ s h ɪ t",
+  "verb": "m ɪ s h ˈɪ t"
+ },
+ "misprint": {
+  "noun": "m ˈɪ s p ɹ ɪ n t",
+  "verb": "m ɪ s p ɹ ˈɪ n t"
+ },
+ "misprints": {
+  "noun": "m ˈɪ s p ɹ ɪ n t s",
+  "verb": "m ɪ s p ɹ ˈɪ n t s"
+ },
+ "misread": {
+  "present": "m ɪ s ɹ ˈiː d",
+  "past": "m ɪ s ɹ ˈɛ d"
+ },
+ "misuse": {
+  "noun": "m ɪ s j ˈuː s",
+  "verb": "m ɪ s j ˈuː z"
+ },
+ "mobile": {
+  "movable": "m ˈoʊ b ə l",
+  "city in Alabama": "m oʊ b ˈiː l",
+  "hanging sculpture": "m ˈoʊ b iː l"
+ },
+ "mobiles": {
+  "noun": "m ˈoʊ b iː l z"
+ },
+ "moderate": {
+  "noun": "m ˈɑː d ɚ ɹ ə t",
+  "verb": "m ˈɑː d ɚ ɹ ˌeɪ t"
+ },
+ "moderates": {
+  "noun": "m ˈɑː d ɚ ɹ ə t s",
+  "verb": "m ˈɑː d ɚ ɹ ˌeɪ t s"
+ },
+ "mole": {
+  "animal, spot or spy": "m ˈoʊ l",
+  "sauce": "m ˈoʊ l eɪ"
+ },
+ "moped": {
+  "vehicle": "m ˈoʊ p ɛ d",
+  "past of mope": "m ˈoʊ p t"
+ },
+ "mouth": {
+  "noun": "m ˈaʊ θ",
+  "verb": "m ˈaʊ ð"
+ },
+ "mouths": {
+  "noun": "m ˈaʊ ð z",
+  "verb": "m ˈaʊ ð z"
+ },
+ "multiply": {
+  "verb": "m ˈʌ l t ə p l ˌaɪ",
+  "adverb": "m ˈʌ l t ə p l i"
+ },
+ "must": {
+  "weak": "m ə s t",
+  "strong": "m ˈʌ s t"
+ },
+ "my": {
+  "weak": "m aɪ",
+  "strong": "m ˈaɪ"
+ },
+ "nestle": {
+  "cuddle": "n ˈɛ s ə l",
+  "brand": "n ˈɛ s l eɪ"
+ },
+ "nestlé": {
+  "brand": "n ˈɛ s l eɪ"
+ },
+ "nice": {
+  "pleasant": "n ˈaɪ s",
+  "city": "n ˈiː s"
+ },
+ "not": {
+  "weak": "n ˌɑː t",
+  "strong": "n ˈɑː t"
+ },
+ "number": {
+  "numeral": "n ˈʌ m b ɚ",
+  "more numb": "n ˈʌ m ɚ"
+ },
+ "numbers": {
+  "numerals": "n ˈʌ m b ɚ z"
+ },
+ "nun": {
+  "sister": "n ˈʌ n",
+  "Hebrew letter": "n ˈuː n"
+ },
+ "object": {
+  "noun": "ˈɑː b dʒ ɛ k t",
+  "verb": "ɑː b dʒ ˈɛ k t"
+ },
+ "objects": {
+  "noun": "ˈɑː b dʒ ɛ k t s",
+  "verb": "ɑː b dʒ ˈɛ k t s"
+ },
+ "of": {
+  "weak": "ə v",
+  "strong": "ˈʌ v"
+ },
+ "offense": {
+  "general": "ə f ˈɛ n s",
+  "team sports": "ˈɔː f ɛ n s"
+ },
+ "offset": {
+  "noun": "ˈɔː f s ɛ t",
+  "verb": "ɔː f s ˈɛ t"
+ },
+ "offsets": {
+  "noun": "ˈɔː f s ɛ t s",
+  "verb": "ɔː f s ˈɛ t s"
+ },
+ "or": {
+  "weak": "ɚ",
+  "strong": "ˈɔːɹ"
+ },
+ "ornament": {
+  "noun": "ˈɔːɹ n ə m ə n t",
+  "verb": "ˈɔːɹ n ə m ˌɛ n t"
+ },
+ "ornaments": {
+  "noun": "ˈɔːɹ n ə m ə n t s",
+  "verb": "ˈɔːɹ n ə m ˌɛ n t s"
+ },
+ "overestimate": {
+  "noun": "ˌoʊ v ɚ ɹ ˈɛ s t ə m ə t",
+  "verb": "ˌoʊ v ɚ ɹ ˈɛ s t ə m ˌeɪ t"
+ },
+ "overflow": {
+  "noun": "ˈoʊ v ɚ f l oʊ",
+  "verb": "ˌoʊ v ɚ f l ˈoʊ"
+ },
+ "overflows": {
+  "noun": "ˈoʊ v ɚ f l oʊ z",
+  "verb": "ˌoʊ v ɚ f l ˈoʊ z"
+ },
+ "overhang": {
+  "noun": "ˈoʊ v ɚ h æ ŋ",
+  "verb": "ˌoʊ v ɚ h ˈæ ŋ"
+ },
+ "overhangs": {
+  "noun": "ˈoʊ v ɚ h æ ŋ z",
+  "verb": "ˌoʊ v ɚ h ˈæ ŋ z"
+ },
+ "overhaul": {
+  "noun": "ˈoʊ v ɚ h ɔː l",
+  "verb": "ˌoʊ v ɚ h ˈɔː l"
+ },
+ "overhauls": {
+  "noun": "ˈoʊ v ɚ h ɔː l z",
+  "verb": "ˌoʊ v ɚ h ˈɔː l z"
+ },
+ "overlap": {
+  "noun": "ˈoʊ v ɚ l æ p",
+  "verb": "ˌoʊ v ɚ l ˈæ p"
+ },
+ "overlaps": {
+  "noun": "ˈoʊ v ɚ l æ p s",
+  "verb": "ˌoʊ v ɚ l ˈæ p s"
+ },
+ "override": {
+  "noun": "ˈoʊ v ɚ ɹ aɪ d",
+  "verb": "ˌoʊ v ɚ ɹ ˈaɪ d"
+ },
+ "overrides": {
+  "noun": "ˈoʊ v ɚ ɹ aɪ d z",
+  "verb": "ˌoʊ v ɚ ɹ ˈaɪ d z"
+ },
+ "overrun": {
+  "noun": "ˈoʊ v ɚ ɹ ʌ n",
+  "verb": "ˌoʊ v ɚ ɹ ˈʌ n"
+ },
+ "overruns": {
+  "noun": "ˈoʊ v ɚ ɹ ʌ n z",
+  "verb": "ˌoʊ v ɚ ɹ ˈʌ n z"
+ },
+ "overthrow": {
+  "noun": "ˈoʊ v ɚ θ ɹ oʊ",
+  "verb": "ˌoʊ v ɚ θ ɹ ˈoʊ"
+ },
+ "overuse": {
+  "noun": "ˌoʊ v ɚ ɹ j ˈuː s",
+  "verb": "ˌoʊ v ɚ ɹ j ˈuː z"
+ },
+ "overuses": {
+  "noun": "ˌoʊ v ɚ ɹ j ˈuː s ə z",
+  "verb": "ˌoʊ v ɚ ɹ j ˈuː z ə z"
+ },
+ "pasties": {
+  "pie": "p ˈæ s t i z"
+ },
+ "pasty": {
+  "pale": "p ˈeɪ s t i",
+  "pie": "p ˈæ s t i"
+ },
+ "pate": {
+  "head": "p ˈeɪ t",
+  "food": "p ɑː t ˈeɪ"
+ },
+ "peaked": {
+  "verb": "p ˈiː k t",
+  "adjective": "p ˈiː k ə d"
+ },
+ "perfect": {
+  "adjective": "p ˈɜː f ɛ k t",
+  "verb": "p ɚ f ˈɛ k t"
+ },
+ "perfects": {
+  "verb": "p ɚ f ˈɛ k t s"
+ },
+ "perfume": {
+  "noun": "p ˈɜː f j uː m",
+  "verb": "p ɚ f j ˈuː m"
+ },
+ "permit": {
+  "noun": "p ˈɜː m ɪ t",
+  "verb": "p ɚ m ˈɪ t"
+ },
+ "permits": {
+  "noun": "p ˈɜː m ɪ t s",
+  "verb": "p ɚ m ˈɪ t s"
+ },
+ "pierre": {
+  "name": "p i ˈɛɹ",
+  "South Dakota": "p ˈɪɹ"
+ },
+ "polish": {
+  "of Poland": "p ˈoʊ l ɪ ʃ",
+  "shine": "p ˈɑː l ɪ ʃ"
+ },
+ "postulate": {
+  "noun": "p ˈɑː s tʃ ə l ə t",
+  "verb": "p ˈɑː s tʃ ə l ˌeɪ t"
+ },
+ "postulates": {
+  "noun": "p ˈɑː s tʃ ə l ə t s",
+  "verb": "p ˈɑː s tʃ ə l ˌeɪ t s"
+ },
+ "prayer": {
+  "words": "p ɹ ˈɛɹ",
+  "one who prays": "p ɹ ˈeɪ ɚ"
+ },
+ "precipitate": {
+  "adjective": "p ɹ ə s ˈɪ p ə t ə t",
+  "verb": "p ɹ ə s ˈɪ p ə t ˌeɪ t"
+ },
+ "predicate": {
+  "noun": "p ɹ ˈɛ d ə k ə t",
+  "verb": "p ɹ ˈɛ d ə k ˌeɪ t"
+ },
+ "present": {
+  "noun": "p ɹ ˈɛ z ə n t",
+  "adjective": "p ɹ ˈɛ z ə n t",
+  "verb": "p ɹ ɪ z ˈɛ n t"
+ },
+ "presents": {
+  "noun": "p ɹ ˈɛ z ə n t s",
+  "verb": "p ɹ ɪ z ˈɛ n t s"
+ },
+ "primer": {
+  "paint": "p ɹ ˈaɪ m ɚ",
+  "book": "p ɹ ˈɪ m ɚ"
+ },
+ "primers": {
+  "paint": "p ɹ ˈaɪ m ɚ z",
+  "book": "p ɹ ˈɪ m ɚ z"
+ },
+ "proceeds": {
+  "noun": "p ɹ ˈoʊ s iː d z",
+  "verb": "p ɹ ə s ˈiː d z"
+ },
+ "process": {
+  "noun": "p ɹ ˈɑː s ɛ s",
+  "verb": "p ɹ ə s ˈɛ s"
+ },
+ "processes": {
+  "noun": "p ɹ ˈɑː s ɛ s ə z",
+  "verb": "p ɹ ə s ˈɛ s ə z"
+ },
+ "produce": {
+  "noun": "p ɹ ˈoʊ d uː s",
+  "verb": "p ɹ ə d ˈuː s"
+ },
+ "progress": {
+  "noun": "p ɹ ˈɑː ɡ ɹ ɛ s",
+  "verb": "p ɹ ə ɡ ɹ ˈɛ s"
+ },
+ "progresses": {
+  "noun": "p ɹ ˈɑː ɡ ɹ ɛ s ə z",
+  "verb": "p ɹ ə ɡ ɹ ˈɛ s ə z"
+ },
+ "project": {
+  "noun": "p ɹ ˈɑː dʒ ɛ k t",
+  "verb": "p ɹ ə dʒ ˈɛ k t"
+ },
+ "projects": {
+  "noun": "p ɹ ˈɑː dʒ ɛ k t s",
+  "verb": "p ɹ ə dʒ ˈɛ k t s"
+ },
+ "proofread": {
+  "present": "p ɹ ˈuː f ɹ iː d",
+  "past": "p ɹ ˈuː f ɹ ɛ d"
+ },
+ "prospect": {
+  "noun": "p ɹ ˈɑː s p ɛ k t",
+  "verb": "p ɹ ə s p ˈɛ k t"
+ },
+ "prospects": {
+  "noun": "p ɹ ˈɑː s p ɛ k t s",
+  "verb": "p ɹ ə s p ˈɛ k t s"
+ },
+ "protest": {
+  "noun": "p ɹ ˈoʊ t ɛ s t",
+  "verb": "p ɹ ə t ˈɛ s t"
+ },
+ "protests": {
+  "noun": "p ɹ ˈoʊ t ɛ s t s",
+  "verb": "p ɹ ə t ˈɛ s t s"
+ },
+ "purport": {
+  "noun": "p ˈɜː p ɔːɹ t",
+  "verb": "p ɚ p ˈɔːɹ t"
+ },
+ "purports": {
+  "noun": "p ˈɜː p ɔːɹ t s",
+  "verb": "p ɚ p ˈɔːɹ t s"
+ },
+ "putter": {
+  "golf club or tinker": "p ˈʌ ɾ ɚ",
+  "one who puts": "p ˈʊ ɾ ɚ"
+ },
+ "putting": {
+  "placing": "p ˈʊ ɾ ɪ ŋ",
+  "golf": "p ˈʌ ɾ ɪ ŋ"
+ },
+ "pâté": {
+  "food": "p ɑː t ˈeɪ"
+ },
+ "ragged": {
+  "verb": "ɹ ˈæ ɡ d",
+  "adjective": "ɹ ˈæ ɡ ə d"
+ },
+ "ravening": {
+  "hungry": "ɹ ˈæ v ə n ɪ ŋ"
+ },
+ "re-cover": {
+  "again": "ɹ iː k ˈʌ v ɚ"
+ },
+ "re-covered": {
+  "again": "ɹ iː k ˈʌ v ɚ d"
+ },
+ "re-creation": {
+  "again": "ɹ ˌiː k ɹ iː ˈeɪ ʃ ə n"
+ },
+ "re-form": {
+  "again": "ɹ iː f ˈɔːɹ m"
+ },
+ "re-formed": {
+  "again": "ɹ iː f ˈɔːɹ m d"
+ },
+ "re-sign": {
+  "again": "ɹ iː s ˈaɪ n"
+ },
+ "re-signed": {
+  "again": "ɹ iː s ˈaɪ n d"
+ },
+ "re-sort": {
+  "again": "ɹ iː s ˈɔːɹ t"
+ },
+ "read": {
+  "present": "ɹ ˈiː d",
+  "past": "ɹ ˈɛ d"
+ },
+ "reading": {
+  "from read": "ɹ ˈiː d ɪ ŋ",
+  "place": "ɹ ˈɛ d ɪ ŋ"
+ },
+ "real": {
+  "true": "ɹ ˈiː ə l",
+  "Brazilian currency": "ɹ eɪ ˈɑː l"
+ },
+ "rebel": {
+  "noun": "ɹ ˈɛ b ə l",
+  "verb": "ɹ ə b ˈɛ l"
+ },
+ "rebels": {
+  "noun": "ɹ ˈɛ b ə l z",
+  "verb": "ɹ ə b ˈɛ l z"
+ },
+ "rebound": {
+  "noun": "ɹ ˈiː b aʊ n d",
+  "verb": "ɹ ə b ˈaʊ n d"
+ },
+ "rebounds": {
+  "noun": "ɹ ˈiː b aʊ n d z",
+  "verb": "ɹ ə b ˈaʊ n d z"
+ },
+ "recall": {
+  "noun": "ɹ ˈiː k ɔː l",
+  "verb": "ɹ ə k ˈɔː l"
+ },
+ "recalls": {
+  "noun": "ɹ ˈiː k ɔː l z",
+  "verb": "ɹ ə k ˈɔː l z"
+ },
+ "recoil": {
+  "noun": "ɹ ˈiː k ɔɪ l",
+  "verb": "ɹ ə k ˈɔɪ l"
+ },
+ "recoils": {
+  "noun": "ɹ ˈiː k ɔɪ l z",
+  "verb": "ɹ ə k ˈɔɪ l z"
+ },
+ "record": {
+  "noun": "ɹ ˈɛ k ɚ d",
+  "verb": "ɹ ə k ˈɔːɹ d"
+ },
+ "records": {
+  "noun": "ɹ ˈɛ k ɚ d z",
+  "verb": "ɹ ə k ˈɔːɹ d z"
+ },
+ "recount": {
+  "noun": "ɹ ˈiː k aʊ n t",
+  "verb": "ɹ ə k ˈaʊ n t"
+ },
+ "recounts": {
+  "noun": "ɹ ˈiː k aʊ n t s",
+  "verb": "ɹ ə k ˈaʊ n t s"
+ },
+ "recover": {
+  "get well or back": "ɹ ə k ˈʌ v ɚ"
+ },
+ "recovered": {
+  "get well or back": "ɹ ə k ˈʌ v ɚ d"
+ },
+ "recreation": {
+  "play": "ɹ ˌɛ k ɹ iː ˈeɪ ʃ ə n"
+ },
+ "redress": {
+  "noun": "ɹ ˈiː d ɹ ɛ s",
+  "verb": "ɹ ə d ɹ ˈɛ s"
+ },
+ "refill": {
+  "noun": "ɹ ˈiː f ɪ l",
+  "verb": "ɹ iː f ˈɪ l"
+ },
+ "refills": {
+  "noun": "ɹ ˈiː f ɪ l z",
+  "verb": "ɹ iː f ˈɪ l z"
+ },
+ "reform": {
+  "improve": "ɹ ə f ˈɔːɹ m"
+ },
+ "reformed": {
+  "improve": "ɹ ə f ˈɔːɹ m d"
+ },
+ "refund": {
+  "noun": "ɹ ˈiː f ʌ n d",
+  "verb": "ɹ ə f ˈʌ n d"
+ },
+ "refunds": {
+  "noun": "ɹ ˈiː f ʌ n d z",
+  "verb": "ɹ ə f ˈʌ n d z"
+ },
+ "refuse": {
+  "noun": "ɹ ˈɛ f j uː s",
+  "verb": "ɹ ə f j ˈuː z"
+ },
+ "reject": {
+  "noun": "ɹ ˈiː dʒ ɛ k t",
+  "verb": "ɹ ə dʒ ˈɛ k t"
+ },
+ "rejects": {
+  "noun": "ɹ ˈiː dʒ ɛ k t s",
+  "verb": "ɹ ə dʒ ˈɛ k t s"
+ },
+ "relay": {
+  "noun": "ɹ ˈiː l eɪ",
+  "verb": "ɹ iː l ˈeɪ"
+ },
+ "relays": {
+  "noun": "ɹ ˈiː l eɪ z",
+  "verb": "ɹ iː l ˈeɪ z"
+ },
+ "remake": {
+  "noun": "ɹ ˈiː m eɪ k",
+  "verb": "ɹ iː m ˈeɪ k"
+ },
+ "remakes": {
+  "noun": "ɹ ˈiː m eɪ k s",
+  "verb": "ɹ iː m ˈeɪ k s"
+ },
+ "replay": {
+  "noun": "ɹ ˈiː p l eɪ",
+  "verb": "ɹ iː p l ˈeɪ"
+ },
+ "replays": {
+  "noun": "ɹ ˈiː p l eɪ z",
+  "verb": "ɹ iː p l ˈeɪ z"
+ },
+ "reprint": {
+  "noun": "ɹ ˈiː p ɹ ɪ n t",
+  "verb": "ɹ iː p ɹ ˈɪ n t"
+ },
+ "reprints": {
+  "noun": "ɹ ˈiː p ɹ ɪ n t s",
+  "verb": "ɹ iː p ɹ ˈɪ n t s"
+ },
+ "reread": {
+  "present": "ɹ iː ɹ ˈiː d",
+  "past": "ɹ iː ɹ ˈɛ d"
+ },
+ "rerun": {
+  "noun": "ɹ ˈiː ɹ ʌ n",
+  "verb": "ɹ iː ɹ ˈʌ n"
+ },
+ "reruns": {
+  "noun": "ɹ ˈiː ɹ ʌ n z",
+  "verb": "ɹ iː ɹ ˈʌ n z"
+ },
+ "research": {
+  "noun": "ɹ ˈiː s ɜː tʃ",
+  "verb": "ɹ ə s ˈɜː tʃ"
+ },
+ "resent": {
+  "begrudge": "ɹ ɪ z ˈɛ n t",
+  "sent again": "ɹ iː s ˈɛ n t"
+ },
+ "reset": {
+  "noun": "ɹ ˈiː s ɛ t",
+  "verb": "ɹ iː s ˈɛ t"
+ },
+ "resets": {
+  "noun": "ɹ ˈiː s ɛ t s",
+  "verb": "ɹ iː s ˈɛ t s"
+ },
+ "resign": {
+  "quit": "ɹ ɪ z ˈaɪ n"
+ },
+ "resigned": {
+  "quit": "ɹ ɪ z ˈaɪ n d"
+ },
+ "resort": {
+  "holiday place or turn to": "ɹ ə z ˈɔːɹ t"
+ },
+ "resume": {
+  "verb": "ɹ ə z ˈuː m",
+  "CV": "ɹ ˈɛ z uː m ˌeɪ"
+ },
+ "resumes": {
+  "verb": "ɹ ə z ˈuː m z",
+  "CV": "ɹ ˈɛ z uː m ˌeɪ z"
+ },
+ "retake": {
+  "noun": "ɹ ˈiː t eɪ k",
+  "verb": "ɹ iː t ˈeɪ k"
+ },
+ "retakes": {
+  "noun": "ɹ ˈiː t eɪ k s",
+  "verb": "ɹ iː t ˈeɪ k s"
+ },
+ "reuse": {
+  "noun": "ɹ iː j ˈuː s",
+  "verb": "ɹ iː j ˈuː z"
+ },
+ "reuses": {
+  "noun": "ɹ iː j ˈuː s ə z",
+  "verb": "ɹ iː j ˈuː z ə z"
+ },
+ "rewrite": {
+  "noun": "ɹ ˈiː ɹ aɪ t",
+  "verb": "ɹ iː ɹ ˈaɪ t"
+ },
+ "rewrites": {
+  "noun": "ɹ ˈiː ɹ aɪ t s",
+  "verb": "ɹ iː ɹ ˈaɪ t s"
+ },
+ "rodeo": {
+  "cowboy event": "ɹ ˈoʊ d i oʊ",
+  "Rodeo Drive": "ɹ oʊ d ˈeɪ oʊ"
+ },
+ "rose": {
+  "flower or past of rise": "ɹ ˈoʊ z",
+  "wine": "ɹ oʊ z ˈeɪ"
+ },
+ "rosé": {
+  "wine": "ɹ oʊ z ˈeɪ"
+ },
+ "row": {
+  "line or oar": "ɹ ˈoʊ",
+  "quarrel": "ɹ ˈaʊ"
+ },
+ "rowing": {
+  "line or oar": "ɹ ˈoʊ ɪ ŋ",
+  "quarrel": "ɹ ˈaʊ ɪ ŋ"
+ },
+ "rows": {
+  "line or oar": "ɹ ˈoʊ z",
+  "quarrel": "ɹ ˈaʊ z"
+ },
+ "résumé": {
+  "noun": "ɹ ˈɛ z uː m ˌeɪ"
+ },
+ "sake": {
+  "behalf": "s ˈeɪ k",
+  "rice wine": "s ˈɑː k i"
+ },
+ "segment": {
+  "noun": "s ˈɛ ɡ m ə n t",
+  "verb": "s ɛ ɡ m ˈɛ n t"
+ },
+ "segments": {
+  "noun": "s ˈɛ ɡ m ə n t s",
+  "verb": "s ɛ ɡ m ˈɛ n t s"
+ },
+ "separate": {
+  "adjective": "s ˈɛ p ɹ ə t",
+  "verb": "s ˈɛ p ɚ ɹ ˌeɪ t"
+ },
+ "separates": {
+  "noun": "s ˈɛ p ɹ ə t s",
+  "verb": "s ˈɛ p ɚ ɹ ˌeɪ t s"
+ },
+ "sewer": {
+  "drain": "s ˈuː ɚ",
+  "one who sews": "s ˈoʊ ɚ"
+ },
+ "sewers": {
+  "drain": "s ˈuː ɚ z",
+  "one who sews": "s ˈoʊ ɚ z"
+ },
+ "she": {
+  "weak": "ʃ iː",
+  "strong": "ʃ ˈiː"
+ },
+ "should": {
+  "weak": "ʃ ə d",
+  "strong": "ʃ ˈʊ d"
+ },
+ "shower": {
+  "water": "ʃ ˈaʊ ɚ",
+  "one who shows": "ʃ ˈoʊ ɚ"
+ },
+ "showers": {
+  "water": "ʃ ˈaʊ ɚ z"
+ },
+ "skied": {
+  "past of ski": "s k ˈiː d",
+  "past of sky (hit high)": "s k ˈaɪ d"
+ },
+ "slaver": {
+  "drool": "s l ˈæ v ɚ",
+  "trader": "s l ˈeɪ v ɚ"
+ },
+ "slough": {
+  "shed": "s l ˈʌ f",
+  "swamp": "s l ˈuː"
+ },
+ "so": {
+  "weak": "s ˌoʊ",
+  "strong": "s ˈoʊ"
+ },
+ "some": {
+  "weak": "s ə m",
+  "strong": "s ˈʌ m"
+ },
+ "sow": {
+  "plant": "s ˈoʊ",
+  "pig": "s ˈaʊ"
+ },
+ "sows": {
+  "plant": "s ˈoʊ z",
+  "pig": "s ˈaʊ z"
+ },
+ "subject": {
+  "noun": "s ˈʌ b dʒ ɛ k t",
+  "verb": "s ə b dʒ ˈɛ k t",
+  "adjective": "s ˈʌ b dʒ ɛ k t"
+ },
+ "subordinate": {
+  "noun": "s ə b ˈɔːɹ d ə n ə t",
+  "verb": "s ə b ˈɔːɹ d ə n ˌeɪ t"
+ },
+ "subordinates": {
+  "noun": "s ə b ˈɔːɹ d ə n ə t s",
+  "verb": "s ə b ˈɔːɹ d ə n ˌeɪ t s"
+ },
+ "supplement": {
+  "noun": "s ˈʌ p l ə m ə n t",
+  "verb": "s ˈʌ p l ə m ˌɛ n t"
+ },
+ "supplements": {
+  "noun": "s ˈʌ p l ə m ə n t s",
+  "verb": "s ˈʌ p l ə m ˌɛ n t s"
+ },
+ "supply": {
+  "noun": "s ə p l ˈaɪ",
+  "verb": "s ə p l ˈaɪ",
+  "adverb": "s ˈʌ p l i"
+ },
+ "supposed": {
+  "past of suppose": "s ə p ˈoʊ z d",
+  "adjective (alleged)": "s ə p ˈoʊ z ə d",
+  "supposed to": "s ə p ˈoʊ s t"
+ },
+ "surrogate": {
+  "noun": "s ˈɜː ɹ ə ɡ ə t",
+  "verb": "s ˈɜː ɹ ə ɡ ˌeɪ t"
+ },
+ "survey": {
+  "noun": "s ˈɜː v eɪ",
+  "verb": "s ɚ v ˈeɪ"
+ },
+ "surveys": {
+  "noun": "s ˈɜː v eɪ z",
+  "verb": "s ɚ v ˈeɪ z"
+ },
+ "suspect": {
+  "noun": "s ˈʌ s p ɛ k t",
+  "verb": "s ə s p ˈɛ k t",
+  "adjective": "s ˈʌ s p ɛ k t"
+ },
+ "suspects": {
+  "noun": "s ˈʌ s p ɛ k t s",
+  "verb": "s ə s p ˈɛ k t s"
+ },
+ "syndicate": {
+  "noun": "s ˈɪ n d ə k ə t",
+  "verb": "s ˈɪ n d ə k ˌeɪ t"
+ },
+ "tarry": {
+  "delay": "t ˈæ ɹ i",
+  "like tar": "t ˈɑːɹ i"
+ },
+ "tear": {
+  "rip": "t ˈɛɹ",
+  "cry": "t ˈɪɹ"
+ },
+ "tearing": {
+  "rip": "t ˈɛ ɹ ɪ ŋ",
+  "cry": "t ˈɪ ɹ ɪ ŋ"
+ },
+ "tears": {
+  "rip": "t ˈɛɹ z",
+  "cry": "t ˈɪɹ z"
+ },
+ "than": {
+  "weak": "ð ə n"
+ },
+ "that": {
+  "conjunction": "ð ə t",
+  "demonstrative": "ð ˈæ t"
+ },
+ "the": {
+  "before consonant": "ð ə",
+  "before vowel": "ð ɪ",
+  "strong": "ð ˈiː"
+ },
+ "them": {
+  "weak": "ð ə m",
+  "strong": "ð ˈɛ m"
+ },
+ "there": {
+  "existential": "ð ɚ",
+  "place": "ð ˈɛɹ"
+ },
+ "to": {
+  "weak": "t ə",
+  "before vowel": "t ʊ",
+  "strong": "t ˈuː"
+ },
+ "torment": {
+  "noun": "t ˈɔːɹ m ɛ n t",
+  "verb": "t ɔːɹ m ˈɛ n t"
+ },
+ "torments": {
+  "noun": "t ˈɔːɹ m ɛ n t s",
+  "verb": "t ɔːɹ m ˈɛ n t s"
+ },
+ "tower": {
+  "building": "t ˈaʊ ɚ",
+  "one who tows": "t ˈoʊ ɚ"
+ },
+ "towers": {
+  "building": "t ˈaʊ ɚ z"
+ },
+ "transfer": {
+  "noun": "t ɹ ˈæ n s f ɜː",
+  "verb": "t ɹ æ n s f ˈɜː"
+ },
+ "transfers": {
+  "noun": "t ɹ ˈæ n s f ɜː z",
+  "verb": "t ɹ æ n s f ˈɜː z"
+ },
+ "transform": {
+  "noun": "t ɹ ˈæ n s f ɔːɹ m",
+  "verb": "t ɹ æ n s f ˈɔːɹ m"
+ },
+ "transforms": {
+  "noun": "t ɹ ˈæ n s f ɔːɹ m z",
+  "verb": "t ɹ æ n s f ˈɔːɹ m z"
+ },
+ "transplant": {
+  "noun": "t ɹ ˈæ n s p l æ n t",
+  "verb": "t ɹ æ n s p l ˈæ n t"
+ },
+ "transplants": {
+  "noun": "t ɹ ˈæ n s p l æ n t s",
+  "verb": "t ɹ æ n s p l ˈæ n t s"
+ },
+ "transport": {
+  "noun": "t ɹ ˈæ n s p ɔːɹ t",
+  "verb": "t ɹ æ n s p ˈɔːɹ t"
+ },
+ "transports": {
+  "noun": "t ɹ ˈæ n s p ɔːɹ t s",
+  "verb": "t ɹ æ n s p ˈɔːɹ t s"
+ },
+ "undercut": {
+  "noun": "ˈʌ n d ɚ k ʌ t",
+  "verb": "ˌʌ n d ɚ k ˈʌ t"
+ },
+ "undercuts": {
+  "noun": "ˈʌ n d ɚ k ʌ t s",
+  "verb": "ˌʌ n d ɚ k ˈʌ t s"
+ },
+ "underestimate": {
+  "noun": "ˌʌ n d ɚ ɹ ˈɛ s t ə m ə t",
+  "verb": "ˌʌ n d ɚ ɹ ˈɛ s t ə m ˌeɪ t"
+ },
+ "underestimates": {
+  "noun": "ˌʌ n d ɚ ɹ ˈɛ s t ə m ə t s",
+  "verb": "ˌʌ n d ɚ ɹ ˈɛ s t ə m ˌeɪ t s"
+ },
+ "unionized": {
+  "labor": "j ˈuː n i ə n ˌaɪ z d",
+  "not ionized": "ʌ n ˈaɪ ə n ˌaɪ z d"
+ },
+ "unused": {
+  "not used": "ʌ n j ˈuː z d",
+  "unaccustomed": "ʌ n j ˈuː s t"
+ },
+ "update": {
+  "noun": "ˈʌ p d eɪ t",
+  "verb": "ʌ p d ˈeɪ t"
+ },
+ "updates": {
+  "noun": "ˈʌ p d eɪ t s",
+  "verb": "ʌ p d ˈeɪ t s"
+ },
+ "upgrade": {
+  "noun": "ˈʌ p ɡ ɹ eɪ d",
+  "verb": "ʌ p ɡ ɹ ˈeɪ d"
+ },
+ "upgrades": {
+  "noun": "ˈʌ p ɡ ɹ eɪ d z",
+  "verb": "ʌ p ɡ ɹ ˈeɪ d z"
+ },
+ "uplift": {
+  "noun": "ˈʌ p l ɪ f t",
+  "verb": "ʌ p l ˈɪ f t"
+ },
+ "uplifts": {
+  "noun": "ˈʌ p l ɪ f t s",
+  "verb": "ʌ p l ˈɪ f t s"
+ },
+ "upset": {
+  "noun": "ˈʌ p s ɛ t",
+  "verb": "ʌ p s ˈɛ t",
+  "adjective": "ʌ p s ˈɛ t"
+ },
+ "upsets": {
+  "noun": "ˈʌ p s ɛ t s",
+  "verb": "ʌ p s ˈɛ t s"
+ },
+ "us": {
+  "weak": "ə s",
+  "strong": "ˈʌ s"
+ },
+ "use": {
+  "noun": "j ˈuː s",
+  "verb": "j ˈuː z",
+  "habitual (did use to)": "j ˈuː s"
+ },
+ "used": {
+  "past of use": "j ˈuː z d",
+  "habitual or accustomed": "j ˈuː s t"
+ },
+ "uses": {
+  "noun": "j ˈuː s ə z",
+  "verb": "j ˈuː z ə z"
+ },
+ "viola": {
+  "instrument": "v i ˈoʊ l ə",
+  "name or flower": "v aɪ ˈoʊ l ə"
+ },
+ "was": {
+  "weak": "w ə z",
+  "strong": "w ˈʌ z"
+ },
+ "were": {
+  "weak": "w ɚ",
+  "strong": "w ˈɜː"
+ },
+ "wicked": {
+  "verb": "w ˈɪ k t",
+  "adjective": "w ˈɪ k ə d"
+ },
+ "will": {
+  "weak": "w ɪ l",
+  "strong": "w ˈɪ l",
+  "noun": "w ˈɪ l"
+ },
+ "wind": {
+  "noun": "w ˈɪ n d",
+  "verb": "w ˈaɪ n d"
+ },
+ "winds": {
+  "noun": "w ˈɪ n d z",
+  "verb": "w ˈaɪ n d z"
+ },
+ "won": {
+  "past of win": "w ˈʌ n",
+  "Korean currency": "w ˈɑː n"
+ },
+ "worsted": {
+  "yarn": "w ˈʊ s t ɪ d",
+  "defeated": "w ˈɜː s t ɪ d"
+ },
+ "would": {
+  "weak": "w ə d",
+  "strong": "w ˈʊ d"
+ },
+ "wound": {
+  "injury": "w ˈuː n d",
+  "past of wind": "w ˈaʊ n d"
+ },
+ "you": {
+  "weak": "j ə",
+  "strong": "j ˈuː"
+ },
+ "your": {
+  "weak": "j ɚ",
+  "strong": "j ˈʊɹ"
+ }
+}

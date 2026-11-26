@@ -11,7 +11,7 @@ Per utterance:
    from its own onset to the next phone's onset.
 3. Silence is found from signal energy at acoustic resolution and given to the
    explicit pause-capable token at that position (BOS, EOS, punctuation, word
-   boundary). Tokens without a pause get zero frames.
+   boundary), from after the phone's last emission on. Tokens without a pause get zero frames.
 4. Durations are counted on the acoustic frame grid, so they sum to the frame
    count exactly and every phoneme has at least one frame.
 """
@@ -26,7 +26,7 @@ ALIGNER_MODEL = "lexide phonetizer (wav2vec2-phoneme batch endpoint frame matrix
 ALIGNER_RATE = 16000
 ALIGNER_STRIDE = 320          # samples at 16 kHz: 20 ms
 ALIGNER_CENTER = 200          # a frame's centre: 12.5 ms after its start
-ALIGNMENT_VERSION = 3
+ALIGNMENT_VERSION = 4     # 4: a phone holds until its last emission (a stop's release is not the pause after its closure)
 PAUSING = (",", ".", "?", "!", ";", ":", "—", "…")
 
 
@@ -162,6 +162,11 @@ def assemble(symbols, spans, frames, silent, hop, sample_rate, settings):
         keep[k] = max(keep[k], keep[k - 1] + 1)
     if keep[-1] > frames - 1:
         raise ValueError("audio is too short for this phoneme sequence")
+    # ... and a phone the recognizer still hears later holds until then: the closure of a final stop is quiet, its
+    # release is not, and the pause (or the end of the sentence) starts after the release.
+    last = np.array([b for _, b in spans], dtype=np.float64) * stride
+    held = np.clip(np.round((last + ALIGNER_CENTER / ALIGNER_RATE) * sample_rate / hop).astype(np.int64), keep, frames - 1)
+    held[:-1] = np.minimum(held[:-1], keep[1:] - 1)
     starts = np.minimum(np.searchsorted(seconds, emission + settings.onset_offset_seconds, side="left"), keep)
     starts[0] = 0
     for k in range(1, count):
@@ -176,18 +181,18 @@ def assemble(symbols, spans, frames, silent, hop, sample_rate, settings):
     quiet = np.flatnonzero(silent[:keep[0]])
     if quiet.size:                                      # leading silence -> BOS
         token[:quiet[-1] + 1] = 0
-    quiet = np.flatnonzero(silent[keep[-1] + 1:]) + keep[-1] + 1
+    quiet = np.flatnonzero(silent[held[-1] + 1:]) + held[-1] + 1
     if quiet.size:                                      # trailing silence -> EOS
         token[quiet[0]:] = len(symbols) - 1
     for k in range(count - 1):                          # interior pauses -> pause-capable token
         left, right = phones[k], phones[k + 1]
         if right == left + 1:
             continue
-        quiet = np.flatnonzero(silent[keep[k] + 1:keep[k + 1]]) + keep[k] + 1
+        quiet = np.flatnonzero(silent[held[k] + 1:keep[k + 1]]) + held[k] + 1
         punctuated = any(symbols[i] in PUNCTUATION for i in range(left + 1, right))
         if quiet.size < (settings.punctuation_min_pause_frames if punctuated else settings.min_pause_frames):
             continue
-        token[keep[k] + 1:quiet[0]] = left
+        token[held[k] + 1:quiet[0]] = left
         token[quiet[0]:quiet[-1] + 1] = pause_carrier(symbols, range(left + 1, right))
         token[quiet[-1] + 1:keep[k + 1]] = right
     if np.any(np.diff(token) < 0):

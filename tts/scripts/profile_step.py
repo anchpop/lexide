@@ -4,11 +4,10 @@ Reports wall time per step and how much of it the GPU was busy, then the top
 operations by CPU and CUDA time. Run on the GPU you plan to train on:
 
     python scripts/profile_step.py --config configs/styletts.json \
-        --train features/eng_gemini_multi_v1/train.jsonl --texts features/eng_phonebert_v4/train.pt --gan
+        --train features/eng_gemini_10h/train.jsonl --gan
 """
 
 import argparse
-import dataclasses
 import json
 import time
 from pathlib import Path
@@ -16,7 +15,7 @@ import torch
 from torch.profiler import ProfilerActivity, profile
 
 from voca.config import Config
-from voca.data import AnnotatedDataset, BucketSampler, OwnTexts, collate, pin, prefetch
+from voca.data import AnnotatedDataset, BucketSampler, collate, pin, prefetch
 from voca.train import TRAINING_SYSTEMS, GraphedSteps, adamw, optimize_step, update_ema
 
 
@@ -24,7 +23,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--train", type=Path, required=True)
-    parser.add_argument("--texts", type=Path, help="styletts: the own-timing pass's sentences")
     parser.add_argument("--batch-frames", type=int, default=9000)
     parser.add_argument("--max-batch", type=int, default=32)
     parser.add_argument("--gan", action="store_true", help="Profile the adversarial phase")
@@ -37,7 +35,6 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     c = Config.from_dict(json.loads(args.config.read_text()))
-    c = dataclasses.replace(c, speakers=tuple(sorted({json.loads(line)["speaker"] for line in args.train.open(encoding="utf-8")})))
     data = AnnotatedDataset(args.train, c, voiced_vowels=True)
     pool = list(range(min(len(data), 2000)))
     data.preload(pool)
@@ -47,7 +44,7 @@ def main():
     critic_optimizer = adamw([{"params": list(critics.parameters())}], "cuda", lr=1e-4, betas=(0.8, 0.99), weight_decay=0.0)
     sampler = BucketSampler([data.lengths[i] for i in pool], [data.token_counts[i] for i in pool], [data.speakers[i] for i in pool],
                             args.batch_frames, args.max_batch, 0, alpha=1.0)
-    recipe = dict(weights=system.WEIGHTS, learning_rate=1e-4, warmup=1, lr_half_life=1e5, gan_start=8000,
+    recipe = dict(weights=system.WEIGHTS, learning_rate=1e-4, warmup=1, lr_half_life=1e5, grad_clip=10.0, gan_start=8000,
                   gan_ratio=0.7, gan_ramp=3000, gan_scale_max=2000.0, crop_samples=8192, crops=2, feature_matching=system.FEATURE_MATCHING,
                   teacher_hold=3000, teacher_ramp=7000, teacher_final=0.0, word_teacher_hold=500, word_teacher_ramp=2000,
                   fixed_style_hold=2000, fixed_style_ramp=12000,
@@ -59,12 +56,9 @@ def main():
     else:
         step_fn = lambda batch, step: optimize_step(system, critics, optimizer, critic_optimizer, batch, step, recipe)
 
-    texts = OwnTexts(args.texts) if args.texts else None
-
     def draw():
         indices, shape = sampler.next()
-        batch = collate([data[pool[j]] for j in indices], shape)
-        return pin(texts.add(batch, sampler.generator) if texts else batch)
+        return pin(collate([data[pool[j]] for j in indices], shape))
     batches = prefetch(draw)
     clock = {"step": 20000 if args.gan else 5000}
 

@@ -51,8 +51,8 @@ from .config import Config
 from .data import SHAPES
 from .model import Voca, length_mask, position_in_token
 
+DURATION_ENCODER_DROPOUT, DURATION_DROPOUT = 0.2, 0.5     # StyleTTS 2's, in training only: between the encoder's LSTMs, before the lengths
 WORD_SEMITONES = 6.0                     # the word head's pitch outputs are in units of this many semitones
-WORD_GRADIENT = 0.1                      # share of the downstream losses' gradient that reaches the word head through its features
 WORD_FEATURES = 1 + len(SHAPES) + 2      # word_features: prominence, shape probabilities, excursion, final movement
 
 # run_lstm passes each direction's weights separately; compacting these small tensors per call is cheap.
@@ -95,18 +95,6 @@ def istft(spectrum, fft, hop, window):
 def frames_of(values, index):
     """values [B, N, C] per token, index [B, F] owning token -> [B, F, C] (``t_en @ alignment``)."""
     return values.gather(1, index[..., None].expand(-1, -1, values.shape[-1]))
-
-
-def moving_frames(values, durations, soft, index, width=2.0):
-    """``frames_of(values, index)`` with a gradient for the durations: the integer
-    ``durations`` [B, N] decide the value (what ships), and the gradient of ``soft`` [B, N], their continuous
-    counterpart, is that of moving each token's boundaries, its states blending into its neighbours'
-    over about ``width`` frames. ``values`` get their gradient from the hard repetition only."""
-    ends = (durations + (soft - soft.detach())).cumsum(1)
-    frame = torch.arange(index.shape[1], device=index.device)[:, None] + 0.5
-    past = torch.sigmoid((frame - F.pad(ends, (1, 0))[:, None]) / width)     # [B, F, N + 1]: is this frame past the boundary
-    blend = (past[..., :-1] - past[..., 1:]).to(values.dtype) @ values.detach()
-    return frames_of(values, index) + (blend - blend.detach())
 
 
 class AdaIN1d(nn.Module):
@@ -201,7 +189,8 @@ class DurationEncoder(nn.Module):
         s = style[:, None].expand(-1, x.shape[1], -1)
         x = torch.cat((x, s), dim=-1) * mask[..., None]
         for i, norm in enumerate(self.norms):
-            x = torch.cat((norm(run_lstm(self.lstms[i % len(self.lstms)], x, lengths), style), s), dim=-1) * mask[..., None]
+            x = F.dropout(run_lstm(self.lstms[i % len(self.lstms)], x, lengths), DURATION_ENCODER_DROPOUT, self.training)
+            x = torch.cat((norm(x, style), s), dim=-1) * mask[..., None]
         return x
 
 
@@ -275,13 +264,13 @@ class ProsodyPredictor(nn.Module):
         targets [B, W, 4], [B] whether to use them): where measured, the recording's word features replace the predicted ones."""
         d = self.text_encoder(text, style, lengths, mask)
         outputs = self.words(torch.cat((text, d), dim=-1), words)
-        # The word head learns from its own targets, and a little from what its features do downstream.
-        features = word_features(outputs.detach() + WORD_GRADIENT * (outputs - outputs.detach()), words)
+        features = word_features(outputs.detach(), words)    # the word head learns only from its own targets
         if teacher is not None:
             values, measured = target_features(teacher[0], words)
             features = torch.where(measured & teacher[1][:, None, None], values, features)
         states = torch.cat((d, words.spread(features).to(d.dtype)), dim=-1)
-        return states, self.duration_proj(run_lstm(self.lstm, states, lengths)), outputs
+        timing = F.dropout(run_lstm(self.lstm, states, lengths), DURATION_DROPOUT, self.training)
+        return states, self.duration_proj(timing), outputs
 
     def F0Ntrain(self, frames, style, lengths):
         """Repeated token states with positions [B, F, d + s + WORD_FEATURES + 3] -> [B, F, 3] pitch, voicing
@@ -518,6 +507,71 @@ class StyleEncoder(nn.Module):
         return self.unshared(self.shared(mel).flatten(1))
 
 
+class Reading(nn.Module):
+    """A distribution over a sentence's delivery: token features [B, N, inputs] and the voice -> mean and log standard deviation [B, Delivery.SIZE]."""
+
+    def __init__(self, inputs, voices, channels=96):
+        super().__init__()
+        self.input, self.voices = nn.Linear(inputs, channels), nn.Embedding(voices, channels)
+        self.convs = nn.ModuleList(nn.Conv1d(channels, channels, 5, padding=2 * d, dilation=d) for d in (1, 2, 4))
+        self.attention, self.output = nn.Linear(channels, 1), nn.Linear(channels, 2 * Delivery.SIZE)
+        nn.init.zeros_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
+
+    def forward(self, x, speakers, mask):
+        keep = mask[:, None]
+        x = (self.input(x) + self.voices(speakers)[:, None]).transpose(1, 2) * keep
+        for conv in self.convs:
+            x = (x + F.gelu(conv(x))) * keep
+        share = self.attention(x.transpose(1, 2)).float().masked_fill(~mask[..., None], -torch.inf).softmax(1).to(x.dtype)
+        mean, spread = self.output((x * share.transpose(1, 2)).sum(-1)).float().chunk(2, dim=-1)
+        return mean, 2 * torch.tanh(spread / 2)
+
+
+class Delivery(nn.Module):
+    """How a sentence is said beyond its words: a vector drawn anew for every sentence, which the whole prosody
+    predictor reads (StyleTTS 2's prosodic style, ours drawn by a conditional VAE instead of diffusion). Ships:
+    the ``prior``, what deliveries suit a text in a voice, and the projection to the predictor's style. Training draws
+    from the posterior, which has heard the recording (``StyleTrainingSystem.heard``): one text has several
+    valid deliveries, and a predictor that has to guess among them learns their average."""
+
+    SIZE = 16
+
+    def __init__(self, c):
+        super().__init__()
+        self.prior = Reading(c.style_prosody_channels, len(c.speakers))
+        self.voices = nn.Embedding(len(c.speakers), c.style_dim)
+        self.project = nn.Sequential(nn.Linear(self.SIZE + c.style_dim, c.style_dim), nn.GELU(), nn.Linear(c.style_dim, c.style_dim))
+
+    def style(self, z, speakers):
+        return self.project(torch.cat((z.to(self.voices.weight.dtype), self.voices(speakers)), dim=-1))
+
+    @staticmethod
+    def draw(reading, variety=1.0, generator=None):
+        mean, spread = reading
+        return mean + variety * spread.exp() * torch.randn(mean.shape, generator=generator, device=mean.device)
+
+
+def reading_divergence(posterior, prior):
+    """KL(posterior || prior) of two diagonal Gaussians (mean, log standard deviation), in nats per sentence [B]."""
+    (a, s), (b, t) = posterior, prior
+    return (t - s + ((2 * s).exp() + (a - b).square()) / (2 * (2 * t).exp()) - 0.5).sum(-1)
+
+
+def recorded_delivery(durations, prosody, index, frame_mask):
+    """[B, N, 5] per token, how a recording says it: log length, whether it is said at all, the mean and slope of
+    its log pitch and its mean energy, from prosody [B, F, 3] (log pitch, voicing, energy)."""
+    relative = position_in_token(durations, index, torch.arange(index.shape[1], device=index.device)[None])[..., 0] - 0.5
+    weight = frame_mask.float()
+
+    def tokens(value):
+        return torch.zeros(durations.shape, device=value.device).scatter_add(1, index, value * weight)
+    count = tokens(torch.ones_like(weight)).clamp_min(1)
+    mean = tokens(prosody[..., 0]) / count
+    slope = tokens(relative * (prosody[..., 0] - frames_of(mean[..., None], index)[..., 0])) / tokens(relative.square()).clamp_min(1e-2)
+    return torch.stack((torch.log1p(durations.float()), (durations > 0).float(), 4 * mean, slope, tokens(prosody[..., 2]) / count), dim=-1)
+
+
 class StyleVoca(Voca):
     PARAMETER_BUDGET = 30_000_000
 
@@ -531,18 +585,29 @@ class StyleVoca(Voca):
         if c.phoneme_encoder_layers:
             from .phonebert import PhoneEncoder, encoder_config
             self.bert = PhoneEncoder(encoder_config(c.phoneme_encoder_width, c.phoneme_encoder_heads, c.phoneme_encoder_feedforward,
-                                                    c.dropout), c.phoneme_encoder_layers, c.phoneme_encoder_distinct)
+                                                    c.dropout), c.phoneme_encoder_layers, c.phoneme_encoder_distinct, c.front_layers)
         self.bert_encoder = nn.Linear(c.phoneme_encoder_width if self.bert else c.channels, c.style_prosody_channels)
         self.predictor = ProsodyPredictor(c)
         self.decoder = Decoder(c)
-        # Per voice: the mean [acoustic | prosodic] style of the training clips, what inference uses.
-        self.register_buffer("style", torch.zeros(len(c.speakers), 2 * c.style_dim))
+        self.delivery = Delivery(c)
+        # How far each frame is through its phone, and how long the phone is: what the decoder must know to place a
+        # closure, its release and the rest, and cannot see in a code repeated on every frame. Starts at zero.
+        self.frame_place = nn.Linear(2, c.channels, bias=False)
+        nn.init.zeros_(self.frame_place.weight)
+        # Per voice: the mean acoustic style of the training clips, what inference uses.
+        self.register_buffer("style", torch.zeros(len(c.speakers), c.style_dim))
 
-    def predict_tokens(self, hidden, tokens, lexical, mask, lengths, prosodic_style, teacher=None):
-        """Token states, duration logits, word outputs and the batch's ``Words`` (``ProsodyPredictor.forward``)."""
-        text = hidden if self.bert is None else self.bert(tokens, lexical, mask)
-        words = self.words(tokens, mask)
-        return (*self.predictor(self.bert_encoder(text), prosodic_style, lengths, mask, words, teacher), words)
+    def prosody_text(self, hidden, tokens, lexical, mask):
+        """What the prosody predictor reads of the text."""
+        return self.bert_encoder(hidden if self.bert is None else self.bert(tokens, lexical, mask))
+
+    def decoder_text(self, hidden, tokens, durations, index, frame):
+        """The text a frame speaks, [B, F, C]: its token's state and, for phones, where in it the frame is
+        (``position_in_token``: 0 its start, 1 its end) and the phone's log length. ``index`` [B, F] is each frame's
+        token, ``frame`` [B, F] its number in the whole utterance, so that a training window gets the places it has at synthesis."""
+        place = position_in_token(durations, index, frame)
+        place = torch.stack((2 * place[..., 0] - 1, place[..., 2]), dim=-1) * self.phone_tokens[tokens].gather(1, index)[..., None]
+        return frames_of(hidden, index) + self.frame_place(place.to(self.frame_place.weight.dtype))
 
     def melody(self, states, durations, index, style, lengths):
         """Token states already repeated over whole utterances (``frames_of``) -> [B, F, 3] pitch, voicing logit, energy."""
@@ -562,25 +627,25 @@ class StyleVoca(Voca):
         frames = torch.round(torch.sigmoid(logits[..., :-1].float()).sum(-1) / speed).long()
         return self.gate_pauses(frames, logits[..., -1], tokens, mask)
 
-    def soft_durations(self, logits, tokens):
-        """``predict_durations`` without its rounding and its pause decisions, for their gradient: each pause weighs its probability."""
-        logits = logits.float()
-        return torch.sigmoid(logits[..., :-1]).sum(-1) * torch.where(self.phone_tokens[tokens], 1.0, torch.sigmoid(logits[..., -1]))
-
     @torch.inference_mode()
     def synthesize(self, tokens, lexical, lengths, speakers, speed=1.0, pitch_shift=0.0, seed=0, pitch_range=1.0, pitch_jitter=0.0,
-                   voiced_vowels=True, comma_pause=0.0, stop_pause=0.0):
-        """Free-running synthesis with the stored mean style. One utterance at a
-        time: the instance norms would see a batch's padding."""
+                   voiced_vowels=True, comma_pause=0.0, stop_pause=0.0, take=0, variety=1.0):
+        """Free-running synthesis with the stored mean acoustic style and a delivery drawn with the seed ``take`` (``variety``
+        times as far from the text's most typical one). One utterance at a time: the decoder's instance norms would see a
+        batch's padding."""
         self.check_controls(speed, pitch_shift, pitch_range)
         if len(lengths) != 1:
             raise ValueError("StyleVoca synthesizes one utterance at a time")
         hidden, mask = self.encode(tokens, lexical, lengths, speakers)
-        acoustic_style, prosodic_style = self.style[speakers].chunk(2, dim=-1)
-        states, logits, _, _ = self.predict_tokens(hidden, tokens, lexical, mask, lengths, prosodic_style)
+        acoustic_style = self.style[speakers]
+        text = self.prosody_text(hidden, tokens, lexical, mask)
+        generator = torch.Generator(tokens.device).manual_seed(take)
+        prosodic_style = self.delivery.style(self.delivery.draw(self.delivery.prior(text, speakers, mask), variety, generator), speakers)
+        states, logits, _ = self.predictor(text, prosodic_style, lengths, mask, self.words(tokens, mask))
         durations = self.pause_floors(self.predict_durations(logits, tokens, mask, speed), tokens, lengths, mask, comma_pause, stop_pause)
         index, frame_mask, frame_lengths = self.align(durations, mask)
         prosody = self.melody(frames_of(states, index), durations, index, prosodic_style, frame_lengths)
+        prosody = self.remove_pitch_spikes(prosody)
         if voiced_vowels:
             prosody = self.voice_vowels(prosody, tokens, index, frame_mask)
         prosody = self.widen_pitch(prosody, frame_mask, pitch_range)
@@ -589,7 +654,8 @@ class StyleVoca(Voca):
         if pitch_jitter > 0:
             pitch = pitch + self.pitch_wobble(pitch.shape, pitch_jitter, seed, pitch.device)
         condition = torch.cat((pitch[..., None], condition[..., 1:]), dim=-1)
-        features = self.decoder.features(frames_of(hidden, index), condition, acoustic_style)
+        text = self.decoder_text(hidden, tokens, durations, index, torch.arange(index.shape[1], device=index.device)[None])
+        features = self.decoder.features(text, condition, acoustic_style)
         with torch.random.fork_rng(devices=[tokens.device] if tokens.device.type == "cuda" else []):
             torch.manual_seed(seed)     # the source draws its noise
             source = self.decoder.generator.excitation(self.frequency(pitch), condition[..., 1], features)

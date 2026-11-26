@@ -15,8 +15,7 @@ import numpy as np
 import torch
 
 from .model import word_layout
-from .phonebert import Corpus
-from .text import ALWAYS_VOICED, LANGUAGE, LEXICAL, PHONE_IDS, SONORANTS, SYMBOL_TO_ID, VOWELS, frontend_fingerprint
+from .text import ALWAYS_VOICED, HINTS, LANGUAGE, LEXICAL, PHONE_IDS, SONORANTS, SYMBOL_TO_ID, VOWELS, frontend_fingerprint
 
 ALWAYS_VOICED_IDS = frozenset(SYMBOL_TO_ID[v] for v in ALWAYS_VOICED)
 SONORANT_IDS = frozenset(SYMBOL_TO_ID[v] for v in SONORANTS)
@@ -241,6 +240,8 @@ class AnnotatedDataset:
             forced = torch.repeat_interleave(phones, torch.tensor(row["durations"])) & voiced_like(energy, stored["mel"])
             voiced = torch.maximum(voiced, forced.to(voiced.dtype))
         tokens, lexical, durations = (torch.tensor(row[key], dtype=torch.long) for key in ("tokens", "lexical", "durations"))
+        if not c.hints:
+            lexical[:, HINTS] = 0
         item = {
             "tokens": tokens, "lexical": lexical, "durations": durations, "speaker": c.speakers.index(row["speaker"]),
             "wave": stored["wave"], "mel": stored["mel"],
@@ -274,47 +275,6 @@ def collate(items, shape=None):
     batch["speakers"] = torch.tensor([x["speaker"] for x in items])
     shortest = shape["shortest"] if shape else int(batch["frame_lengths"].min())
     return {**batch, "host": {"token_lengths": batch["token_lengths"], "frame_lengths": batch["frame_lengths"], "shortest": shortest}}
-
-
-class OwnTexts:
-    """What the own-timing pass says (voca.train): half the time a recorded sentence of the batch, half the time a
-    sentence of a ``voca.phonebert prepare`` corpus, which is mostly unrecorded, as StyleTTS 2 does with its
-    out-of-distribution texts. The predictor's timing is better on sentences it was trained on
-    (eng-style-voices-v3: 1.7 frames off per phone, 2.3 on held-out ones)."""
-
-    def __init__(self, path):
-        self.corpus = Corpus(path)
-        self.fingerprint = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        self.lengths, self.order = self.corpus.lengths.sort(stable=True)
-
-    def rows(self, count, generator):
-        """A corpus sentence of ``count`` tokens, or of the closest shorter length; None below the shortest."""
-        shorter = int(torch.searchsorted(self.lengths, count, right=True))
-        if shorter == 0:
-            return None
-        count = int(self.lengths[shorter - 1])
-        low, high = (int(torch.searchsorted(self.lengths, count, right=right)) for right in (False, True))
-        return int(self.order[torch.randint(low, high, (1,), generator=generator)])
-
-    def add(self, batch, generator):
-        """The batch with ``own_tokens``, ``own_lexical`` and ``own_lengths`` for the first half of its
-        rows, corpus sentences having as many tokens as the recorded one they replace."""
-        size = len(batch["tokens"]) - len(batch["tokens"]) // 2
-        own = {f"own_{key}": batch[source][:size].clone() for key, source in
-               (("tokens", "tokens"), ("lexical", "lexical"), ("lengths", "token_lengths"))}
-        replaced = (torch.rand(size, generator=generator) < 0.5).nonzero()[:, 0].tolist()
-        drawn = []
-        if replaced:
-            drawn = [(i, self.rows(int(own["own_lengths"][i]), generator)) for i in replaced]
-            drawn = [(i, row) for i, row in drawn if row is not None]
-        if drawn:
-            tokens, lexical, *_, lengths = self.corpus.batch(torch.tensor([row for _, row in drawn]))
-            for (i, _), t, x, n in zip(drawn, tokens, lexical, lengths.tolist()):
-                for key, value in (("own_tokens", t), ("own_lexical", x)):
-                    own[key][i] = 0
-                    own[key][i, :n] = value[:n]
-                own["own_lengths"][i] = n
-        return {**batch, **own}
 
 
 def pin(batch):
@@ -386,12 +346,18 @@ class BucketSampler:
     checkpointed, so a resumed run sees the same data.
     """
 
-    def __init__(self, lengths, tokens, groups, frame_budget, max_batch, seed, alpha, buckets=8):
+    def __init__(self, lengths, tokens, groups, frame_budget, max_batch, seed, alpha, buckets=16):
         order = sorted(range(len(lengths)), key=lambda i: (lengths[i], tokens[i]))
         buckets = min(buckets, len(order))
         self.bucket, self.shapes = [0] * len(order), []
-        for k in range(buckets):
-            members = order[k * len(order) // buckets:(k + 1) * len(order) // buckets]
+        ends = [(k + 1) * len(order) // buckets for k in range(buckets)]
+        # One more shape where it restores the most frames to short sentences: the shortest bucket's windows are only as
+        # long as its shortest utterance.
+        floor = lengths[order[0]]
+        cut = max(range(1, ends[0]), key=lambda i: (lengths[order[i]] - floor) * (ends[0] - i), default=0)
+        ends = ([cut] if cut and lengths[order[cut]] > floor else []) + ends
+        for k, (begin, end) in enumerate(zip([0, *ends], ends)):
+            members = order[begin:end]
             for i in members:
                 self.bucket[i] = k
             frames = max(lengths[i] for i in members)
