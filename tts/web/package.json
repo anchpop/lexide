@@ -1,0 +1,18 @@
+{
+  "name": "lexide-speech",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {".": {"types": "./dist/index.d.ts", "import": "./dist/index.js"}},
+  "files": ["dist", "ORT-LICENSE"],
+  "scripts": {
+    "build": "tsc && node build.mjs",
+    "prepack": "pnpm run build",
+    "test:parity": "python3 test/parity.py",
+    "test:browser": "node test/browser.mjs"
+  },
+  "devDependencies": {
+    "onnxruntime-web": "1.31.1",
+    "playwright-core": "1.61.1",
+    "typescript": "5.9.3"
+  }
+}

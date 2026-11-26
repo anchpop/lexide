@@ -1,4 +1,4 @@
-"""StyleTTS 2 / Kokoro architecture at tiny-voca scale (``architecture="styletts"``).
+"""StyleTTS 2 / Kokoro architecture at about 20M parameters (``architecture="styletts"``).
 
 Ported from StyleTTS 2 (github.com/yl4579/StyleTTS2, MIT: models.py,
 Modules/istftnet.py) and Kokoro (github.com/hexgrad/kokoro, Apache-2.0:
@@ -65,6 +65,8 @@ def run_lstm(lstm, x, lengths):
     needs no host-side lengths and no length-dependent shapes (CUDA graphs)."""
     if lstm.num_layers != 1 or not lstm.bidirectional or not lstm.batch_first or lstm.proj_size:
         raise ValueError("run_lstm expects a one-layer, batch-first, bidirectional LSTM")
+    if lengths is None:  # one unpadded utterance
+        return lstm(x)[0]
     step = torch.arange(x.shape[1], device=x.device)
     valid = step < lengths.to(x.device)[:, None]
     backwards = torch.where(valid, lengths.to(x.device)[:, None] - 1 - step, step)   # reverses each row's valid part
@@ -123,7 +125,7 @@ class AdaLayerNorm(nn.Module):
 
     def forward(self, x, s):
         gamma, beta = self.fc(s)[:, None].chunk(2, dim=-1)
-        return (1 + gamma) * F.layer_norm(x, x.shape[-1:]) + beta
+        return (1 + gamma) * F.layer_norm(x, (self.fc.out_features // 2,)) + beta
 
 
 class AdainResBlk1d(nn.Module):
@@ -276,7 +278,7 @@ class ProsodyPredictor(nn.Module):
         """Repeated token states with positions [B, F, d + s + WORD_FEATURES + 3] -> [B, F, 3] pitch, voicing
         logit, energy. Each row's are the same whatever it is padded to."""
         x = run_lstm(self.shared, frames, lengths).transpose(1, 2)
-        mask = length_mask(lengths, frames.shape[1])[:, None].float()
+        mask = None if lengths is None else length_mask(lengths, frames.shape[1])[:, None].float()
         f0, n = x, x
         for block in self.F0:
             f0 = block(f0, style, mask)
@@ -321,7 +323,7 @@ class SourceModule(nn.Module):
         low = torch.stack([torch.zeros_like(n), *(h / h.sum() for h in low), (n == 0).double()])
         return low.diff(dim=0).float()[:, None]
 
-    def forward(self, f0, voicing, x):
+    def forward(self, f0, voicing, x, noise=None):
         """f0 [B, F] in Hz (continuous), voicing [B, F] in [0, 1] (a label or the predicted probability),
         the generator's input x [B, C, F] -> source [B, F * hop]."""
         cycles = f0[..., None] * self.orders / self.sample_rate      # [B, F, H] per sample, constant within a frame
@@ -329,7 +331,9 @@ class SourceModule(nn.Module):
         start = (advance.cumsum(1) - advance) % 1                     # whole cycles dropped: exact in float32 at any length
         within = cycles[:, :, None] * torch.arange(self.hop, device=f0.device)[:, None]
         phase = 2 * math.pi * (start[:, :, None] + within).flatten(1, 2).transpose(1, 2)
-        noise = F.conv1d(torch.randn_like(phase[:, :1]), self.bands, padding=self.TAPS // 2)
+        if noise is None:
+            noise = torch.randn_like(phase[:, :1])
+        noise = F.conv1d(noise, self.bands, padding=self.TAPS // 2)
         gains = F.interpolate(self.gains(torch.cat((x, voicing[:, None]), dim=1)), scale_factor=self.hop, mode="linear")
         sine, cosine, noise_gain = gains.split((len(self.orders), len(self.orders), len(self.bands)), dim=1)
         return torch.tanh(self.level * ((sine * phase.sin() + cosine * phase.cos()).sum(1) + (noise_gain.exp() * noise).sum(1)))
@@ -357,17 +361,17 @@ class AntiAlias(nn.Module):
     in float32. Without it the source's harmonics fold back: at hop 16 the coarse injection
     runs at 375 frames/s, and a 147 Hz vowel got a 228 Hz (375 - 147) line 3 dB below its fundamental."""
 
-    def __init__(self, stride):
+    def __init__(self, stride, channels):
         super().__init__()
         n = torch.arange(8 * stride + 1, dtype=torch.float64) - 4 * stride
         cutoff = 0.9 / (2 * stride)                     # cycles per input frame
         taps = 2 * cutoff * torch.sinc(2 * cutoff * n) * torch.hamming_window(len(n), periodic=False, dtype=torch.float64)
-        self.register_buffer("taps", (taps / taps.sum()).float()[None, None], persistent=False)
+        self.register_buffer("taps", (taps / taps.sum()).float()[None, None].repeat(channels, 1, 1), persistent=False)
 
     def forward(self, x):
         with torch.autocast(x.device.type, enabled=False):
             x = F.pad(x.float(), (self.taps.shape[-1] // 2,) * 2, mode="reflect")
-            return F.conv1d(x, self.taps.expand(x.shape[1], 1, -1), groups=x.shape[1])
+            return F.conv1d(x, self.taps, groups=self.taps.shape[0])
 
 
 class Generator(nn.Module):
@@ -392,7 +396,7 @@ class Generator(nn.Module):
                 stride = math.prod(rates[i + 1:])
                 self.noise_convs.append(nn.Conv1d(self.fft + 2, ch, 2 * stride, stride, padding=(stride + 1) // 2))
                 self.noise_res.append(AdaINResBlock1(ch, 7, (1, 3, 5), s))
-                self.anti_alias.append(AntiAlias(stride))
+                self.anti_alias.append(AntiAlias(stride, self.fft + 2))
             else:
                 self.noise_convs.append(nn.Conv1d(self.fft + 2, ch, 1))
                 self.noise_res.append(AdaINResBlock1(ch, 11, (1, 3, 5), s))
@@ -422,6 +426,13 @@ class Generator(nn.Module):
         # Real and imaginary parts, not magnitude and angle: they scale with the source, so the learned
         # noise gain controls what reaches the generator (an angle stays full-strength noise at any level).
         har = torch.cat((spectrum.real, spectrum.imag), dim=1)
+        magnitude, angle = self.coefficients(x, s, har)
+        spectrum = torch.polar(magnitude, angle)
+        wave = istft(spectrum, self.fft, self.hop, self.window)
+        return wave if delay is None else delayed(wave, -delay)
+
+    def coefficients(self, x, s, har):
+        """Source spectrum and acoustic features to one-sided magnitude and phase."""
         for i, (up, anti_alias, noise_conv, noise_res) in enumerate(zip(self.ups, self.anti_alias, self.noise_convs, self.noise_res)):
             x = up(F.leaky_relu(x, 0.1))
             if i == len(self.ups) - 1:
@@ -431,9 +442,7 @@ class Generator(nn.Module):
         x = self.conv_post(F.leaky_relu(x))
         bins = self.fft // 2 + 1
         x = x.float()   # the inverse STFT in float32 also under bf16 autocast
-        spectrum = torch.polar(torch.exp(x[:, :bins]), torch.sin(x[:, bins:]))
-        wave = istft(spectrum, self.fft, self.hop, self.window)
-        return wave if delay is None else delayed(wave, -delay)
+        return torch.exp(x[:, :bins]), torch.sin(x[:, bins:])
 
 
 def delayed(wave, delay):
@@ -627,9 +636,53 @@ class StyleVoca(Voca):
         frames = torch.round(torch.sigmoid(logits[..., :-1].float()).sum(-1) / speed).long()
         return self.gate_pauses(frames, logits[..., -1], tokens, mask)
 
+    def predict_reading(self, text, speakers, draw, words, lengths, mask, tokens, speed, comma_pause, stop_pause):
+        style = self.delivery.style(draw, speakers)
+        states, logits, _ = self.predictor(text, style, lengths, mask, words)
+        durations = self.pause_floors(self.predict_durations(logits, tokens, mask, speed), tokens,
+                                      mask.sum(1), mask, comma_pause, stop_pause)
+        return style, states, durations
+
+    def reading_prosody(self, states, durations, index, style, lengths, tokens, mask, voiced_vowels, pitch_range):
+        raw = self.melody(frames_of(states, index), durations, index, style, lengths)
+        clean = self.remove_pitch_spikes(raw, tokens, index)
+        voiced_vowels = torch.as_tensor(voiced_vowels, device=tokens.device)
+        clean = torch.where(voiced_vowels, self.voice_vowels(clean, tokens, index, mask), clean)
+        return self.widen_pitch(clean, mask, pitch_range)
+
+    @staticmethod
+    def ending(prosody, word_index, owner):
+        """Final-word frames and whether their voiced pitch rises by over three semitones."""
+        last = word_index.amax(1, keepdim=True)
+        final = (word_index.gather(1, owner) == last) & (last >= 0)
+        voiced = final & (prosody[..., 1] > 0)
+        rank, count = voiced.long().cumsum(1), voiced.sum(1, keepdim=True)
+        third = (count // 3).clamp_min(1)
+        pitch = prosody[..., 0].clamp(-2, 1.5)
+        rise = (pitch * (voiced & (rank > count - third))).sum(1) - (pitch * (voiced & (rank <= third))).sum(1)
+        return final, (count[:, 0] >= 3) & (rise > third[:, 0] * (3 * math.log(2) / 12))
+
+    @staticmethod
+    def blend_ending(prosody, durations, owner, final, typical, typical_durations):
+        """Interpolate the typical pitch within each phone, then ramp into the last word."""
+        length = typical_durations.gather(1, owner)
+        start = typical_durations.cumsum(1).gather(1, owner) - length
+        frame = torch.arange(owner.shape[1], device=owner.device)[None]
+        relative = position_in_token(durations, owner, frame)[..., 0]
+        offset = (relative * length - 0.5).clamp_min(0).minimum((length - 1).clamp_min(0))
+        lo = (start + offset.long()).clamp_max(typical.shape[1] - 1)
+        hi = (lo + 1).clamp_max(typical.shape[1] - 1)
+        target = typical[..., 0].clamp(-2, 1.5)
+        lower = target.gather(1, lo)
+        target = lower + (target.gather(1, hi) - lower) * (offset - offset.floor())
+        weight = 0.75 * (final.long().cumsum(1) / 4).clamp_max(1)
+        sampled = prosody[..., 0].clamp(-2, 1.5)
+        pitch = torch.where(final, sampled + (target - sampled) * weight, prosody[..., 0])
+        return torch.cat((pitch[..., None], prosody[..., 1:]), dim=-1)
+
     @torch.inference_mode()
     def synthesize(self, tokens, lexical, lengths, speakers, speed=1.0, pitch_shift=0.0, seed=0, pitch_range=1.0, pitch_jitter=0.0,
-                   voiced_vowels=True, comma_pause=0.0, stop_pause=0.0, take=0, variety=1.0):
+                   voiced_vowels=True, comma_pause=0.0, stop_pause=0.0, take=0, variety=1.0, fix_ending=True):
         """Free-running synthesis with the stored mean acoustic style and a delivery drawn with the seed ``take`` (``variety``
         times as far from the text's most typical one). One utterance at a time: the decoder's instance norms would see a
         batch's padding."""
@@ -640,15 +693,22 @@ class StyleVoca(Voca):
         acoustic_style = self.style[speakers]
         text = self.prosody_text(hidden, tokens, lexical, mask)
         generator = torch.Generator(tokens.device).manual_seed(take)
-        prosodic_style = self.delivery.style(self.delivery.draw(self.delivery.prior(text, speakers, mask), variety, generator), speakers)
-        states, logits, _ = self.predictor(text, prosodic_style, lengths, mask, self.words(tokens, mask))
-        durations = self.pause_floors(self.predict_durations(logits, tokens, mask, speed), tokens, lengths, mask, comma_pause, stop_pause)
-        index, frame_mask, frame_lengths = self.align(durations, mask)
-        prosody = self.melody(frames_of(states, index), durations, index, prosodic_style, frame_lengths)
-        prosody = self.remove_pitch_spikes(prosody)
-        if voiced_vowels:
-            prosody = self.voice_vowels(prosody, tokens, index, frame_mask)
-        prosody = self.widen_pitch(prosody, frame_mask, pitch_range)
+        prior = self.delivery.prior(text, speakers, mask)
+        words = self.words(tokens, mask)
+
+        def predict(draw):
+            style, states, durations = self.predict_reading(text, speakers, draw, words, lengths, mask, tokens,
+                                                            speed, comma_pause, stop_pause)
+            index, frame_mask, frame_lengths = self.align(durations, mask)
+            prosody = self.reading_prosody(states, durations, index, style, frame_lengths, tokens, frame_mask,
+                                          voiced_vowels, pitch_range)
+            return prosody, durations, index, frame_mask, frame_lengths
+
+        prosody, durations, index, frame_mask, frame_lengths = predict(self.delivery.draw(prior, variety, generator))
+        final, rising = self.ending(prosody, words.index, index)
+        if fix_ending and variety != 0 and rising.item():
+            typical, typical_durations, *_ = predict(prior[0])
+            prosody = self.blend_ending(prosody, durations, index, final, typical, typical_durations)
         condition = self.prosody_condition(prosody)
         pitch = condition[..., 0] + pitch_shift
         if pitch_jitter > 0:

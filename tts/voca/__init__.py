@@ -1,4 +1,4 @@
-"""tiny-voca: a small two-voice TTS trained from scratch.
+"""Lexide speech: small text-to-speech models trained from scratch, one per language.
 
 The speech model loads no pretrained weights. A pretrained phoneme recogniser
 is used only by the annotation step, and an ASR model only by evaluation.

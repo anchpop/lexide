@@ -78,7 +78,7 @@ def ctc_viterbi(log_probs, labels, blank=0):
     path = np.empty(frames, dtype=np.int64)
     for t in range(frames - 1, -1, -1):
         path[t] = state
-        state -= back[t, state]
+        state -= int(back[t, state])
     return path
 
 

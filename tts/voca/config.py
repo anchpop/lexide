@@ -34,6 +34,7 @@ class Config:
     n_fft: int = 1024
     n_mels: int = 80
     f0_min: float = 50.0
+    feature_version: int = 3
     f0_max: float = 600.0
     speakers: tuple[str, ...] = ("achernar",)
     hints: bool = True      # reads what only yap knows of the text (``voca.text.HINTS``), not just phonemes and punctuation
@@ -150,7 +151,7 @@ class Config:
         durations are versioned separately by the annotation layer.
         Feature version 3 added ``pitch_check``, a second pitch tracker's track."""
         fields = ("sample_rate", "hop", "n_fft", "n_mels", "f0_min", "f0_max")
-        return {**{key: getattr(self, key) for key in fields}, "feature_version": 3,
+        return {**{key: getattr(self, key) for key in fields}, "feature_version": self.feature_version,
                 "pitch_reference_hz": 200, "log_floor": 1e-5}
 
     @property

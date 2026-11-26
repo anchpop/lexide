@@ -1,4 +1,4 @@
-"""tiny-voca v2: feed-forward transformer with a pitch-driven source-filter head.
+"""The first architecture (``architecture="tinyvoca"``, from the tiny-voca recipe): a feed-forward transformer with a pitch-driven source-filter head.
 
 All weights start random. Tensor conventions: hidden [B,T,C], frame features
 [B,T], waveform [B,S]. Acoustic frame i is centred on sample ``i * hop``.
@@ -797,10 +797,12 @@ class Voca(nn.Module):
         size = tokens.shape[1]
         slot = torch.where(marked, run, size)     # tokens that are no mark: a slot of their own
         total = torch.zeros(len(tokens), size + 1, device=tokens.device, dtype=durations.dtype).scatter_add(1, slot, durations)
-        strongest = torch.zeros(len(tokens), size + 1, device=tokens.device, dtype=torch.long).scatter_reduce(1, slot, kind, "amax")
-        minimum = torch.ceil((comma_pause * (strongest == 1) + stop_pause * (strongest == 2)) * self.config.sample_rate / self.config.hop).long()
-        last = run.gather(1, (lengths - 2)[:, None])     # the run just before EOS, if the mark there is one
-        final = marked.gather(1, (lengths - 2)[:, None]) & (run == last)
+        stops = torch.zeros_like(total).scatter_add(1, slot, (kind == 2).long())
+        seconds = torch.where(stops > 0, stop_pause, comma_pause)
+        minimum = torch.ceil(seconds * self.config.sample_rate / self.config.hop).long()
+        position = torch.arange(size, device=tokens.device)
+        last_phone = torch.where(mask & self.phone_tokens[tokens], position, -1).amax(1)
+        final = position > last_phone[:, None]
         deficit = (minimum - total).clamp_min(0).gather(1, slot)
         return durations + torch.where(first & ~final, deficit, 0).to(durations.dtype)
 
@@ -813,17 +815,16 @@ class Voca(nn.Module):
         return torch.cat((prosody[..., :1], torch.where(vowel, prosody[..., 1].clamp_min(4.0), prosody[..., 1])[..., None],
                           prosody[..., 2:]), dim=-1)
 
-    @staticmethod
-    def remove_pitch_spikes(prosody, semitones=9.0):
-        """A frame whose predicted pitch stands more than ``semitones`` above both neighbours takes their mean. English v10
-        put one such frame (often at the 600 Hz ceiling) early in 52 of 60 held-out sentences, heard as a robotic word; the
-        recordings never jump like that (Nov 26 2026)."""
+    def remove_pitch_spikes(self, prosody, tokens, owner):
+        """Replace isolated peaks above 9 semitones, or 3 within one always-voiced phone."""
         p = prosody[..., 0]
         left, mid, right = p[:, :-2], p[:, 1:-1], p[:, 2:]
-        limit = semitones * math.log(2) / 12
+        vowel = self.voiced_tokens[tokens].gather(1, owner)[:, 1:-1]
+        inside = vowel & (owner[:, :-2] == owner[:, 2:])
+        limit = torch.where(inside, 3., 9.) * (math.log(2) / 12)
         spike = (mid - left > limit) & (mid - right > limit)
-        return torch.cat((torch.cat((p[:, :1], torch.where(spike, (left + right) / 2, mid), p[:, -1:]), dim=1)[..., None],
-                          prosody[..., 1:]), dim=-1)
+        correction = F.pad(torch.where(spike, (left + right) / 2 - mid, 0.), (1, 1))
+        return torch.cat(((p + correction[:, :p.shape[1]])[..., None], prosody[..., 1:]), dim=-1)
 
     @staticmethod
     def check_controls(speed, pitch_shift, pitch_range):
@@ -848,11 +849,11 @@ class Voca(nn.Module):
         """Scale the predicted pitch movement around each utterance's voiced mean.
         Regression predicts a flatter contour than the recordings; values above 1
         restore range (1.0 leaves the prediction untouched)."""
-        if pitch_range == 1.0:
+        if isinstance(pitch_range, (int, float)) and pitch_range == 1.0:
             return prosody
         voiced = ((prosody[..., 1] > 0) & frame_mask).to(prosody.dtype)
         mean = (prosody[..., 0] * voiced).sum(1, keepdim=True) / voiced.sum(1, keepdim=True).clamp_min(1)
-        pitch = mean + (prosody[..., 0] - mean) * pitch_range
+        pitch = prosody[..., 0] + (prosody[..., 0] - mean) * (pitch_range - 1)
         return torch.cat((pitch[..., None], prosody[..., 1:]), dim=-1) * frame_mask[..., None]
 
     @staticmethod

@@ -6,6 +6,7 @@ prosody targets (``word_prosody``) are measured from the recording when an
 item is first loaded.
 """
 
+import bisect
 import collections
 import hashlib
 import json
@@ -63,9 +64,13 @@ def continuous_pitch(pitch, voiced, check, default=0.0):
     adopted = (voiced <= 0.5) & (check[:, 1] > 0.5)
     pitch, voiced = torch.where(adopted, check[:, 0], pitch), (voiced > 0.5) | adopted
     trusted = despiked(pitch, voiced) & ~((check[:, 1] > 0.5) & ((pitch - check[:, 0]).abs() > DISPUTED_SEMITONES * math.log(2) / 12))
+    return interpolate_pitch(pitch, trusted, default), trusted.float(), voiced.float()
+
+
+def interpolate_pitch(pitch, trusted, default=0.0):
     index = trusted.nonzero().squeeze(1)
     if index.numel() == 0:
-        return torch.full_like(pitch, default), trusted.float(), voiced.float()
+        return torch.full_like(pitch, default)
     position = torch.arange(pitch.numel())
     right = torch.searchsorted(index, position).clamp(max=index.numel() - 1)
     left = (torch.searchsorted(index, position, right=True) - 1).clamp(min=0)
@@ -73,7 +78,7 @@ def continuous_pitch(pitch, voiced, check, default=0.0):
     span = (b - a).clamp(min=1).float()
     weight = ((position - a).float() / span).clamp(0, 1)
     curve = pitch[a] * (1 - weight) + pitch[b] * weight
-    return curve, trusted.float(), voiced.float()
+    return curve
 
 
 def voiced_like(energy, mel):
@@ -222,12 +227,19 @@ class AnnotatedDataset:
             raise ValueError("feature file escapes the acoustic root")
         stored = torch.load(path, map_location="cpu", weights_only=True)
         t = row["frames"]
-        if (stored["mel"].shape != (t, c.n_mels) or stored["prosody"].shape != (t, 3) or stored["pitch_check"].shape != (t, 2)
+        crepe = c.feature_version == 4
+        check = stored["periodicity"] if crepe else stored["pitch_check"]
+        if (stored["mel"].shape != (t, c.n_mels) or stored["prosody"].shape != (t, 3) or check.shape != ((t,) if crepe else (t, 2))
                 or stored["wave"].shape != (t * c.hop,)):
             raise ValueError(f"feature dimensions differ from the manifest: {path.name}")
-        if any(not torch.isfinite(stored[k]).all() for k in ("mel", "prosody", "pitch_check", "wave")):
+        if any(not torch.isfinite(x).all() for x in (stored["mel"], stored["prosody"], check, stored["wave"])):
             raise ValueError("non-finite features")
-        pitch, trusted, voiced = continuous_pitch(stored["prosody"][:, 0], stored["prosody"][:, 1], stored["pitch_check"])
+        if crepe:
+            trusted = (check >= 0.30).float()
+            pitch = interpolate_pitch(stored["prosody"][:, 0], trusted.bool())
+            voiced = stored["prosody"][:, 1]
+        else:
+            pitch, trusted, voiced = continuous_pitch(stored["prosody"][:, 0], stored["prosody"][:, 1], check)
         energy = (stored["prosody"][:, 2] - c.energy_mean) / c.energy_scale
         if self.voiced_vowels:
             # Both trackers miss low, creaky voicing, and a model trained on those labels drops
@@ -356,6 +368,10 @@ class BucketSampler:
         floor = lengths[order[0]]
         cut = max(range(1, ends[0]), key=lambda i: (lengths[order[i]] - floor) * (ends[0] - i), default=0)
         ends = ([cut] if cut and lengths[order[cut]] > floor else []) + ends
+        ordered_lengths = [lengths[i] for i in order]
+        top = ends[-2] if len(ends) > 1 else 0
+        ends = sorted(set(ends) | {i for limit in (1000, 1350, 1800)
+                                   if top < (i := bisect.bisect_right(ordered_lengths, limit)) < len(order)})
         for k, (begin, end) in enumerate(zip([0, *ends], ends)):
             members = order[begin:end]
             for i in members:

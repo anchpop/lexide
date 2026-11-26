@@ -79,7 +79,7 @@ HINTS = [list(LEXICAL).index(name) for name in ("pos", "rarity", "boundary")]
 # or runs one: its tokens are that language's inventory (yap's code, as in voca/inventories/).
 LANGUAGE = os.environ.get("VOCA_LANGUAGE", "eng")
 INVENTORY_PATH = Path(__file__).with_name("inventories") / f"{LANGUAGE}.json"
-_ELIDING = frozenset({"fra", "ita"})                          # see spoken_words
+_ELISION_ENDINGS = ("'", "’") if LANGUAGE in {"fra", "ita"} else ()
 _ATTACHED_TAGS = {"kor": frozenset({"ADP", "AUX"})}.get(LANGUAGE, frozenset())
 if not INVENTORY_PATH.exists():
     raise ValueError(f"VOCA_LANGUAGE={LANGUAGE}: no inventory {INVENTORY_PATH} (scripts/build_inventory.py makes one from the pack dump)")
@@ -126,6 +126,14 @@ class Phonemized:
 def frontend_identity():
     return {"inventory": _inventory["source"], "language": _inventory["language"], "symbols": len(SYMBOLS),
             "version": FRONTEND_VERSION}
+
+
+def frontend_spec():
+    """Data used by the browser's implementation of tokenize, in model ID order."""
+    return dict(**frontend_identity(), phones=PHONES, symbolTable=SYMBOLS, punctuation=PUNCTUATION,
+                aliases=_PUNCTUATION_ALIASES, clitics=_CLITIC_STARTS, elisionEndings=_ELISION_ENDINGS,
+                attachedTags=sorted(_ATTACHED_TAGS), pos=POS_ID, otherPos=POS_OTHER, stress=STRESS_MARKS,
+                rarityBuckets=RARITY_BUCKETS, wordBreak=WORD_BREAK, phrase=ACCENT_PHRASE, nucleus=ACCENT_NUCLEUS)
 
 
 def frontend_fingerprint():
@@ -201,7 +209,7 @@ def spoken_words(words, tags, attached=frozenset()):
             join = None
         else:
             spoken.append([word.lower(), [], POS_ID.get(tag, POS_OTHER)])
-            join = "" if LANGUAGE in _ELIDING and word.endswith(("'", "’")) else None
+            join = "" if word.endswith(_ELISION_ENDINGS) else None
     return leading, spoken
 
 
@@ -223,12 +231,18 @@ def lost_punctuation(grams):
 
 
 def spells(grams, text):
-    """Whether pack grams spell ``text`` (what the recording says): its letters and digits in order, and its punctuation
-    marks in order. A clip whose labels came from another text (a different number expansion, a mis-sliced line) fails."""
-    letters = lambda s: "".join(c for c in unicodedata.normalize("NFC", s).lower() if c.isalnum())
-    marks = lambda s: [m for m in (_PUNCTUATION_ALIASES.get(c, c) for c in s) if m in PUNCTUATION and m != "'"]
-    words = "".join(w for g in grams for w in g["words"])
-    return letters(words) == letters(text) and marks(words) == marks(text)
+    """Compare letters, digits, combining marks and punctuation in reading order."""
+    def normalized(value):
+        result = []
+        for char in unicodedata.normalize("NFC", value.lower()):
+            mark = _PUNCTUATION_ALIASES.get(char, char)
+            if char.isalnum() or unicodedata.category(char).startswith("M"):
+                result.append(char)
+            elif mark in PUNCTUATION and mark != "'":
+                result.append(mark)
+        return result
+
+    return normalized("".join(w for g in grams for w in g["words"])) == normalized(text)
 
 
 def tokenize(grams):

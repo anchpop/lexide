@@ -7,6 +7,7 @@ sentence, phonemize the spoken form with g2p-jsonl (cargo build --release in g2p
 """
 import collections
 import hashlib
+import itertools
 import json
 import random
 import re
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import unicodedata
 from pathlib import Path
+
 
 def curl(t):
     out, open_ = [], True
@@ -84,6 +86,20 @@ def from_g2p(text, p):
     return grams
 
 
+def initialisms(grams, written):
+    """An A inside a spelled-out initialism takes its letter name."""
+    def letter(gram):
+        return len(gram["words"]) == 1 and bool(re.fullmatch("[A-Z]", gram["words"][0]))
+    for letters, group in itertools.groupby(grams, letter):
+        if letters:
+            group = list(group)
+            acronym = "".join(g["words"][0] for g in group)
+            if len(acronym) >= 2 and re.search(r"\b" + acronym + r"\b", written):
+                for g in group:
+                    if g["words"] == ["A"] and g["phonemes"] == "ə":
+                        g["phonemes"] = "ˈeɪ"
+
+
 def main(rows_path):
     scripts = select()
     parts = {r["written"]: split(apos(curl(r["written"]))) for rows in scripts.values() for r in rows}
@@ -109,6 +125,8 @@ def main(rows_path):
                     r["grams_from"] = "yap"
                 elif fallback[r["id"]].get("word_text_spans"):
                     r["grams"] = from_g2p(r["text"], fallback[r["id"]])
+                    if r["kind"] == "rare/acronyms":
+                        initialisms(r["grams"], r["written"])
                     r["grams_from"] = "g2p"
                 else:
                     counts["dropped"] += 1

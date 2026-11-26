@@ -36,7 +36,28 @@ def masked_std(value, mask):
     return (((value - mean[:, None]).square() * mask).sum(1) / count + 1e-8).sqrt()
 
 
-def prosody_terms(prediction, target, trusted, frame_mask):
+def smoothed_spread(pitch, voiced):
+    # Seven frames span 75 ms. Renormalize at voicing gaps and utterance edges.
+    def smooth(x):
+        return F.avg_pool1d(x[:, None], 7, stride=1, padding=3)[:, 0]
+    contour = smooth(pitch * voiced) / smooth(voiced).clamp_min(1 / 7)
+    return masked_std(contour, voiced)
+
+
+def delta_percentiles(pitch, pairs):
+    # Fixed-size sort and gather also work inside CUDA graphs. Masked deltas
+    # sort after every real one; an empty set gives five zeros.
+    delta = pitch.diff().abs().flatten()
+    ordered = F.pad(delta.masked_fill(~pairs.flatten(), float("inf")), (0, 1), value=float("inf")).sort().values
+    count = pairs.sum()
+    last = (count - 1).clamp_min(0)
+    rank = torch.stack([last * q for q in (.25, .50, .90, .99, .999)])
+    low = torch.where(count > 0, ordered[rank.floor().long()], 0)
+    high = torch.where(count > 0, ordered[rank.ceil().long()], 0)
+    return torch.lerp(low, high, rank.frac())
+
+
+def prosody_terms(prediction, target, trusted, frame_mask, phrase):
     """Pitch, pitch-spread, voicing and energy losses for predicted [B, F, 3]
     (log pitch, voicing logit, energy), plus their metrics. Returns (terms, metrics)."""
     # Recorded pitch counts fully; interpolated stretches only keep the curve continuous.
@@ -46,15 +67,17 @@ def prosody_terms(prediction, target, trusted, frame_mask):
     # utterance's pitch spread as well, the classic global-variance correction.
     sung = frame_mask * target[..., 1] * trusted
     enough = (sung.sum(1) >= 10).float()
-    predicted_spread, recorded_spread = masked_std(prediction[..., 0], sung), masked_std(target[..., 0], sung)
+    predicted_spread, recorded_spread = smoothed_spread(prediction[..., 0], sung), smoothed_spread(target[..., 0], sung)
     pitch_spread = masked_mean((predicted_spread - recorded_spread).abs(), enough)
+    pairs = sung[:, 1:].bool() & sung[:, :-1].bool() & (phrase[:, 1:] == phrase[:, :-1])
+    pitch_delta = (delta_percentiles(prediction[..., 0], pairs) - delta_percentiles(target[..., 0], pairs)).abs().mean()
     voicing = masked_mean(F.binary_cross_entropy_with_logits(prediction[..., 1], target[..., 1], reduction="none"), frame_mask)
     energy = masked_mean((prediction[..., 2] - target[..., 2]).abs(), frame_mask)
     with torch.no_grad():
         metrics = dict(pitch_error_semitones=SEMITONES * masked_mean((prediction[..., 0] - target[..., 0]).abs(), sung),
                        pitch_spread_ratio=masked_mean(predicted_spread / recorded_spread.clamp_min(1e-3), enough),
                        voicing_accuracy=masked_mean(((prediction[..., 1] > 0) == target[..., 1].bool()).float(), frame_mask))
-    return dict(pitch=pitch, pitch_spread=pitch_spread, voicing=voicing, energy=energy), metrics
+    return dict(pitch=pitch, pitch_spread=pitch_spread, pitch_delta=pitch_delta, voicing=voicing, energy=energy), metrics
 
 
 def word_terms(outputs, targets, words):
@@ -101,7 +124,7 @@ def duration_metrics(predicted, presence, durations, pausable, lengths):
 
 
 class TrainingSystem(nn.Module):
-    WEIGHTS = {"duration": 1.0, "pause": 1.0, "pitch": 2.0, "pitch_spread": 2.0, "voicing": 1.0, "energy": 1.0, "mel_head": 2.0,
+    WEIGHTS = {"duration": 1.0, "pause": 1.0, "pitch": 2.0, "pitch_spread": 1.0, "pitch_delta": 1.0, "voicing": 1.0, "energy": 1.0, "mel_head": 2.0,
                "stft": 2.0, "mel": 10.0}
 
     def __init__(self, config):
@@ -133,7 +156,9 @@ class TrainingSystem(nn.Module):
             raise ValueError("durations do not sum to the acoustic frame count")
         prosody_hidden, prediction = m.predict_prosody(frames, frame_mask)
         prediction, target = prediction.float(), batch["prosody"]
-        prosody, prosody_metrics = prosody_terms(prediction, target, batch["pitch_trusted"], frame_mask)
+        index, _, _ = m.align(batch["durations"], token_mask, frame_mask.shape[1])
+        phrase = m.phrase_breaks[batch["tokens"]].long().cumsum(1).gather(1, index)
+        prosody, prosody_metrics = prosody_terms(prediction, target, batch["pitch_trusted"], frame_mask, phrase)
         teacher = torch.rand(len(lengths), device=lengths.device) < teacher[0]
         condition = torch.where(teacher[:, None, None], target, m.prosody_condition(prediction.detach()))
         acoustic = m.decode(prosody_hidden, condition.to(prosody_hidden.dtype), frame_mask)
@@ -184,7 +209,7 @@ class StyleTrainingSystem(nn.Module):
     ``feature_matching`` on the waveform critics' feature matching, and
     ``slm_gan``), faded in over ``gan_ramp`` steps from the GAN start."""
 
-    WEIGHTS = {"duration": 1.0, "duration_bins": 20.0, "pause": 1.0, "pitch": 2.0, "pitch_spread": 2.0, "voicing": 1.0, "energy": 1.0,
+    WEIGHTS = {"duration": 1.0, "duration_bins": 20.0, "pause": 1.0, "pitch": 2.0, "pitch_spread": 1.0, "pitch_delta": 1.0, "voicing": 1.0, "energy": 1.0,
                "word_rank": 1.0, "word_shape": 1.0, "word_excursion": 1.0, "word_final": 1.0,
                "mel_convergence": 5.0, "slm": 1.0, "gan": 1.0, "slm_gan": 1.0, "delivery": 0.05,
                "shift": 0.0}    # shift_consistency; opt in with --weights '{"shift": 1}'
@@ -283,7 +308,8 @@ class StyleTrainingSystem(nn.Module):
         pausable = token_mask & ~m.phone_tokens[tokens]
         pause = masked_mean(F.binary_cross_entropy_with_logits(logits[..., -1], (durations > 0).float(), reduction="none"), pausable)
         prediction = m.melody(frames_of(states, index), durations, index, prosodic_style, lengths)
-        prosody, prosody_metrics = prosody_terms(prediction, batch["prosody"], batch["pitch_trusted"], frame_mask.float())
+        phrase = m.phrase_breaks[tokens].long().cumsum(1).gather(1, index)
+        prosody, prosody_metrics = prosody_terms(prediction, batch["prosody"], batch["pitch_trusted"], frame_mask.float(), phrase)
         # What is spoken with: vowels kept voiced, as the app's synthesis does (``StyleVoca.synthesize``).
         spoken = m.voice_vowels(prediction, tokens, index, frame_mask)
         target, prediction, spoken = frames_of(batch["prosody"], window), frames_of(prediction, window), frames_of(spoken, window)

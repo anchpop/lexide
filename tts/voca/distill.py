@@ -9,10 +9,12 @@ the outputs the teacher gives from yap's phonemes and hints. The rest of the mod
         --pairs data/distill/yap.jsonl data/distill/plain.jsonl --output runs/eng-style-voices-v10-distilled
 
 ``--pairs``: two files of the same sentences in the same order, rows {"text", "grams"}: yap's (the teacher's
-input) and stock espeak's (``plain/stock_espeak.py``, the student's). A sentence whose two token sequences differ
-in length is skipped (they line up token for token otherwise).
+input) and stock espeak's (``plain/stock_espeak.py``, the student's). The two token sequences are aligned and the
+student learns the teacher's outputs on the tokens they share: espeak joins some words yap keeps apart ("of the",
+"was a", "husband's"), so a word break on one side only, or a phone the two disagree on, is left to the student.
+A sentence where fewer than ``MIN_SHARED`` of the student's tokens are shared is skipped.
 """
-import argparse, dataclasses, json, math, random, time
+import argparse, dataclasses, difflib, json, math, random, time
 from pathlib import Path
 import torch
 
@@ -20,6 +22,16 @@ from .config import Config, check_format
 from .model import build_model
 from .text import HINTS, frontend_fingerprint, tokenize
 from .train import export_model
+
+
+MIN_SHARED = 0.9
+
+
+def shared(teacher, student):
+    """Positions of the tokens the two sequences share, in order: (teacher positions, student positions)."""
+    blocks = difflib.SequenceMatcher(None, teacher, student, autojunk=False).get_matching_blocks()
+    t = [b.a + i for b in blocks for i in range(b.size)]
+    return torch.tensor(t), torch.tensor([b.b + i for b in blocks for i in range(b.size)])
 
 
 def pairs(yap, plain):
@@ -34,21 +46,24 @@ def pairs(yap, plain):
             except KeyError:
                 skipped += 1
                 continue
-            if len(t) != len(s):
+            at_teacher, at_student = shared(t.ids, s.ids)
+            if len(at_student) < MIN_SHARED * len(s):
                 skipped += 1
                 continue
             lexical = torch.tensor(s.lexical())
             lexical[:, HINTS] = 0
-            out.append((torch.tensor(t.ids), torch.tensor(t.lexical()), torch.tensor(s.ids), lexical))
+            out.append((torch.tensor(t.ids), torch.tensor(t.lexical()), torch.tensor(s.ids), lexical, at_teacher, at_student))
     return out, skipped
 
 
 def batch(items, device):
-    """Padded teacher tokens, teacher features, student tokens, student features, lengths."""
-    n = max(len(t) for t, *_ in items)
-    pad = lambda x: torch.cat((x, x.new_zeros((n - len(x), *x.shape[1:]))))
-    columns = [torch.stack([pad(item[k]) for item in items]).to(device) for k in range(4)]
-    return (*columns, torch.tensor([len(t) for t, *_ in items], device=device))
+    """Each column of ``pairs``' items padded, then the teacher's and the student's lengths and the shared-token mask."""
+    def column(k):
+        n = max(len(item[k]) for item in items)
+        return torch.stack([torch.cat((item[k], item[k].new_zeros((n - len(item[k]), *item[k].shape[1:])))) for item in items]).to(device)
+    lengths = lambda k: torch.tensor([len(item[k]) for item in items], device=device)
+    shared_mask = torch.arange(max(len(item[4]) for item in items), device=device)[None] < lengths(4)[:, None]
+    return (*(column(k) for k in range(6)), lengths(0), lengths(2), shared_mask)
 
 
 def text_side(model, tokens, lexical, lengths, speakers):
@@ -64,6 +79,7 @@ def main():
     parser.add_argument("--front-layers", type=int, default=0)
     parser.add_argument("--steps", type=int, default=20000)
     parser.add_argument("--batch", type=int, default=128)
+    parser.add_argument("--batch-tokens", type=int, default=16384)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--held-out", type=int, default=2000)
     parser.add_argument("--device", default="cuda")
@@ -96,20 +112,25 @@ def main():
     rng = random.Random(1)
 
     def loss_of(items, grad):
-        tokens, lexical, s_tokens, s_lexical, lengths = batch(items, args.device)
+        tokens, lexical, s_tokens, s_lexical, at_teacher, at_student, lengths, s_lengths, m = batch(items, args.device)
         who = torch.tensor([rng.randrange(speakers) for _ in items], device=args.device)
         with torch.no_grad():
-            h, b, mask = text_side(teacher, tokens, lexical, lengths, who)
+            h, b, _ = text_side(teacher, tokens, lexical, lengths, who)
         with torch.set_grad_enabled(grad):
-            sh, sb, _ = text_side(student, s_tokens, s_lexical, lengths, who)
-        m = mask[..., None].float()
-        err = lambda x, y: ((x - y) ** 2 * m).sum() / ((y ** 2) * m).sum()    # relative squared error
-        return err(sh, h), err(sb, b)
+            sh, sb, _ = text_side(student, s_tokens, s_lexical, s_lengths, who)
+        at = lambda x, index: x.gather(1, index[..., None].expand(-1, -1, x.shape[-1]))
+        m = m[..., None].float()
+        err = lambda x, y: ((x - y) ** 2 * m).sum() / ((y ** 2) * m).sum()    # relative squared error over the shared tokens
+        return err(at(sh, at_student), at(h, at_teacher)), err(at(sb, at_student), at(b, at_teacher))
 
     args.output.mkdir(parents=True, exist_ok=True)
     log = open(args.output / "metrics.jsonl", "a")
     by_length = sorted(range(len(train)), key=lambda i: len(train[i][0]))
-    chunks = [by_length[i:i + args.batch] for i in range(0, len(by_length), args.batch)]
+    chunks = [[]]    # runs of similar length: --batch sentences, fewer where they are long (--batch-tokens, padded)
+    for i in by_length:
+        if len(chunks[-1]) == args.batch or (len(chunks[-1]) + 1) * len(train[i][0]) > args.batch_tokens:
+            chunks.append([])
+        chunks[-1].append(i)
     def held_out():
         with torch.no_grad():
             errs = [loss_of(held[i:i + args.batch], False) for i in range(0, len(held), args.batch)]

@@ -260,3 +260,10 @@ def test_words_are_runs_of_phones():
 
 
 PUNCTUATION_OR_SPECIAL = set(SPECIALS) | set(PUNCTUATION)
+
+
+def test_spelling_keeps_marks_on_their_letters():
+    from voca.text import spells
+    assert spells([{"words": ["café", ",", "yes"]}], "cafe\u0301, yes")
+    assert not spells([{"words": ["aa", ",", "bb"]}], "a,abb")
+    assert not spells([{"words": ["कि"]}], "क")
