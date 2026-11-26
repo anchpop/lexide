@@ -33,7 +33,7 @@ required-features = ["local"]
 
 [dependencies]
 lexide-types = { path = "../lexide-types", version = "0.1.0" }
-g2p-types = { git = "https://github.com/anchpop/g2p", rev = "ee4e3494cb78c8e84825995bf56d2b4109935f46" }
+g2p-types = { git = "https://github.com/anchpop/g2p", rev = "77023b4365cc48ad5a49a65826cf4e1c802ff21c" }
 # Async runtime shared by the local and remote backends only.
 tokio = { version = "1.42", features = ["full"], optional = true }
 # Core dependencies (serde also supports the always-available text types).
