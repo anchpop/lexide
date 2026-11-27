@@ -1,25 +1,21 @@
-// CHROMIUM_PATH=/path/to/chromium pnpm test:browser /path/to/<hash>.voca
+// CHROMIUM_PATH=/path/to/chromium pnpm test:browser /path/to/yap.voca [/path/to/espeak.voca]
+// Serves the built package with the given voices standing in for the catalog's, then checks loading, OPFS caching,
+// speaking with every option, reproducibility, and (with an espeak voice) text through ../../web-espeak/dist.
 import assert from 'node:assert/strict'
 import {createServer} from 'node:http'
 import {readFile} from 'node:fs/promises'
 import {basename} from 'node:path'
 import {chromium} from 'playwright-core'
 
-const bundlePath = process.argv[2]
-if (!bundlePath) throw new Error('Supply the exported English .voca file')
-const bundle = await readFile(bundlePath)
-const header = bundle.readUInt32LE(0)
-const config = JSON.parse(bundle.subarray(4, 4 + header))
-const files = new Map([
-  ['/voices/' + basename(bundlePath), bundle],
-  ['/reference/model.json', Buffer.from(JSON.stringify(config))],
-  ['/runner.mjs', await readFile(new URL('../synthesize.mjs', import.meta.url))],
-])
-let offset = 4 + header
-for (const [stage, size] of Object.entries(config.graphs)) {
-  files.set('/reference/' + stage + '.onnx', bundle.subarray(offset, offset + size))
-  offset += size
-}
+const [yapPath, espeakPath] = process.argv.slice(2)
+if (!yapPath) throw new Error('Supply an English yap .voca file')
+const hashOf = path => basename(path, '.voca')
+const files = new Map([[yapPath, espeakPath].filter(Boolean).map(p => ['/pkg/voices/' + basename(p), p])].flat())
+const dist = new URL('../dist/', import.meta.url)
+// The catalog pins hashes; point it at the voices under test.
+const catalog = (await readFile(new URL('catalog.js', dist), 'utf8'))
+  .replace(/(\['eng\/yap', ')\w+/, '$1' + hashOf(yapPath))
+  .replace(/(\['eng\/espeak', ')\w+/, '$1' + (espeakPath ? hashOf(espeakPath) : 'none'))
 const requests = []
 const server = createServer(async (req, res) => {
   requests.push(req.url)
@@ -32,12 +28,16 @@ const server = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'text/html')
     return res.end('<!doctype html><title>Voice test</title>')
   }
-  let data = files.get(req.url)
-  if (/^\/pkg\/[\w.-]+$/.test(req.url)) {
-    data = await readFile(new URL('../dist/' + basename(req.url), import.meta.url)).catch(() => undefined)
+  let data
+  if (files.has(req.url)) data = await readFile(files.get(req.url))
+  else if (req.url === '/pkg/catalog.js') data = Buffer.from(catalog)
+  else if (/^\/pkg\/[\w.-]+$/.test(req.url)) data = await readFile(new URL(basename(req.url), dist)).catch(() => undefined)
+  else if (/^\/espeak\/[\w.-]+$/.test(req.url)) {
+    data = await readFile(new URL('../../web-espeak/dist/' + basename(req.url), import.meta.url)).catch(() => undefined)
   }
   if (!data) { res.writeHead(404); return res.end() }
-  res.setHeader('Content-Type', req.url.endsWith('js') ? 'text/javascript' : 'application/octet-stream')
+  res.setHeader('Content-Type', req.url.endsWith('js') ? 'text/javascript'
+    : req.url.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream')
   res.setHeader('Content-Length', data.length)
   res.end(data)
 })
@@ -68,47 +68,50 @@ try {
   const cold = await load()
   assert.equal(cold.events.filter(e => e.phase === 'download').length, 2)
   console.log('cold', JSON.stringify(cold))
-  const comparisons = await page.evaluate(async rows => {
-    const ort = await import('/pkg/ort.wasm.min.mjs')
-    const {loadVoice} = await import('/runner.mjs')
-    ort.env.wasm.wasmPaths = location.origin + '/pkg/'
-    ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency)
-    const original = await loadVoice(ort, location.origin + '/reference/')
+  const spoken = await page.evaluate(async rows => {
+    const options = [{}, {pitchShift: .1, pitchJitter: 1.5, seed: 3, variety: .7},
+      {pitchRange: 1.6, commaPause: .3, stopPause: .5, voicedVowels: false}, {variety: 0, fixEnding: false}]
     const results = []
     for (const [i, row] of rows.entries()) {
-      const take = 9 * i, speed = 1 + .1 * i
-      const {samples, sampleRate} = await voice.speak(row.grams, {take, speed, speaker: voice.speakers[i]})
-      const {wave, durations} = await original.synthesize(row.ids, row.lexical,
-          {speaker: i, speed, take, seed: 0, commaPause: .15, stopPause: .3})
-      // Original phone page's trim and peak normalization, applied to raw runner PCM.
-      const hop = original.config.hop
-      const phone = Number(durations.slice(0, row.firstPhone).reduce((a, b) => a + b, 0n))
-      const loud = f => {
-        let s = 0
-        for (let i = f * hop; i < (f + 1) * hop; i++) s += wave[i] ** 2
-        return 10 * Math.log10(Math.max(s / hop, 1e-12)) > -50
+      for (const extra of options) {
+        const request = {take: 9 * i, speed: 1 + .1 * i, speaker: voice.speakers[i], ...extra}
+        const [a, b] = [await voice.speak(row.grams, request), await voice.speak(row.grams, request)]
+        if (a.sampleRate !== 24000 || !a.samples.length || a.samples.some(x => !(Math.abs(x) <= 1))) {
+          throw new Error('Bad audio for case ' + i)
+        }
+        if (a.samples.length !== b.samples.length || a.samples.some((x, j) => x !== b.samples[j])) {
+          throw new Error('Same take and seed differ in case ' + i)
+        }
+        results.push(a.samples.length)
       }
-      let first = phone
-      for (let f = 0; f + 1 < wave.length / hop; f++) {
-        if (loud(f) && loud(f + 1)) { first = Math.min(f, phone); break }
-      }
-      const expected = wave.slice(Math.max(0, first - 4) * hop)
-      let peak = 1e-9
-      for (const x of expected) peak = Math.max(peak, Math.abs(x))
-      const gain = Math.min(1, .99 / peak)
-      for (let j = 0; j < expected.length; j++) expected[j] *= gain
-      const bits = new Uint32Array(samples.buffer), target = new Uint32Array(expected.buffer)
-      if (sampleRate !== original.config.sampleRate || bits.length !== target.length || bits.some((v, j) => v !== target[j])) {
-        throw new Error('PCM mismatch in case ' + i)
-      }
-      results.push(bits.length)
     }
-    await original.release()
-    voice.release()
+    const errors = []
+    for (const bad of [{speed: 9}, {speaker: 'nobody'}, {take: 1.5}, {pitch: 1}]) {
+      await voice.speak(rows[0].grams, bad).then(() => errors.push('accepted ' + JSON.stringify(bad)), () => {})
+    }
+    await voice.speak([{words: ['.'], pos: ['PUNCT'], count: 0, phonemes: ''}])
+      .then(() => errors.push('accepted silence'), e => e.message.includes('speech') || errors.push(e.message))
+    if (errors.length) throw new Error(errors.join('; '))
     return results
   }, rows)
-  console.log('identical float32 samples per sentence', comparisons)
+  console.log('reproducible samples per request', spoken)
+  if (espeakPath) {
+    const lengths = await page.evaluate(async () => {
+      const {loadVoice} = await import('/pkg/index.js')
+      const {loadEspeak} = await import('/espeak/index.mjs')
+      const voice = await loadVoice('eng', await loadEspeak('en-us'))
+      const lengths = []
+      for (const text of ['Wait, are you sure?', '‘Don’t’ – d’Artagnan… (hello)!', 'It was only a line.']) {
+        lengths.push((await voice.speak(text, {take: 0})).samples.length)
+      }
+      voice.release()
+      return lengths
+    })
+    assert.ok(lengths.every(n => n > 0))
+    console.log('espeak samples per sentence', lengths)
+  }
   await page.evaluate(async () => {
+    voice.release()
     const cache = await (await navigator.storage.getDirectory()).getDirectoryHandle('lexide-speech')
     await cache.getFileHandle('voice-obsolete', {create: true})
   })

@@ -1,4 +1,4 @@
-"""Compare the built tokenizer with Python using the local training scripts."""
+"""Compare the Rust tokenizer (tts/runtime) with Python using the local training scripts. Needs cargo on PATH."""
 import importlib
 import json
 import os
@@ -12,6 +12,8 @@ WEB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WEB.parent))
 from voca import text
 
+CHECK = ["cargo", "run", "-q", "--release", "--manifest-path", WEB.parent / "runtime/Cargo.toml",
+         "--example", "frontend_parity", "--"]
 scripts = Path(sys.argv[1]) if len(sys.argv) > 1 else WEB.parent / "data/scripts"
 available = sorted(scripts.glob("*_achernar.jsonl"))
 if not available:
@@ -39,6 +41,6 @@ for script in available:
             tokens += len(value)
             print(json.dumps([row["id"], row["grams"], value.ids, value.lexical()]), file=fixtures)
         fixtures.seek(0)
-        subprocess.run(["node", WEB / "test/parity.mjs"], stdin=fixtures, check=True)
+        subprocess.run(CHECK + ["tokens"], stdin=fixtures, check=True)
     print(f"{lang}: {len(validation)} validation, {len(sample)} training, {tokens} tokens", flush=True)
 

@@ -1,3 +1,4 @@
 target/
 www/pkg/
 www/*.safetensors
+www/pizza/

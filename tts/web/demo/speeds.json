@@ -1,0 +1,82 @@
+[
+  {
+    "id": "paradee",
+    "name": "Paradee 8M",
+    "speed": 33.05876366447869
+  },
+  {
+    "id": "pizza",
+    "name": "Pizza TTS",
+    "speed": 16.780496023395283
+  },
+  {
+    "id": "matcha",
+    "name": "Matcha-TTS",
+    "speed": 12.585893221517702
+  },
+  {
+    "id": "nano-edge-tts",
+    "name": "nano-edge-tts",
+    "speed": 12.548901908991926
+  },
+  {
+    "id": "piper",
+    "name": "Piper Medium",
+    "speed": 10.606363012393677
+  },
+  {
+    "id": "linnet",
+    "name": "Linnet en-35M",
+    "speed": 8.513118936896156
+  },
+  {
+    "id": "pocket-2m",
+    "name": "Pocket TTS 2M",
+    "speed": 8.152656472350317
+  },
+  {
+    "id": "supertonic-2",
+    "name": "Supertonic 2",
+    "speed": 7.703124904246106
+  },
+  {
+    "id": "kitten-nano",
+    "name": "KittenTTS Nano",
+    "speed": 5.558076895314598
+  },
+  {
+    "id": "pocket-7m",
+    "name": "Pocket TTS 7M",
+    "speed": 5.416476619533144
+  },
+  {
+    "id": "pocket-18m",
+    "name": "Pocket TTS 18M",
+    "speed": 3.3867936485795562
+  },
+  {
+    "id": "supertonic-3",
+    "name": "Supertonic 3",
+    "speed": 3.0654300564374783
+  },
+  {
+    "id": "kitten-micro",
+    "name": "KittenTTS Micro",
+    "speed": 2.0447347495953827
+  },
+  {
+    "id": "kokoro",
+    "name": "Kokoro 82M",
+    "speed": 1.158249210592327
+  },
+  {
+    "id": "pocket",
+    "name": "Pocket TTS 100M",
+    "speed": 1.1403773646332291
+  },
+  {
+    "id": "kitten-mini",
+    "name": "KittenTTS Mini",
+    "speed": 0.9075996653635954
+  }
+]

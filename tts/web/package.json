@@ -3,15 +3,15 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {".": {"types": "./dist/index.d.ts", "import": "./dist/index.js"}},
-  "files": ["dist", "ORT-LICENSE"],
+  "files": ["dist"],
   "scripts": {
-    "build": "tsc && node build.mjs",
+    "build": "node build.mjs && tsc",
     "prepack": "pnpm run build",
     "test:parity": "python3 test/parity.py",
+    "test:espeak": "python3 test/espeak-parity.py",
     "test:browser": "node test/browser.mjs"
   },
   "devDependencies": {
-    "onnxruntime-web": "1.31.1",
     "playwright-core": "1.61.1",
     "typescript": "5.9.3"
   }

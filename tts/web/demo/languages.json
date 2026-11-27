@@ -1,0 +1,10 @@
+[
+  {"name": "English", "available": true},
+  {"name": "French", "available": false},
+  {"name": "German", "available": false},
+  {"name": "Italian", "available": false},
+  {"name": "Spanish (Spain)", "available": false},
+  {"name": "Spanish (Latin America)", "available": false},
+  {"name": "Portuguese (Brazil)", "available": false},
+  {"name": "Russian", "available": false}
+]
