@@ -14,6 +14,9 @@ def bundle(stages, destination):
         raise ValueError("Exported model and current tokenizer have different fingerprints")
     graphs = {name: (stages / f"{name}.onnx").read_bytes() for name in ("encode", "predict", "melody", "blend", "render")}
     config.update(frontend=frontend_spec(), graphs={name: len(data) for name, data in graphs.items()})
+    if config.get("hints") is False:
+        from plain.stock_espeak import parser_spec
+        config["espeak"] = parser_spec(config["frontend"]["language"])
     header = json.dumps(config, ensure_ascii=False, separators=(",", ":")).encode()
     data = struct.pack("<I", len(header)) + header + b"".join(graphs.values())
     destination.mkdir(parents=True, exist_ok=True)

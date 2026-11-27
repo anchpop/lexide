@@ -125,7 +125,7 @@ def export(checkpoint, out, weights):
     out.mkdir(parents=True, exist_ok=True)
     c = m.config
     manifest = dict(sampleRate=c.sample_rate, hop=c.hop, speakers=c.speakers, maxFrames=c.max_frames,
-                    maxTokens=c.max_tokens, lexical=list(LEXICAL), frontend=frontend_identity(),
+                    maxTokens=c.max_tokens, hints=c.hints, lexical=list(LEXICAL), frontend=frontend_identity(),
                     fingerprint=frontend_fingerprint())
     (out / 'model.json').write_text(json.dumps(manifest))
 
@@ -135,11 +135,10 @@ def export(checkpoint, out, weights):
         path = out / f'{name}.onnx'
         torch.onnx.export(module, values, path, dynamo=False, opset_version=18,
                           input_names=list(inputs), output_names=outputs, dynamic_axes=axis)
-        precision = weights
-        if weights == "render-fp16":
-            precision = "fp16" if name == "render" else "fp32"
-        if precision != "fp32":
-            pack_weights(path, precision)
+        if weights == "compact":
+            # 8-bit weights on the text side; the renderer stays fp16: its 8-bit rounding error repeats with the
+            # generator's 16-sample stride and is heard as a buzz (steady tones at multiples of 1.5 kHz).
+            pack_weights(path, "fp16" if name == "render" else "int8")
         return module(*values)
 
     tokens = torch.tensor([[1, 6, 7, 3, 8, 2]])
@@ -174,10 +173,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('checkpoint')
     parser.add_argument('output', type=Path)
-    parser.add_argument('--weights', choices=['fp32', 'render-fp16', 'fp16', 'int8'], default='fp32')
+    parser.add_argument('--weights', choices=['fp32', 'compact'], default='fp32')
     args = parser.parse_args()
     torch.set_num_threads(1)
     export(args.checkpoint, args.output, args.weights)
-    if args.weights == 'int8':
+    if args.weights == 'compact':
         from scripts.bundle_voice import bundle
         print(bundle(args.output, args.output))

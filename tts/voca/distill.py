@@ -10,17 +10,19 @@ the outputs the teacher gives from yap's phonemes and hints. The rest of the mod
 
 ``--pairs``: two files of the same sentences in the same order, rows {"text", "grams"}: yap's (the teacher's
 input) and stock espeak's (``plain/stock_espeak.py``, the student's). The two token sequences are aligned and the
-student learns the teacher's outputs on the tokens they share: espeak joins some words yap keeps apart ("of the",
-"was a", "husband's"), so a word break on one side only, or a phone the two disagree on, is left to the student.
-A sentence where fewer than ``MIN_SHARED`` of the student's tokens are shared is skipped.
+student learns the teacher's outputs on the tokens that line up: the ones they share, and phones they disagree on
+one for one, where the student has to hear from the context what yap knew (espeak's "reed" for yap's past-tense
+"read" /ɹɛd/, -ed as /st/ or /zd/). espeak joins some words yap keeps apart ("of the", "was a", "husband's"), so a
+word break on one side only is left to the student. A sentence where fewer than ``MIN_SHARED`` of the student's
+tokens line up is skipped.
 """
-import argparse, dataclasses, difflib, json, math, random, time
+import argparse, dataclasses, difflib, json, math, random, re, time
 from pathlib import Path
 import torch
 
 from .config import Config, check_format
 from .model import build_model
-from .text import HINTS, frontend_fingerprint, tokenize
+from .text import HINTS, PHONE_IDS, frontend_fingerprint, tokenize
 from .train import export_model
 
 
@@ -28,10 +30,16 @@ MIN_SHARED = 0.9
 
 
 def shared(teacher, student):
-    """Positions of the tokens the two sequences share, in order: (teacher positions, student positions)."""
-    blocks = difflib.SequenceMatcher(None, teacher, student, autojunk=False).get_matching_blocks()
-    t = [b.a + i for b in blocks for i in range(b.size)]
-    return torch.tensor(t), torch.tensor([b.b + i for b in blocks for i in range(b.size)])
+    """Positions of the tokens that line up, in order: (teacher positions, student positions). Equal tokens, and
+    phones replaced one for one."""
+    pairs = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, teacher, student, autojunk=False).get_opcodes():
+        if op == "equal":
+            pairs += zip(range(i1, i2), range(j1, j2))
+        elif op == "replace" and i2 - i1 == j2 - j1:
+            pairs += [(i, j) for i, j in zip(range(i1, i2), range(j1, j2)) if teacher[i] in PHONE_IDS and student[j] in PHONE_IDS]
+    t, s = zip(*pairs) if pairs else ((), ())
+    return torch.tensor(t, dtype=torch.long), torch.tensor(s, dtype=torch.long)
 
 
 def pairs(yap, plain):
@@ -53,6 +61,17 @@ def pairs(yap, plain):
             lexical = torch.tensor(s.lexical())
             lexical[:, HINTS] = 0
             out.append((torch.tensor(t.ids), torch.tensor(t.lexical()), torch.tensor(s.ids), lexical, at_teacher, at_student))
+    # The words espeak spells the same however yap reads them ("read": /ɹiːd/ for yap's red and reed): every occurrence of
+    # them, read either way, is marked, so weighting them (--ambiguous-weight) teaches the context, not one reading.
+    spans = lambda ids: [range(m.start(), m.end()) for m in re.finditer(r"1+", "".join("1" if i in PHONE_IDS else "0" for i in ids))]
+    ambiguous = set()
+    for t, _, s, _, at_t, at_s in out:
+        replaced = set(at_s[t[at_t] != s[at_s]].tolist())
+        ambiguous |= {tuple(s[w].tolist()) for w in spans(s.tolist()) if replaced.intersection(w)}
+    for k, (t, tl, s, sl, at_t, at_s) in enumerate(out):
+        marked = {j for w in spans(s.tolist()) if tuple(s[w].tolist()) in ambiguous for j in w}
+        out[k] = (t, tl, s, sl, at_t, at_s, torch.tensor([j in marked for j in at_s.tolist()]))
+    print(f"{len(ambiguous)} ambiguous espeak words", flush=True)
     return out, skipped
 
 
@@ -63,7 +82,7 @@ def batch(items, device):
         return torch.stack([torch.cat((item[k], item[k].new_zeros((n - len(item[k]), *item[k].shape[1:])))) for item in items]).to(device)
     lengths = lambda k: torch.tensor([len(item[k]) for item in items], device=device)
     shared_mask = torch.arange(max(len(item[4]) for item in items), device=device)[None] < lengths(4)[:, None]
-    return (*(column(k) for k in range(6)), lengths(0), lengths(2), shared_mask)
+    return (*(column(k) for k in range(7)), lengths(0), lengths(2), shared_mask)
 
 
 def text_side(model, tokens, lexical, lengths, speakers):
@@ -80,6 +99,7 @@ def main():
     parser.add_argument("--steps", type=int, default=20000)
     parser.add_argument("--batch", type=int, default=128)
     parser.add_argument("--batch-tokens", type=int, default=16384)
+    parser.add_argument("--ambiguous-weight", type=float, default=1.0, help="loss weight of the words yap and espeak sometimes disagree on")
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--held-out", type=int, default=2000)
     parser.add_argument("--device", default="cuda")
@@ -112,14 +132,15 @@ def main():
     rng = random.Random(1)
 
     def loss_of(items, grad):
-        tokens, lexical, s_tokens, s_lexical, at_teacher, at_student, lengths, s_lengths, m = batch(items, args.device)
+        tokens, lexical, s_tokens, s_lexical, at_teacher, at_student, ambiguous, lengths, s_lengths, m = batch(items, args.device)
         who = torch.tensor([rng.randrange(speakers) for _ in items], device=args.device)
         with torch.no_grad():
             h, b, _ = text_side(teacher, tokens, lexical, lengths, who)
         with torch.set_grad_enabled(grad):
             sh, sb, _ = text_side(student, s_tokens, s_lexical, s_lengths, who)
         at = lambda x, index: x.gather(1, index[..., None].expand(-1, -1, x.shape[-1]))
-        m = m[..., None].float()
+        # The ambiguous words are a sliver of the tokens but all of what the student must learn from context.
+        m = (m * (1 + (args.ambiguous_weight - 1) * ambiguous) if grad else m)[..., None].float()
         err = lambda x, y: ((x - y) ** 2 * m).sum() / ((y ** 2) * m).sum()    # relative squared error over the shared tokens
         return err(at(sh, at_student), at(h, at_teacher)), err(at(sb, at_student), at(b, at_teacher))
 

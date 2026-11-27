@@ -1,7 +1,7 @@
 """Phonemes for the public models from stock espeak-ng. Set LANGUAGE_CODE to the model language (default eng).
 
 espeak-ng (upstream, commit ee9fa7cc of 2026-11-19 or later: earlier releases print a linking ʲ) is run as
-    espeak-ng -v en-us -q --ipa --sep=_ "<text>"
+    espeak-ng -v en-us -q --ipa --sep=_ -- "<text>"
 for English on each stretch of text between punctuation marks; its words are space-separated, its phonemes `_`-separated, with
 ˈ/ˌ before a stressed vowel. ``tokens`` turns that into the model's phones: ɐ and ᵻ are ə, as in the training labels.
 Punctuation is kept as its own gram, so the model hears where the text pauses.
@@ -30,11 +30,19 @@ LANGUAGES = {
 }
 LANGUAGE = os.environ.get("LANGUAGE_CODE", "eng")
 VOICE, KEEP, FOLD, SPLIT = LANGUAGES[LANGUAGE]
-RHOTIC = {"ɑː", "ɔː", "ɪ", "ɛ", "ʊ"} if LANGUAGE == "eng" else set()   # English coda vowel + ɹ: one phone (more, ear, care, tour, car)
+EN_RHOTIC = {"ɑː", "ɔː", "ɪ", "ɛ", "ʊ"}
+RHOTIC = EN_RHOTIC if LANGUAGE == "eng" else set()   # English coda vowel + ɹ: one phone (more, ear, care, tour, car)
 VOWELS = set("aeiouyæɑɒɔəɚɛɜɪʊʌøœɐɨʉɯɤ")
 # Stock espeak's spelling of a phone our labels spell otherwise (the fork renamed them; same sound).
-RENAME = {"rus": {"y": "ɨ", "ɭ": "ɫ", "ɭʲ": "ɫʲ", "ɭː": "ɫː", 'u"': "u", "ɪ^": "ɪ"}, "por": {"æ": "ɐ", "y": "ɪ"}}.get(LANGUAGE, {})
+RENAMES = {"rus": {"y": "ɨ", "ɭ": "ɫ", "ɭʲ": "ɫʲ", "ɭː": "ɫː", 'u"': "u", "ɪ^": "ɪ"}, "por": {"æ": "ɐ", "y": "ɪ"}}
+RENAME = RENAMES.get(LANGUAGE, {})
 INVENTORY = set(json.load(open(os.path.join(os.path.dirname(__file__), "..", "voca", "inventories", f"{LANGUAGE}.json")))["phones"])
+
+
+def parser_spec(language):
+    voice, keep, fold, split = LANGUAGES[language]
+    return dict(voice=voice, keep=sorted(keep), fold=fold, split=split, vowels=sorted(VOWELS),
+                rhotic=sorted(EN_RHOTIC) if language == "eng" else [], rename=RENAMES.get(language, {}))
 
 
 def in_inventory(p):
@@ -51,7 +59,7 @@ def in_inventory(p):
 
 
 def espeak(text):
-    out = subprocess.run([ESPEAK, "-v", VOICE, "-q", "--ipa", "--sep=_", text], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run([ESPEAK, "-v", VOICE, "-q", "--ipa", "--sep=_", "--", text], capture_output=True, text=True, check=True).stdout
     return re.sub(r"\([a-z-]+\)", "", out).split()       # language-switch markers
 
 
