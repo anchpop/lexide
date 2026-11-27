@@ -1,11 +1,13 @@
 # Lexide web demos
 
-Two static pages with shared navigation and theme settings:
+Three static pages sharing one header and stylesheet (`www/site.css`):
 
 - `/` — Parsley sentence segmentation and tokenization, entirely in-browser.
 - `/pronunciation.html` — Lexide audio-to-IPA transcription, entirely in-browser.
+- `/pizza/` — Pizza TTS, the speech demo. Its page lives in `www/pizza/`; CI copies the built
+  `tts/web` package into `www/pizza/lexide-speech/`.
 
-Both URLs work directly on GitHub Pages, including refreshes and project subpaths.
+All three URLs work directly on GitHub Pages, including refreshes and project subpaths.
 
 ## Segmentation
 
@@ -144,8 +146,9 @@ Microphone access requires HTTPS or localhost and browser permission.
 
 `.github/workflows/web-demo.yml` publishes on every push to `main` that touches
 the demo or the shared decoder: it runs `build.sh` and copies `www/` over the
-`gh-pages` branch. Segmentation weights aren't in git, so the copies already on
-`gh-pages` stay. Keep the branch's `.nojekyll` file. There is no SPA rewrite or
+`gh-pages` branch. Segmentation weights, Pizza's voice bundles
+(`pizza/lexide-speech/voices/`) and its espeak-ng build (`pizza/espeak-ng/`) aren't in
+git, so the copies already on `gh-pages` stay. Keep the branch's `.nojekyll` file. There is no SPA rewrite or
 server to configure.
 
 ### Browser asset versions
@@ -153,7 +156,7 @@ server to configure.
 After any browser source edit, run `python3 build-assets.py` (also included in
 `build.sh`). It emits content-hashed scripts and styles into `www/assets/`,
 rewrites module/worker imports to matching hashed dependencies, and updates
-both HTML pages. This prevents new markup from using stale cached JavaScript.
+the HTML pages. This prevents new markup from using stale cached JavaScript.
 Run this command before serving locally as well.
 
 Publishing copies over `gh-pages` instead of replacing it, so previously
