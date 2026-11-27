@@ -14,7 +14,8 @@ class AssetBuildTests(unittest.TestCase):
     def test_stable_build_and_transitive_cache_invalidation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in assets.ASSETS | {'index.html', 'pronunciation.html'}:
+            (root / 'pizza').mkdir()
+            for name in assets.ASSETS | set(assets.PAGES):
                 shutil.copyfile(DEMO / 'www' / name, root / name)
             first = assets.build(root)
             self.assertEqual(first, assets.build(root))
@@ -24,7 +25,8 @@ class AssetBuildTests(unittest.TestCase):
             for name in ('spectrogram.mjs', 'spectrogram-worker.js', 'audio-explorer.js', 'pronunciation.js'):
                 self.assertNotEqual(first[name], updated[name])
                 self.assertTrue((root / 'assets' / first[name]).exists())
-            self.assertEqual(first['theme.js'], updated['theme.js'])
+            self.assertEqual(first['site.css'], updated['site.css'])
+            self.assertIn(f'"../assets/{first["site.css"]}"', (root / 'pizza' / 'index.html').read_text())
             self.assertIn(updated['pronunciation.js'], (root / 'pronunciation.html').read_text())
             self.assertIn(updated['spectrogram-worker.js'], (root / 'assets' / updated['audio-explorer.js']).read_text())
             decoder = (root / "assets" / updated["pronunciation-decoder.mjs"]).read_text()

@@ -4,38 +4,50 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lexide · segmentation</title>
-<script src="./assets/theme.d45efdaf2d93c633.js"></script>
-<link rel="stylesheet" href="./assets/demo.4678e990c17ac8ec.css">
+<link rel="stylesheet" href="./assets/site.35297c5da78f2d50.css">
+<style>
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: .5em 1em; }
+select, button, textarea { font: inherit; }
+#stats, footer, .meta, .gap-row, .empty { color: var(--muted); font-size: 14px; }
+#stats { margin: 1em 0 .5em; }
+textarea { display: block; box-sizing: border-box; width: 100%; min-height: 9em; padding: .5em; resize: vertical; }
+#out > div { padding: .6em 0; border-bottom: 1px solid var(--line); }
+.sent { white-space: pre-wrap; word-break: break-word; }
+/* Alternating tints so each token boundary reads from the fill alone. */
+.tok { box-shadow: 0 0 0 1px #fff4; border-radius: 3px; padding: 0 1px; }
+.tok.a { background: oklch(0.3 0.035 245); }
+.tok.b { background: oklch(0.3 0.04 80); }
+.gap-row .g { font-family: ui-monospace, monospace; }
+#rust { margin-top: 1.5em; }
+#rust:empty { display: none; }
+footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5em; margin-top: 1em; }
+</style>
 </head>
 <body>
+<header class="site-header">
+  <a class="site-name" href="./">lexide</a>
+  <nav><a href="./pizza/">Speech</a><a href="./" aria-current="page">Segmentation</a><a href="./pronunciation.html">Pronunciation</a></nav>
+</header>
 <main>
-  <nav class="demo-tabs" aria-label="Demos">
-    <a href="./" aria-current="page">Segmentation</a>
-    <a href="./pronunciation.html">Pronunciation</a>
-    <a href="./pizza/">Speech</a>
-  </nav>
-  <header>
-    <h1>parsley segmenter</h1>
-    <nav>
-      <select id="lang" title="language hint for segmentation">
-        <option value="">lang: auto</option>
-        <option value="deu">lang: deu</option>
-        <option value="eng">lang: eng</option>
-        <option value="fra">lang: fra</option>
-        <option value="hin">lang: hin</option>
-        <option value="ita">lang: ita</option>
-        <option value="jpn">lang: jpn</option>
-        <option value="kor">lang: kor</option>
-        <option value="por">lang: por</option>
-        <option value="rus">lang: rus</option>
-        <option value="spa">lang: spa</option>
-      </select>
-      <button id="jpndict" title="japanese boundary dictionary — only affects japanese">jpn dict · 87mb</button>
-      <a href="https://huggingface.co/anchpop/lexide-parsley" target="_blank" rel="noreferrer">model</a>
-      <button id="theme"></button>
-    </nav>
-  </header>
-  <div class="stats" id="stats">loading weights · 8mb</div>
+  <h1>Parsley segmenter</h1>
+  <div class="controls">
+    <select id="lang" title="language hint for segmentation">
+      <option value="">lang: auto</option>
+      <option value="deu">lang: deu</option>
+      <option value="eng">lang: eng</option>
+      <option value="fra">lang: fra</option>
+      <option value="hin">lang: hin</option>
+      <option value="ita">lang: ita</option>
+      <option value="jpn">lang: jpn</option>
+      <option value="kor">lang: kor</option>
+      <option value="por">lang: por</option>
+      <option value="rus">lang: rus</option>
+      <option value="spa">lang: spa</option>
+    </select>
+    <button id="jpndict" title="japanese boundary dictionary — only affects japanese">jpn dict · 87mb</button>
+    <a href="https://huggingface.co/anchpop/lexide-parsley" target="_blank" rel="noreferrer">model</a>
+  </div>
+  <div id="stats">loading weights · 8mb</div>
   <textarea id="input" spellcheck="false" placeholder="paste a passage"></textarea>
   <div id="out"></div>
   <pre id="rust"></pre>

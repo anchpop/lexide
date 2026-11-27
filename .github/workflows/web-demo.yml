@@ -42,8 +42,12 @@ jobs:
         with:
           node-version: lts/*
       - run: tagging/web-demo/build.sh
-      # Pizza TTS at pizza/. Its voice bundles and espeak-ng build are published once by hand and kept by the copy below.
-      - run: pnpm install --frozen-lockfile && pnpm build && demo/assemble.sh ../../tagging/web-demo/www/pizza
+      # Pizza TTS's package, next to its page in www/pizza. Its voice bundles and espeak-ng build are
+      # published once by hand and kept by the copy below.
+      - run: |
+          pnpm install --frozen-lockfile && pnpm build
+          mkdir -p ../../tagging/web-demo/www/pizza/lexide-speech
+          cp dist/*.js dist/*.mjs dist/*.wasm ../../tagging/web-demo/www/pizza/lexide-speech/
         working-directory: tts/web
       # Copy over the published tree rather than replacing it: cached older
       # HTML still needs its own hashed assets.

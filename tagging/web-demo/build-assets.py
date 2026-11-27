@@ -9,11 +9,12 @@ from pathlib import Path
 import re
 
 ASSETS = {
-    'theme.js', 'demo.css', 'pronunciation.css', 'pronunciation.js',
+    'site.css', 'pronunciation.css', 'pronunciation.js',
     'pronunciation-decoder.mjs', 'audio-explorer.js', 'spectrogram-worker.js',
     'spectrogram.mjs', 'pronunciation-worker.js', 'pronunciation-inference.mjs',
 }
-REFERENCE = re.compile(r'''(["'])(\./(?:assets/)?[a-zA-Z0-9_.-]+\.(?:js|mjs|css))\1''')
+REFERENCE = re.compile(r'''(["'])((\.{1,2})/(?:assets/)?[a-zA-Z0-9_.-]+\.(?:js|mjs|css))\1''')
+PAGES = ('index.html', 'pronunciation.html', 'pizza/index.html')
 
 
 def build(root):
@@ -52,10 +53,10 @@ def build(root):
     for name in sorted(ASSETS):
         emit(name)
 
-    for page in ('index.html', 'pronunciation.html'):
+    for page in PAGES:
         def reference(match):
             name = original(match[2])
-            return f'{match[1]}./assets/{emitted[name]}{match[1]}' if name in emitted else match[0]
+            return f'{match[1]}{match[3]}/assets/{emitted[name]}{match[1]}' if name in emitted else match[0]
         path = root / page
         path.write_text(REFERENCE.sub(reference, path.read_text()))
     return emitted

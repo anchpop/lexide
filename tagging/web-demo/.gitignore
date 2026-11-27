@@ -1,4 +1,4 @@
 target/
 www/pkg/
 www/*.safetensors
-www/pizza/
+www/pizza/lexide-speech/

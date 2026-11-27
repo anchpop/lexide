@@ -4,25 +4,28 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pizza TTS</title>
+<link rel="stylesheet" href="../assets/site.35297c5da78f2d50.css">
 <style>
-body { max-width: 650px; margin: 50px auto; padding: 0 10px; line-height: 1.4; font-size: 16px; }
 textarea, #speak { display: block; box-sizing: border-box; width: 100%; font: inherit; padding: .5em; }
 textarea { resize: vertical; }
 #speak { margin-top: .3em; }
 figure { margin: 1em 0; }
-figcaption, details { margin-top: .5em; font-size: 14px; color: #555; }
+figcaption, details { margin-top: .5em; font-size: 14px; color: var(--muted); }
 #chart { display: grid; grid-template-columns: minmax(5em,max-content) auto minmax(4em,1fr); gap: .25em .45em; align-items: center; }
 .track { display: flex; align-items: center; padding-right: 3em; }
-.bar { flex: none; height: .8em; background: #aaa; }
-.pizza { background: black; }
+.bar { flex: none; height: .8em; background: #555; }
+.pizza { background: var(--fg); }
 .value { font-size: 14px; padding-left: .35em; white-space: nowrap; }
 #chart button { min-height: 30px; width: 6em; }   /* fits Play, Loading…, Stop: the label changes, the width does not */
-pre { padding: .65em; background: #f4f4f4; overflow-x: auto; }
 #error:empty { display: none; }
 @media(max-width: 440px) { #chart { grid-template-columns: 6.7em auto minmax(0,1fr); } }
 </style>
 </head>
 <body>
+<header class="site-header">
+<a class="site-name" href="../">lexide</a>
+<nav><a href="./" aria-current="page">Speech</a><a href="../">Segmentation</a><a href="../pronunciation.html">Pronunciation</a></nav>
+</header>
 <main>
 <h1>Pizza TTS</h1>
 <p>Pizza TTS is an open text to speech model. It's 32mb, runs efficiently on a phone, and sounds good.</p>
