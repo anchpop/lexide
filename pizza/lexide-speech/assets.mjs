@@ -1,1 +1,1 @@
-export const wasmHash = '0c59c1b0ca688cace75bc494f2c1a7757008e5b6adbc915ccba269eff5538040'
+export const wasmHash = 'e38ad8b58859bbec4acbe05db4e8bb5f472cfab4a6309edce812502cc7a6188f'
