@@ -1,6 +1,6 @@
 // Voices are served from voices/ next to the package until a public host is chosen.
 export const voiceBase = new URL('./voices/', import.meta.url)
 export const voices = new Map([
-  ['eng/yap', '0d1d58a8236e0a436059d797d29deab0a442452026d56fad486cd516bc9cbd08'],
-  ['eng/espeak', 'a4089dd8d3321da8902a64f57b4d8d7d90bb3461f96af4e54ce5480d2de0ceb6'],
+  ['eng/yap', '9982783a8fa66d0aae6ac700e08e06598959b1e78b016bd6e617f129c45e47d6'],
+  ['eng/espeak', 'fab088305f746fa433f418b6a02f4d52cacddd16fe6333ba7d90543614364089'],
 ])

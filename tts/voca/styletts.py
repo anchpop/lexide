@@ -326,11 +326,14 @@ class SourceModule(nn.Module):
     def forward(self, f0, voicing, x, noise=None):
         """f0 [B, F] in Hz (continuous), voicing [B, F] in [0, 1] (a label or the predicted probability),
         the generator's input x [B, C, F] -> source [B, F * hop]."""
-        cycles = f0[..., None] * self.orders / self.sample_rate      # [B, F, H] per sample, constant within a frame
-        advance = cycles * self.hop % 1
+        # Pitch glides between frame centres (linear in log F0) rather than stepping at frame edges: steps
+        # 94 times a second are a frame-rate buzz, the worse the faster the pitch moves.
+        frequency = F.interpolate(f0.clamp_min(1.0).log()[:, None], scale_factor=self.hop, mode="linear").exp()
+        cycles = (frequency[:, 0, :, None] * self.orders / self.sample_rate).reshape(*f0.shape, self.hop, -1)   # [B, F, hop, H]
+        within = cycles.cumsum(2) - cycles                            # the frame's cycles so far, at each sample
+        advance = cycles.sum(2) % 1
         start = (advance.cumsum(1) - advance) % 1                     # whole cycles dropped: exact in float32 at any length
-        within = cycles[:, :, None] * torch.arange(self.hop, device=f0.device)[:, None]
-        phase = 2 * math.pi * (start[:, :, None] + within).flatten(1, 2).transpose(1, 2)
+        phase = 2 * math.pi * ((start[:, :, None] + within) % 1).flatten(1, 2).transpose(1, 2)
         if noise is None:
             noise = torch.randn_like(phase[:, :1])
         noise = F.conv1d(noise, self.bands, padding=self.TAPS // 2)

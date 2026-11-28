@@ -58,6 +58,24 @@ def test_starts_with_noise_at_its_unvoiced_and_voiced_levels():
     assert abs(difference.std().item() / (0.002 * 2 ** 0.5) - 1) < 0.15
 
 
+def test_pitch_glides_between_frames():
+    """A glide's frequency moves every sample, not in steps at frame edges (held per frame: 1.6 Hz off a smooth curve)."""
+    source = module(noise=False)
+    with torch.no_grad():
+        source.gains.weight[1:9] = 0                                              # the fundamental alone
+    wave = source(torch.linspace(100.0, 300.0, FRAMES)[None], torch.ones(1, FRAMES), X)[0].detach().double()
+    up = torch.nonzero((wave[:-1] < 0) & (wave[1:] >= 0))[:, 0]
+    crossings = up + wave[up] / (wave[up] - wave[up + 1])                        # upward zero crossings, interpolated
+    t, frequency = crossings[1:], RATE / crossings.diff()
+    inner = (t > 8 * HOP) & (t < (FRAMES - 8) * HOP)
+    t, frequency = t[inner], frequency[inner]
+    basis = torch.stack((t ** 0, t, t ** 2), 1)
+    smooth = basis @ torch.linalg.lstsq(basis, frequency[:, None]).solution[:, 0]
+    assert (frequency - smooth).abs().max() < 0.1
+    held = run(module(noise=False), 1.0)
+    assert torch.allclose(held[:-PERIOD], held[PERIOD:], atol=1e-4)                 # a steady vowel is still periodic
+
+
 def test_the_model_chooses_a_sines_phase():
     source = module(noise=False)
     before = run(source, 1.0)
