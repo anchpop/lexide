@@ -34,13 +34,13 @@ enum Piece<'a> {
 }
 
 /// Length in chars of the punctuation unit at `i`, 0 if none: one of the stock_espeak.py MARKS, an apostrophe not
-/// inside an ASCII word, or a dash run standing alone between spaces.
+/// inside a word (l’école is one word), or a dash run standing alone between spaces.
 fn mark_at(chars: &[char], i: usize) -> usize {
     let (prev, next) = (
         i.checked_sub(1).map(|j| chars[j]),
         chars.get(i + 1).copied(),
     );
-    let letter = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphabetic());
+    let letter = |c: Option<char>| c.is_some_and(char::is_alphabetic);
     match chars[i] {
         '.' | ',' | ';' | ':' | '!' | '?' | '…' | '—' | '–' | '(' | ')' | '"' | '“' | '”' | '‘'
         | '«' | '»' | '[' | ']' => 1,
@@ -87,10 +87,10 @@ fn speaks(s: &str) -> bool {
     s.chars().any(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// What espeak is given: curly apostrophes inside ASCII words become straight ones.
+/// What espeak is given: curly apostrophes inside words become straight ones.
 fn espeak_input(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
-    let letter = |j: Option<&char>| j.is_some_and(|c| c.is_ascii_alphabetic());
+    let letter = |j: Option<&char>| j.is_some_and(|c| c.is_alphabetic());
     chars
         .iter()
         .enumerate()
@@ -330,7 +330,8 @@ mod tests {
                 "t:don't ", "m:'", "t:quote", "m:'", "t: a ", "m:--", "t: b a-b"
             ]
         );
-        assert_eq!(espeak_input("Don’t ’x"), "Don't ’x");
+        assert_eq!(espeak_input("Don’t ’x l’école"), "Don't ’x l'école");
+        assert_eq!(split("l’école d'été"), ["t:l’école d'été"]);
         assert_eq!(strip_switches("(en)hɛloʊ (x1) a(b"), "hɛloʊ (x1) a(b");
     }
 }

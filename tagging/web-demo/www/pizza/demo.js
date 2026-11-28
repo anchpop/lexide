@@ -4,8 +4,8 @@ import {loadEspeak} from './espeak-ng/index.mjs'
 const el = id => document.getElementById(id)
 const field = el('text')
 const speak = el('speak')
-const initialText = field.defaultValue
-let voice, initialAudio, context, source, activeButton
+const language = el('language')
+let current, context, source, activeButton
 let generation = 0
 
 function report(error) {
@@ -75,7 +75,7 @@ async function listen(button, makeBuffer) {
   }
 }
 
-async function synthesize(text) {
+async function synthesize(voice, text) {
   try { return await voice.speak(text) }
   catch (error) {
     if (!/exceeds the voice token limit|Invalid predicted frame count/.test(error.message)) throw error
@@ -85,8 +85,8 @@ async function synthesize(text) {
   if (!spaces.length) throw new Error('This word exceeds the voice token limit.')
   const middle = text.length / 2
   const cut = spaces.reduce((a,b) => Math.abs(a.index-middle) <= Math.abs(b.index-middle) ? a : b).index
-  const a = await synthesize(text.slice(0, cut))
-  const b = await synthesize(text.slice(cut).trimStart())
+  const a = await synthesize(voice, text.slice(0, cut))
+  const b = await synthesize(voice, text.slice(cut).trimStart())
   const samples = new Float32Array(a.samples.length + b.samples.length)
   samples.set(a.samples)
   samples.set(b.samples, a.samples.length)
@@ -97,22 +97,34 @@ el('demo').onsubmit = event => {
   event.preventDefault()
   const text = field.value.trim()
   listen(speak, async () => {
-    // Until the voice is ready, the default sentence plays a clip Pizza rendered ahead of time.
-    if (text === initialText && !initialAudio) return context.decodeAudioData(await (await read('./clips/default.mp3')).arrayBuffer())
-    await voiceReady
-    const {samples, sampleRate} = text === initialText ? initialAudio : await synthesize(text)
+    // English has an instant sample while its first local reading is being prepared.
+    if (current.language === 'eng' && text === current.text && !current.sample) {
+      return context.decodeAudioData(await (await read('./clips/default.mp3')).arrayBuffer())
+    }
+    const {samples, sampleRate} = text === current.text && current.sample
+      ? current.sample : await synthesize(await prepare(current), text)
     const buffer = context.createBuffer(1, samples.length, sampleRate)
     buffer.copyToChannel(samples, 0)
     return buffer
   })
 }
 
-async function prepare() {
-  voice = await loadVoice('eng', await loadEspeak('en-us'))
-  initialAudio = await synthesize(initialText)
+function prepare(choice) {
+  choice.ready ??= loadEspeak(choice.voiceName)
+    .then(espeak => loadVoice(choice.language, espeak))
+    .then(voice => {
+      if (choice !== current) {
+        voice.release()
+        throw new Error('Language changed')
+      }
+      choice.voice = voice
+      return voice
+    }).catch(error => {
+      choice.ready = undefined
+      throw error
+    })
+  return choice.ready
 }
-speak.textContent = 'Play'
-speak.disabled = false
 
 async function chart() {
   const models = await (await read('./speeds.json')).json()
@@ -141,14 +153,31 @@ async function chart() {
 }
 
 async function languages() {
-  for (const {name, available} of await (await read('./languages.json')).json()) {
-    const entry = document.createElement('li')
-    entry.textContent = name + (available ? ' (available)' : ' (in preparation)')
-    el('languages').append(entry)
+  const choices = await (await read('./languages.json')).json()
+  for (const {name, language: code, available} of choices) {
+    if (available) language.add(new Option(name, code))
   }
+  language.onchange = () => {
+    ++generation
+    finish()
+    current?.voice?.release()
+    const {language: code, voice: voiceName, text} = choices.find(item => item.language === language.value)
+    // Swap in the new language's example, but keep anything the visitor typed.
+    if (!field.value.trim() || field.value === current?.text) field.value = text
+    current = {language: code, voiceName, text}
+    field.lang = voiceName
+    el('error').textContent = ''
+    if (code === 'eng') {
+      const choice = current
+      prepare(choice).then(voice => synthesize(voice, text))
+        .then(sample => { choice.sample = sample })
+        .catch(error => { if (choice === current) report(error) })
+    }
+  }
+  language.onchange()
+  speak.textContent = 'Play'
+  speak.disabled = false
 }
 
-const voiceReady = prepare()
-voiceReady.catch(report)
 chart().catch(report)
 languages().catch(report)

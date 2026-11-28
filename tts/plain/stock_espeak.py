@@ -12,7 +12,8 @@ import json, os, re, subprocess, sys, unicodedata
 from concurrent.futures import ThreadPoolExecutor
 
 ESPEAK = os.environ.get("ESPEAK", "espeak-ng")
-MARKS = r"(?:[.,;:!?…—–()\"“”‘«»\[\]]|(?<![A-Za-z])['’]|['’](?![A-Za-z])|(?<=\s)-+(?=\s))+"
+LETTER = r"[^\W\d_]"     # any script's letter: l’école is one word
+MARKS = rf"(?:[.,;:!?…—–()\"“”‘«»\[\]]|(?<!{LETTER})['’]|['’](?!{LETTER})|(?<=\s)-+(?=\s))+"
 # Per language (our code: its espeak voice and how g2p's labels differ from espeak's units, see g2p's README):
 # vowel units kept whole (g2p merges these; other vowel sequences are separate phones), vowels folded, and
 # espeak units split in two.
@@ -113,7 +114,7 @@ def grams(text):
     for m in list(re.finditer(MARKS, text)) + [None]:
         chunk = text[at:m.start() if m else len(text)]
         if re.search(r"\w", chunk):
-            words = espeak(re.sub(r"(?<=[A-Za-z])’(?=[A-Za-z])", "'", chunk))
+            words = espeak(re.sub(rf"(?<={LETTER})’(?={LETTER})", "'", chunk))
             out.append({"words": chunk.split(), "pos": ["X"] * len(chunk.split()), "count": 0,
                         "phonemes": " # ".join(word_phones(w) for w in words)})
         if m:

@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="../assets/site.35297c5da78f2d50.css">
 <style>
 textarea, #speak { display: block; box-sizing: border-box; width: 100%; font: inherit; padding: .5em; }
+select { margin-bottom: .3em; font: inherit; }
 textarea { resize: vertical; }
 #speak { margin-top: .3em; }
 figure { margin: 1em 0; }
@@ -30,7 +31,8 @@ figcaption, details { margin-top: .5em; font-size: 14px; color: var(--muted); }
 <h1>Pizza TTS</h1>
 <p>Pizza TTS is an open text to speech model. It's 32mb, runs efficiently on a phone, and sounds good.</p>
 <form id="demo">
-<textarea id="text" rows="3" maxlength="4000" aria-label="English text to speak" required>Take a moment to listen to the melodious sound of fully-local, mobile-capable, text to speech.</textarea>
+<select id="language" aria-label="Language"></select>
+<textarea id="text" rows="3" maxlength="4000" aria-label="Text to speak" required></textarea>
 <button id="speak" disabled>Loading voice…</button>
 </form>
 <p id="error" role="status"></p>
@@ -43,7 +45,7 @@ figcaption, details { margin-top: .5em; font-size: 14px; color: var(--muted); }
 <p>Pocket TTS weights by Kyutai (<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>). Linnet model weights by VoxRT, licensed under the <a href="https://huggingface.co/VoxRT/linnet-en-35m/blob/main/WEIGHTS_LICENSE.md">Linnet Weights License 1.0</a>. Powered by Linnet (VoxRT).</p>
 </details>
 </figure>
-<p>Download the model on <a>Hugging Face (link coming soon)</a>, <a href="https://github.com/anchpop/lexide/tree/main/tts">read the code</a>, or use it today:</p>
+<p>Download the model on <a href="https://huggingface.co/anchpop/pizza-tts">Hugging Face</a>, <a href="https://github.com/anchpop/lexide/tree/main/tts">read the code</a>, or use it today:</p>
 <pre aria-label="Browser JavaScript example"><code>import {loadVoice} from './lexide-speech/index.js'
 import {loadEspeak} from './espeak-ng/index.mjs'
 
@@ -51,8 +53,6 @@ const espeak = await loadEspeak('en-us')
 const voice = await loadVoice('eng', espeak)
 const {samples, sampleRate} = await voice.speak('Hello!')
 voice.release()</code></pre>
-<p>Pizza TTS is available in a variety of languages:</p>
-<ul id="languages"></ul>
 </main>
 <script type="module" src="./demo.js"></script>
 </body>

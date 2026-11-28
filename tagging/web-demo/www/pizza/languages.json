@@ -1,10 +1,10 @@
 [
-  {"name": "English", "available": true},
-  {"name": "French", "available": false},
-  {"name": "German", "available": false},
-  {"name": "Italian", "available": false},
-  {"name": "Spanish (Spain)", "available": false},
-  {"name": "Spanish (Latin America)", "available": false},
-  {"name": "Portuguese (Brazil)", "available": false},
-  {"name": "Russian", "available": false}
+  {"name": "English", "language": "eng", "voice": "en-us", "text": "Type anything you want and press \"play\" to hear the melodious sound of fully-local, mobile-capable, text to speech.", "available": true},
+  {"name": "French", "language": "fra", "voice": "fr-fr", "text": "Le dernier train part avant la nuit.", "available": true},
+  {"name": "German", "language": "deu", "voice": "de", "text": "Der letzte Zug fährt um sieben Uhr.", "available": true},
+  {"name": "Italian", "language": "ita", "voice": "it", "text": "Il treno parte tra pochi minuti.", "available": true},
+  {"name": "Spanish (Spain)", "language": "spa-es", "voice": "es", "text": "El tren sale de la estación a las cinco.", "available": true},
+  {"name": "Spanish (Latin America)", "language": "spa", "voice": "es-419", "text": "El último tren sale al atardecer.", "available": true},
+  {"name": "Portuguese (Brazil)", "language": "por", "voice": "pt-br", "text": "O trem chega daqui a cinco minutos.", "available": true},
+  {"name": "Russian", "language": "rus", "voice": "ru", "text": "Поезд уходит через пять минут.", "available": true}
 ]
