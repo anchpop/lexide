@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 use crate::frontend::{Gram, is_space, words};
 
@@ -124,6 +124,54 @@ fn strip_switches(ipa: &str) -> String {
     out + rest
 }
 
+/// Close stand-ins, best first, for sounds a voice may lack (espeak reads loanwords and names with other languages'
+/// sounds: Spanish "Sabadell" ʎ, Russian "Wi-Fi" w).
+const NEAR: &[(&str, &[&str])] = &[
+    ("ʎ", &["ʝ", "j", "l"]),
+    ("w", &["u", "v", "ʋ"]),
+    ("ʊ", &["u"]),
+    ("ɪ", &["i"]),
+    ("ʏ", &["y", "i"]),
+    ("y", &["i", "u"]),
+    ("ʉ", &["u"]),
+    ("ɨ", &["i"]),
+    ("ɵ", &["o"]),
+    ("ø", &["e", "ə"]),
+    ("œ", &["ɛ", "e"]),
+    ("ɛ", &["e"]),
+    ("e", &["ɛ"]),
+    ("ɔ", &["o"]),
+    ("o", &["ɔ"]),
+    ("æ", &["a", "ɛ"]),
+    ("ɑ", &["a"]),
+    ("a", &["ɑ"]),
+    ("ʌ", &["a", "ə"]),
+    ("ɐ", &["a", "ə"]),
+    ("ə", &["ɐ", "e"]),
+    ("ɚ", &["ə", "ɜ"]),
+    ("ɜ", &["ə", "ɛ"]),
+    ("ɫ", &["l"]),
+    ("l", &["ɫ"]),
+    ("ɹ", &["r", "ɾ", "ʁ"]),
+    ("r", &["ɾ", "ʁ", "ɹ"]),
+    ("ɾ", &["r", "ɹ"]),
+    ("ʁ", &["r", "x"]),
+    ("h", &["x"]),
+    ("x", &["h", "k"]),
+    ("ç", &["x", "ʃ", "h"]),
+    ("θ", &["s", "t"]),
+    ("ð", &["d", "z"]),
+    ("ŋ", &["n"]),
+    ("ɲ", &["nʲ", "n"]),
+    ("ʝ", &["j"]),
+    ("β", &["b", "v"]),
+    ("ɣ", &["ɡ", "x"]),
+    ("ʒ", &["ʃ", "z"]),
+    ("ɕ", &["ʃ", "s"]),
+    ("ʑ", &["ʒ", "z"]),
+    ("ʔ", &[]),
+];
+
 #[derive(Clone)]
 struct Unit {
     stress: String,
@@ -164,7 +212,11 @@ impl Espeak {
                 Piece::Text(s) if speaks(s) => {
                     let trace =
                         strip_switches(ipa.next().ok_or("fewer phonemizations than chunks")?);
-                    let phones: Vec<String> = words(&trace).map(|w| self.word_phones(w)).collect();
+                    // A word whose every sound the voice lacks has no phones left: leave it out.
+                    let phones: Vec<String> = words(&trace)
+                        .map(|w| self.word_phones(w))
+                        .filter(|w| !w.is_empty())
+                        .collect();
                     (
                         words(s).map(String::from).collect(),
                         "X",
@@ -217,12 +269,31 @@ impl Espeak {
                 .rev()
                 .find(|&e| self.inventory.contains(&p[bounds[i]..bounds[e]]))
             else {
-                return vec![p.to_string()];
+                // No inventory phone starts here: put the closest stand-in for this one character, or drop it.
+                out.extend(self.nearest(&p[bounds[i]..bounds[i + 1]]));
+                i += 1;
+                continue;
             };
             out.push(p[bounds[i]..bounds[end]].to_string());
             i = end;
         }
         out
+    }
+
+    /// The closest inventory phone to one the voice lacks: without length and modifier marks, then a near sound.
+    fn nearest(&self, phone: &str) -> Option<String> {
+        let bare: String = phone
+            .nfd()
+            .filter(|&c| !is_combining_mark(c) && !matches!(c, 'ː' | 'ˑ' | 'ʲ' | 'ʷ' | 'ʰ' | 'ˠ'))
+            .collect();
+        let near = NEAR
+            .iter()
+            .find(|(k, _)| *k == bare)
+            .map_or(&[][..], |(_, v)| *v);
+        std::iter::once(bare.as_str())
+            .chain(near.iter().copied())
+            .find(|p| self.inventory.contains(*p))
+            .map(String::from)
     }
 
     /// The model's units for one espeak unit: folds, explicit splits, geminates, and vowel-led clusters.
@@ -290,7 +361,8 @@ impl Espeak {
                 Some(prev)
                     if unit.phone == prev.phone
                         && !self.vowel(&unit.phone)
-                        && unit.stress.is_empty() =>
+                        && unit.stress.is_empty()
+                        && self.inventory.contains(&format!("{}ː", unit.phone)) =>
                 {
                     prev.phone.push('ː')
                 }
@@ -333,5 +405,28 @@ mod tests {
         assert_eq!(espeak_input("Don’t ’x l’école"), "Don't ’x l'école");
         assert_eq!(split("l’école d'été"), ["t:l’école d'été"]);
         assert_eq!(strip_switches("(en)hɛloʊ (x1) a(b"), "hɛloʊ (x1) a(b");
+    }
+
+    #[test]
+    fn sounds_the_voice_lacks_get_stand_ins() {
+        let spec = Spec {
+            voice: "x".into(),
+            keep: vec![],
+            vowels: ["a", "i", "u", "e"].map(String::from).to_vec(),
+            rhotic: vec![],
+            split: HashMap::new(),
+            fold: HashMap::new(),
+            rename: HashMap::new(),
+        };
+        let espeak = Espeak::new(
+            spec,
+            &["a", "i", "u", "e", "m", "j", "l", "v", "s"].map(String::from),
+        );
+        // Spanish ʎ, Portuguese geminate m, Russian w and an unknown ʔ (dropped).
+        assert_eq!(espeak.word_phones("s_ˈa_ʎ_e"), "s ˈa j e");
+        assert_eq!(espeak.word_phones("ʤ_ˈi_mː_i"), "ˈi m i");
+        assert_eq!(espeak.word_phones("w_ˈa_ʔ_s"), "u ˈa s");
+        let grams = espeak.grams("ʔa sa", &["ʔ s_ˈa".into()]).unwrap();
+        assert_eq!(grams[0].phonemes, "s ˈa");
     }
 }
